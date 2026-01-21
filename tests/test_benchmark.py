@@ -23,7 +23,9 @@ def test_benchmark_throughput(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
+            inc_count
+        )
 
         for i in range(500000):
             s.emit(i)
@@ -50,7 +52,9 @@ def test_benchmark_throughput_sync_flag(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
+            inc_count
+        )
 
         for i in range(500000):
             s.emit(i)
@@ -76,7 +80,9 @@ def test_benchmark_batch_throughput(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
+            inc_count
+        )
 
         # Emit in batches of 1000
         batch = list(range(1000))
@@ -268,4 +274,3 @@ def test_benchmark_python_loop_separated(benchmark):
 
     result = benchmark(run_pipeline)
     assert result == 250000
-
