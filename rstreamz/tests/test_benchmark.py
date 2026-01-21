@@ -214,3 +214,63 @@ def test_memory_stability():
     # We check that growth is less than 5MB (generous for overhead).
     diff = end_mem - start_mem
     assert diff < 10.0, f"Memory leaked? Growth: {diff:.2f} MB"
+
+
+def test_benchmark_python_map_filter(benchmark):
+    """
+    Benchmark using Python's built-in map and filter functions.
+    """
+
+    def run_pipeline():
+        # Pipeline: map(x+1) -> filter(x%2==0) -> map(x/2)
+        iterable = range(100000)
+
+        # map: x + 1
+        mapped1 = map(lambda x: x + 1, iterable)
+
+        # filter: x % 2 == 0
+        filtered = filter(lambda x: x % 2 == 0, mapped1)
+
+        # map: x / 2
+        mapped2 = map(lambda x: x / 2, filtered)
+
+        # Sink: consume count
+        count = sum(1 for _ in mapped2)
+        return count
+
+    result = benchmark(run_pipeline)
+    assert result == 50000
+
+
+def test_benchmark_python_loop_separated(benchmark):
+    """
+    Benchmark using raw Python loops with intermediate list materialization (eager).
+    This contrasts with the 'fused' loop in test_benchmark_pure_python.
+    """
+
+    def run_pipeline():
+        data = range(100000)
+
+        # map
+        step1 = []
+        for x in data:
+            step1.append(x + 1)
+
+        # filter
+        step2 = []
+        for x in step1:
+            if x % 2 == 0:
+                step2.append(x)
+
+        # map
+        step3 = []
+        for x in step2:
+            step3.append(x / 2)
+
+        # count
+        count = len(step3)
+        return count
+
+    result = benchmark(run_pipeline)
+    assert result == 50000
+
