@@ -10,10 +10,6 @@ build:
 build-release:
     cd rstreamz && maturin develop --release
 
-# Build with reference pool disabled for maximum performance
-build-fast:
-    cd rstreamz && RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release
-
 # Run all tests
 test: build
     cd rstreamz && ../.venv/bin/pytest tests/ -v

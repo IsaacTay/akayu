@@ -1,36 +1,4 @@
 //! # rstreamz - High-performance reactive streams for Python
-//!
-//! ## Performance: `pyo3_disable_reference_pool` Flag
-//!
-//! This crate supports the `pyo3_disable_reference_pool` compilation flag which provides
-//! 4-7x performance improvement by eliminating synchronization overhead in PyO3's
-//! deferred reference counting system.
-//!
-//! ### How to enable
-//! ```bash
-//! RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release
-//! ```
-//!
-//! ### What it does
-//! By default, when `Py<T>` is dropped without holding the GIL, PyO3 defers the
-//! reference count decrement to a global pool, which requires synchronization on
-//! every Python-Rust boundary crossing.
-//!
-//! With this flag enabled, the global reference pool is removed entirely.
-//!
-//! ### Requirements
-//! **All `Py<T>` objects must be dropped while holding the GIL.** If a `Py<T>` is
-//! dropped without the GIL, the process will abort (not panic).
-//!
-//! This crate is designed to be compatible with this flag:
-//! - `from_text_file` wraps its thread body in `Python::attach` with `move` closure
-//! - All other operations happen within Python callbacks where GIL is held
-//!
-//! ### Drawbacks
-//! - **Process abort on violation**: Dropping `Py<T>` outside GIL aborts (no recovery)
-//! - **Compile-time only**: Users must rebuild from source to benefit
-//! - **Ecosystem compatibility**: Third-party code may not be compatible
-//! - **Debugging difficulty**: Aborts provide no stack trace or error message
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -168,8 +136,6 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
 
     thread::spawn(move || {
         // Wrap entire thread in Python::attach so stream_clone drops with GIL held
-        // This is required for pyo3_disable_reference_pool compatibility
-        // Inner closure must be `move` to take ownership of stream_clone
         Python::attach(move |py| {
             // Open file with GIL released
             let file = match py.detach(|| std::fs::File::open(&path)) {
