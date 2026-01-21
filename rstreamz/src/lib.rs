@@ -24,6 +24,7 @@ static BUILD_STARMAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static IS_SYNC_CALLABLE: OnceLock<Py<PyAny>> = OnceLock::new();
 static COMPOSE_MAPS: OnceLock<Py<PyAny>> = OnceLock::new();
 static COMPOSE_FILTERS: OnceLock<Py<PyAny>> = OnceLock::new();
+static PARALLEL_EXECUTE: OnceLock<Py<PyAny>> = OnceLock::new();
 
 fn get_is_awaitable() -> PyResult<&'static Py<PyAny>> {
     IS_AWAITABLE.get().ok_or_else(|| {
@@ -75,6 +76,12 @@ fn get_compose_maps() -> PyResult<&'static Py<PyAny>> {
 
 fn get_compose_filters() -> PyResult<&'static Py<PyAny>> {
     COMPOSE_FILTERS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_parallel_execute() -> PyResult<&'static Py<PyAny>> {
+    PARALLEL_EXECUTE.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
     })
 }
@@ -214,6 +221,8 @@ enum NodeLogic {
     },
     Zip { buffers: Vec<VecDeque<Py<PyAny>>> },
     BatchMap { func: Py<PyAny> },
+    /// Parallel node: propagates to downstreams in parallel threads
+    Parallel,
 }
 
 /// A reactive stream for processing data through a pipeline of operations.
@@ -398,6 +407,48 @@ def _compose_filters(p1, p2):
             return True
         composed_long._chain = all_preds
         return composed_long
+
+from concurrent.futures import ThreadPoolExecutor
+import contextvars
+_thread_pool = None
+
+def _parallel_execute(val, downstreams):
+    """Execute downstream updates in parallel using a thread pool."""
+    global _thread_pool
+    if _thread_pool is None:
+        _thread_pool = ThreadPoolExecutor(max_workers=8)
+
+    def make_update_fn(d, v):
+        # Copy context for THIS specific thread (each thread gets its own copy)
+        ctx = contextvars.copy_context()
+        def update_in_context():
+            return ctx.run(d.update, v)
+        return update_in_context
+
+    # Submit all downstream updates to the thread pool
+    futures = []
+    for d in downstreams:
+        futures.append(_thread_pool.submit(make_update_fn(d, val)))
+
+    # Wait for all to complete and collect results
+    results = []
+    errors = []
+    for f in futures:
+        try:
+            res = f.result()
+            if res is not None:
+                results.append(res)
+        except Exception as e:
+            errors.append(e)
+
+    # If any errors occurred, raise the first one
+    if errors:
+        raise errors[0]
+
+    # If any returned coroutines, gather them
+    if results:
+        return asyncio.gather(*results)
+    return None
 "#;
 
 #[pymethods]
@@ -813,6 +864,82 @@ impl Stream {
         Ok(node)
     }
 
+    /// Create a parallel branch point that executes all downstreams concurrently.
+    ///
+    /// When values flow through a parallel node, all downstream branches are
+    /// executed in parallel threads rather than sequentially. This is useful for
+    /// I/O-bound operations where branches can overlap their waiting time.
+    ///
+    /// Use `seq()` to switch back to sequential execution after parallel branches.
+    ///
+    /// Returns:
+    ///     A new Stream that will propagate values to its downstreams in parallel.
+    ///
+    /// Example:
+    ///     >>> s = Stream()
+    ///     >>> p = s.par()  # Create parallel branch point
+    ///     >>> a = p.map(load_from_disk)   # Branch 1
+    ///     >>> b = p.map(fetch_from_api)   # Branch 2
+    ///     >>> merged = union(a, b).seq()  # Back to sequential
+    ///     >>> s.emit(filename)  # a and b run in parallel
+    #[pyo3(name = "par")]
+    fn par(&mut self, py: Python) -> PyResult<Py<Self>> {
+        let node = Py::new(
+            py,
+            Self {
+                logic: NodeLogic::Parallel,
+                downstreams: Vec::new(),
+                name: format!("{}.par", self.name),
+                asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
+            },
+        )?;
+
+        self.downstreams.push(node.clone_ref(py));
+        Ok(node)
+    }
+
+    /// Alias for `par()`. Create a parallel branch point.
+    fn parallel(&mut self, py: Python) -> PyResult<Py<Self>> {
+        self.par(py)
+    }
+
+    /// Create a sequential branch point (explicit synchronization point).
+    ///
+    /// This is the default behavior for streams, but can be used explicitly
+    /// after parallel sections to clearly indicate sequential execution resumes.
+    ///
+    /// Returns:
+    ///     A new Stream that will propagate values to its downstreams sequentially.
+    ///
+    /// Example:
+    ///     >>> s = Stream()
+    ///     >>> p = s.par()
+    ///     >>> a = p.map(slow_op1)
+    ///     >>> b = p.map(slow_op2)
+    ///     >>> merged = union(a, b).seq()  # Explicit sequential point
+    ///     >>> merged.map(f1).sink(...)    # Sequential from here
+    ///     >>> merged.map(f2).sink(...)
+    fn seq(&mut self, py: Python) -> PyResult<Py<Self>> {
+        let node = Py::new(
+            py,
+            Self {
+                logic: NodeLogic::Source,
+                downstreams: Vec::new(),
+                name: format!("{}.seq", self.name),
+                asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
+            },
+        )?;
+
+        self.downstreams.push(node.clone_ref(py));
+        Ok(node)
+    }
+
     /// Merge multiple streams into one.
     ///
     /// Creates a new stream that emits elements from this stream and all
@@ -1136,6 +1263,22 @@ impl Stream {
                     output_batch.push(item?.into());
                 }
             }
+            NodeLogic::Parallel => {
+                // Parallel node processes batch items sequentially through parallel propagation
+                // Each item is propagated to all downstreams in parallel
+                let mut futures = Vec::new();
+                for x in items {
+                    if let Some(f) = self.propagate_parallel(py, x)? {
+                        futures.push(f);
+                    }
+                }
+                if !futures.is_empty() {
+                    let gather = get_gather()?;
+                    let gathered = gather.call1(py, (futures,))?;
+                    return Ok(Some(gathered));
+                }
+                return Ok(None);
+            }
         }
 
         self.propagate_batch(py, output_batch)
@@ -1352,6 +1495,10 @@ impl Stream {
                     None => return Ok(None),
                 }
             }
+            NodeLogic::Parallel => {
+                // Parallel node passes value through, but uses parallel propagation
+                return self.propagate_parallel(py, x);
+            }
         };
         if let Some(val) = result {
             return self.propagate(py, val);
@@ -1376,6 +1523,34 @@ impl Stream {
         )?;
         self.downstreams.push(tag_node);
         Ok(())
+    }
+
+    /// Propagate value to downstreams in parallel using thread pool.
+    fn propagate_parallel(&self, py: Python, val: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        let n = self.downstreams.len();
+        if n == 0 {
+            return Ok(None);
+        }
+
+        // For single downstream, no parallelism needed - just use normal propagation
+        if n == 1 {
+            let mut child_ref = self.downstreams[0].borrow_mut(py);
+            return child_ref.update(py, val);
+        }
+
+        // Multiple downstreams: use thread pool for parallel execution
+        let parallel_execute = get_parallel_execute()?;
+        let downstreams_list: Vec<Py<Self>> =
+            self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
+        let dl = PyList::new(py, downstreams_list)?;
+        let result = parallel_execute.call1(py, (val, dl))?;
+
+        // _parallel_execute returns None or an asyncio.gather coroutine
+        if result.is_none(py) {
+            Ok(None)
+        } else {
+            Ok(Some(result))
+        }
     }
 
     /// Optimize the topology on first emit.
@@ -1695,6 +1870,7 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
     let compose_maps = helpers_module.getattr("_compose_maps")?;
     let compose_filters = helpers_module.getattr("_compose_filters")?;
+    let parallel_execute = helpers_module.getattr("_parallel_execute")?;
 
     let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
@@ -1704,6 +1880,7 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
     let _ = COMPOSE_MAPS.set(compose_maps.unbind());
     let _ = COMPOSE_FILTERS.set(compose_filters.unbind());
+    let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
