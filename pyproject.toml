@@ -19,6 +19,8 @@ dev = [
     "pytest-asyncio>=0.23",
     "pytest-benchmark>=4.0",
     "maturin>=1.10,<2.0",
+    "streamz>=0.6",
+    "psutil>=5.0",
 ]
 
 [tool.pytest.ini_options]
