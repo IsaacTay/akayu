@@ -4,19 +4,19 @@ default:
 
 # Build the Rust extension in development mode
 build:
-    cd rstreamz && maturin develop
+    maturin develop
 
 # Build the Rust extension in release mode
 build-release:
-    cd rstreamz && maturin develop --release
+    maturin develop --release
 
 # Run all tests
 test: build
-    cd rstreamz && ../.venv/bin/pytest tests/ -v
+    pytest tests/ -v
 
 # Run tests without benchmarks (faster)
 test-quick: build
-    cd rstreamz && ../.venv/bin/pytest tests/ -v \
+    pytest tests/ -v \
         --ignore=tests/test_benchmark.py \
         --ignore=tests/test_benchmark_split.py \
         --ignore=tests/test_ops_benchmark.py \
@@ -27,29 +27,29 @@ test-quick: build
 
 # Run benchmarks only
 bench: build-release
-    cd rstreamz && ../.venv/bin/pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v
+    pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v
 
 # Run clippy lints
 clippy:
-    cd rstreamz && cargo clippy
+    cargo clippy
 
 # Format Rust code
 fmt:
-    cd rstreamz && cargo fmt
+    cargo fmt
 
 # Run ruff linter on Python tests
 lint:
-    ruff check rstreamz/tests/
+    ruff check tests/
 
 # Clean build artifacts
 clean:
-    cd rstreamz && cargo clean
-    rm -rf rstreamz/*.so rstreamz/*.pyd
+    cargo clean
+    rm -rf *.so *.pyd
 
 # Build wheels for Python 3.12 and 3.13
 build-wheels:
-    mkdir -p rstreamz/dist
-    rm -f rstreamz/dist/*.whl
-    cd rstreamz && maturin build --release --interpreter python3.12 python3.13 --out dist
+    mkdir -p dist
+    rm -f dist/*.whl
+    maturin build --release --interpreter python3.12 python3.13 --out dist
     @echo "Wheels built:"
-    @ls -la rstreamz/dist/*.whl
+    @ls -la dist/*.whl

@@ -108,9 +108,10 @@ ruff check tests   # Lint Python
     - `test_ops_benchmark.py`: Individual operation benchmarks.
     - `test_benchmark_split.py`: Split expansion efficiency tests.
     - `test_concurrency_benchmark.py`: Async concurrency performance tests.
+    - `test_parallel.py`: Parallel branch execution tests (`par()`, `seq()`).
 - `Cargo.toml`: Rust dependencies and configuration.
 - `pyproject.toml`: Python package configuration.
-- `flake.nix`: Nix environment configuration (in parent directory).
+- `flake.nix`: Nix environment configuration.
 
 ## Development Workflow
 
