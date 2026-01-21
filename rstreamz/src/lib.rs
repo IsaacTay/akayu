@@ -91,18 +91,16 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
         };
         let reader = BufReader::new(file);
 
-        for line in reader.lines() {
-            if let Ok(text) = line {
-                Python::attach(|py| {
-                    if let Ok(mut s) = stream_clone.try_borrow_mut(py) {
-                        let py_str = PyString::new(py, &text);
-                        let _ = s.emit(py, py_str.into());
-                    }
-                });
-
-                if let Some(delay) = interval {
-                    thread::sleep(Duration::from_secs_f64(delay));
+        for text in reader.lines().map_while(Result::ok) {
+            Python::attach(|py| {
+                if let Ok(mut s) = stream_clone.try_borrow_mut(py) {
+                    let py_str = PyString::new(py, &text);
+                    let _ = s.emit(py, py_str.into());
                 }
+            });
+
+            if let Some(delay) = interval {
+                thread::sleep(Duration::from_secs_f64(delay));
             }
         }
     });
@@ -618,8 +616,8 @@ impl Stream {
             }
 
             for val in output_batch {
-                for i in 0..len - 1 {
-                    let res = child_refs[i].update(py, val.clone_ref(py))?;
+                for child in child_refs.iter_mut().take(len - 1) {
+                    let res = child.update(py, val.clone_ref(py))?;
                     if let Some(f) = res {
                         futures.push(f);
                     }
@@ -634,7 +632,7 @@ impl Stream {
             if !futures.is_empty() {
                 let gather = get_gather()?;
                 let gathered = gather.call1(py, (futures,))?;
-                return Ok(Some(gathered.into()));
+                return Ok(Some(gathered));
             }
         }
         Ok(None)
@@ -651,7 +649,7 @@ impl Stream {
                     self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
                 let dl = PyList::new(py, downstreams_list)?;
                 let coro = process_async.call1(py, (val, dl))?;
-                return Ok(Some(coro.into()));
+                return Ok(Some(coro));
             }
         }
         let mut futures = Vec::new();
@@ -665,7 +663,7 @@ impl Stream {
         if !futures.is_empty() {
             let gather = get_gather()?;
             let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered.into()));
+            return Ok(Some(gathered));
         }
         Ok(None)
     }
@@ -730,7 +728,7 @@ impl Stream {
                             self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
                         let dl = PyList::new(py, downstreams_list)?;
                         let coro = filter_async.call1(py, (res, x, dl))?;
-                        return Ok(Some(coro.into()));
+                        return Ok(Some(coro));
                     }
                 }
                 if res.is_truthy(py)? { Some(x) } else { None }
