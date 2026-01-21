@@ -202,7 +202,11 @@ enum NodeLogic {
     Flatten,
     Collect { buffer: Vec<Py<PyAny>> },
     Sink { func: Py<PyAny> },
-    Accumulate { func: Py<PyAny>, state: Py<PyAny> },
+    Accumulate {
+        func: Py<PyAny>,
+        state: Py<PyAny>,
+        returns_state: bool,
+    },
     Tag { index: usize },
     CombineLatest { state: Vec<Option<Py<PyAny>>> },
     Zip { buffers: Vec<VecDeque<Py<PyAny>>> },
@@ -756,11 +760,21 @@ impl Stream {
     ///
     /// Args:
     ///     func: Accumulator function (state, element) -> `new_state`.
+    ///           If `returns_state=True`, function should return (new_state, result).
     ///     start: Initial state value.
+    ///     returns_state: If True, func returns (state, result) tuple where state
+    ///           is passed to next call and result is emitted. Default False.
     ///
     /// Returns:
-    ///     A new Stream emitting accumulated states.
-    fn accumulate(&mut self, py: Python, func: Py<PyAny>, start: Py<PyAny>) -> PyResult<Py<Self>> {
+    ///     A new Stream emitting accumulated states (or results if `returns_state=True`).
+    #[pyo3(signature = (func, start, returns_state=false))]
+    fn accumulate(
+        &mut self,
+        py: Python,
+        func: Py<PyAny>,
+        start: Py<PyAny>,
+        returns_state: bool,
+    ) -> PyResult<Py<Self>> {
         // Check if the accumulator function is sync
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
@@ -768,7 +782,11 @@ impl Stream {
         let node = Py::new(
             py,
             Self {
-                logic: NodeLogic::Accumulate { func, state: start },
+                logic: NodeLogic::Accumulate {
+                    func,
+                    state: start,
+                    returns_state,
+                },
                 downstreams: Vec::new(),
                 name: format!("{}.accumulate", self.name),
                 asynchronous: self.asynchronous,
@@ -970,12 +988,24 @@ impl Stream {
                     wrap_error(py, func.call1(py, (x,)), &self.name)?;
                 }
             }
-            NodeLogic::Accumulate { func, state } => {
+            NodeLogic::Accumulate {
+                func,
+                state,
+                returns_state,
+            } => {
                 for x in items {
-                    let new_state =
+                    let result =
                         wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
-                    *state = new_state.clone_ref(py);
-                    output_batch.push(new_state);
+                    if *returns_state {
+                        // func returns (new_state, emit_value)
+                        let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
+                        *state = tuple.0;
+                        output_batch.push(tuple.1);
+                    } else {
+                        // func returns single value that is both state and emit value
+                        *state = result.clone_ref(py);
+                        output_batch.push(result);
+                    }
                 }
             }
             NodeLogic::Tag { index } => {
@@ -1171,11 +1201,23 @@ impl Stream {
                 wrap_error(py, func.call1(py, (x,)), &self.name)?;
                 None
             }
-            NodeLogic::Accumulate { func, state } => {
-                let new_state =
+            NodeLogic::Accumulate {
+                func,
+                state,
+                returns_state,
+            } => {
+                let result =
                     wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
-                *state = new_state.clone_ref(py);
-                Some(new_state)
+                if *returns_state {
+                    // func returns (new_state, emit_value)
+                    let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
+                    *state = tuple.0;
+                    Some(tuple.1)
+                } else {
+                    // func returns single value that is both state and emit value
+                    *state = result.clone_ref(py);
+                    Some(result)
+                }
             }
             NodeLogic::Tag { index } => {
                 let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
