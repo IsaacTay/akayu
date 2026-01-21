@@ -43,17 +43,13 @@ We use `maturin` to build the Rust extension and install it into the virtual env
 |---------|-------------|
 | `just build` | Standard dev build |
 | `just build-release` | Optimized release build |
-| `just build-fast` | High-performance build with `pyo3_disable_reference_pool` (4-7x faster) |
 
 Or manually:
 
 ```bash
 maturin develop                # Standard build
 maturin develop --release      # Release build
-RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release  # High-performance
 ```
-
-The high-performance build enables the `pyo3_disable_reference_pool` flag which eliminates synchronization overhead in PyO3's deferred reference counting. See [Performance Optimization](#performance-optimization) for details.
 
 ## Running Tests
 
@@ -92,29 +88,6 @@ cargo clippy       # Lint Rust
 ruff format tests  # Format Python
 ruff check tests   # Lint Python
 ```
-
-## Performance Optimization
-
-The `pyo3_disable_reference_pool` compilation flag provides significant performance improvements (4-7x in benchmarks) by removing PyO3's global reference pool synchronization.
-
-### How it works
-
-By default, when `Py<T>` is dropped without holding the GIL, PyO3 defers the reference count decrement to a global pool. This requires synchronization on every Python-Rust boundary crossing.
-
-With the flag enabled, this overhead is eliminated entirely.
-
-### Requirements
-
-All `Py<T>` objects must be dropped while holding the GIL. This crate is designed to be compatible:
-- `from_text_file` wraps its thread body in `Python::attach` with a `move` closure
-- All other operations occur within Python callbacks where the GIL is held
-
-### Drawbacks
-
-- **Process abort on violation**: Dropping `Py<T>` outside the GIL aborts the process (no recovery)
-- **Compile-time only**: Users must rebuild from source to benefit
-- **Ecosystem compatibility**: Third-party PyO3 code may not be compatible
-- **Debugging difficulty**: Aborts provide no stack trace or error message
 
 ## Project Structure
 
