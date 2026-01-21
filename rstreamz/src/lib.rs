@@ -14,6 +14,7 @@ static GATHER: OnceLock<Py<PyAny>> = OnceLock::new();
 static FILTER_ASYNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static BUILD_MAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static BUILD_STARMAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
+static IS_SYNC_CALLABLE: OnceLock<Py<PyAny>> = OnceLock::new();
 
 fn get_is_awaitable() -> PyResult<&'static Py<PyAny>> {
     IS_AWAITABLE.get().ok_or_else(|| {
@@ -51,6 +52,12 @@ fn get_build_starmap_func() -> PyResult<&'static Py<PyAny>> {
     })
 }
 
+fn get_is_sync_callable() -> PyResult<&'static Py<PyAny>> {
+    IS_SYNC_CALLABLE.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
 fn extract_stream_name(
     py: Python,
     kwargs: &Option<Py<PyDict>>,
@@ -77,6 +84,14 @@ fn wrap_error<T>(py: Python, res: PyResult<T>, node_name: &str) -> PyResult<T> {
     })
 }
 
+/// Write data to a text file, appending a newline.
+///
+/// Converts the input data to a string and appends it as a new line to the specified file.
+/// Creates the file if it doesn't exist.
+///
+/// Args:
+///     data: The data to write (will be converted to string).
+///     path: The file path to write to.
 #[pyfunction]
 #[pyo3(signature = (data, path))]
 fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
@@ -89,10 +104,32 @@ fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
     Ok(())
 }
 
+/// Create a Stream that emits lines from a text file.
+///
+/// Reads the file line by line in a background thread and emits each line
+/// as a string to the returned stream.
+///
+/// Args:
+///     path: The file path to read from.
+///     interval: Optional delay in seconds between emitting lines.
+///
+/// Returns:
+///     A Stream that will emit each line from the file.
 #[pyfunction]
 #[pyo3(signature = (path, interval=None))]
 fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<Py<Stream>> {
-    let stream = Py::new(py, Stream::new(Some("file_source".to_string()), None))?;
+    let stream = Py::new(
+        py,
+        Stream {
+            logic: NodeLogic::Source,
+            downstreams: Vec::new(),
+            name: "file_source".to_string(),
+            asynchronous: None,
+            skip_async_check: false,
+            func_is_sync: true,
+            frozen: false,
+        },
+    )?;
     let stream_clone = stream.clone_ref(py);
 
     thread::spawn(move || {
@@ -155,12 +192,31 @@ enum NodeLogic {
     },
 }
 
+/// A reactive stream for processing data through a pipeline of operations.
+///
+/// Stream is the core building block for creating data processing pipelines.
+/// Data flows through a directed graph of stream nodes, where each node applies
+/// a transformation (map, filter, etc.) before passing results downstream.
+///
+/// Example:
+///     >>> source = Stream()
+///     >>> result = []
+///     >>> source.map(lambda x: x * 2).sink(result.append)
+///     >>> source.emit(5)
+///     >>> result
+///     [10]
 #[pyclass(subclass)]
 struct Stream {
     logic: NodeLogic,
     downstreams: Vec<Py<Stream>>,
     name: String,
     asynchronous: Option<bool>,
+    /// Pre-computed flag: true if async check can be skipped (asynchronous == Some(false))
+    skip_async_check: bool,
+    /// True if this node's function is definitely synchronous (not a coroutine function)
+    func_is_sync: bool,
+    /// True if topology has been frozen/optimized on first emit
+    frozen: bool,
 }
 
 const HELPERS: &str = r#"
@@ -191,11 +247,20 @@ async def _filter_async(coro, x, downstreams):
         if results:
             await asyncio.gather(*results)
 
+def _is_sync_callable(func):
+    """Return True if func is definitely synchronous (not a coroutine function)."""
+    if inspect.iscoroutinefunction(func):
+        return False
+    if inspect.isasyncgenfunction(func):
+        return False
+    # Assume sync for regular functions/lambdas
+    return True
+
 def _build_map_func(func, args, kwargs):
     # args is a tuple or None, kwargs is a dict or None
     if not args and not kwargs:
         return func
-    
+
     if kwargs:
         if args:
             def wrapper(x):
@@ -217,7 +282,7 @@ def _build_starmap_func(func, args, kwargs):
         def wrapper_simple(x):
             return func(*x)
         return wrapper_simple
-    
+
     if kwargs:
         if args:
             def wrapper(x):
@@ -235,17 +300,37 @@ def _build_starmap_func(func, args, kwargs):
 
 #[pymethods]
 impl Stream {
+    /// Create a new source Stream.
+    ///
+    /// Args:
+    ///     name: Optional name for the stream (defaults to "source").
+    ///     asynchronous: If False, skip async checking for better performance.
+    ///         If None or True, async coroutines are automatically awaited.
     #[new]
     #[pyo3(signature = (name=None, asynchronous=None))]
     fn new(name: Option<String>, asynchronous: Option<bool>) -> Self {
+        let skip_async_check = asynchronous == Some(false);
         Stream {
             logic: NodeLogic::Source,
             downstreams: Vec::new(),
             name: name.unwrap_or_else(|| "source".to_string()),
             asynchronous,
+            skip_async_check,
+            func_is_sync: true, // Source has no function, treat as sync
+            frozen: false,
         }
     }
 
+    /// Apply a function to each element in the stream.
+    ///
+    /// Args:
+    ///     func: Function to apply to each element.
+    ///     *args: Additional positional arguments passed to func.
+    ///     **kwargs: Additional keyword arguments passed to func.
+    ///         Use stream_name="name" to set a custom name for this node.
+    ///
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
     #[pyo3(signature = (func, *args, **kwargs))]
     fn map(
         &mut self,
@@ -255,10 +340,15 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "map", &self.name)?;
+
+        // Check if the original function is sync (before wrapping/moving)
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
         let builder = get_build_map_func()?;
         let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
-        
+
         let node = Py::new(
             py,
             Stream {
@@ -268,6 +358,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
             },
         )?;
 
@@ -275,6 +368,18 @@ impl Stream {
         Ok(node)
     }
 
+    /// Apply a function to each element, unpacking the element as arguments.
+    ///
+    /// Similar to map, but each element is unpacked with *element before
+    /// being passed to the function. Useful when elements are tuples.
+    ///
+    /// Args:
+    ///     func: Function to apply (receives unpacked element).
+    ///     *args: Additional positional arguments passed to func.
+    ///     **kwargs: Additional keyword arguments passed to func.
+    ///
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
     #[pyo3(signature = (func, *args, **kwargs))]
     fn starmap(
         &mut self,
@@ -284,6 +389,11 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "starmap", &self.name)?;
+
+        // Check if the original function is sync (before wrapping/moving)
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
         let builder = get_build_starmap_func()?;
         let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
@@ -297,6 +407,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
             },
         )?;
 
@@ -304,6 +417,18 @@ impl Stream {
         Ok(node)
     }
 
+    /// Filter elements based on a predicate function.
+    ///
+    /// Only elements for which the predicate returns a truthy value
+    /// are passed downstream.
+    ///
+    /// Args:
+    ///     predicate: Function that returns True for elements to keep.
+    ///     *args: Additional positional arguments passed to predicate.
+    ///     **kwargs: Additional keyword arguments passed to predicate.
+    ///
+    /// Returns:
+    ///     A new Stream emitting only elements that pass the filter.
     #[pyo3(signature = (predicate, *args, **kwargs))]
     fn filter(
         &mut self,
@@ -313,6 +438,11 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "filter", &self.name)?;
+
+        // Check if the original predicate is sync (before wrapping/moving)
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&predicate,))?.is_truthy(py)?;
+
         let builder = get_build_map_func()?;
         let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
         let wrapped_func: Py<PyAny> = builder.call1(py, (predicate, args_opt, kwargs))?.extract(py)?;
@@ -326,6 +456,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
             },
         )?;
 
@@ -333,6 +466,13 @@ impl Stream {
         Ok(node)
     }
 
+    /// Flatten an iterable element into individual elements.
+    ///
+    /// Each element is expected to be iterable. The items within each
+    /// element are emitted individually downstream.
+    ///
+    /// Returns:
+    ///     A new Stream emitting the flattened elements.
     fn flatten(&mut self, py: Python) -> PyResult<Py<Stream>> {
         let node = Py::new(
             py,
@@ -341,6 +481,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.flatten", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
             },
         )?;
 
@@ -348,6 +491,13 @@ impl Stream {
         Ok(node)
     }
 
+    /// Collect elements into a buffer until flush() is called.
+    ///
+    /// Elements are accumulated in an internal buffer. When flush() is
+    /// called, all collected elements are emitted as a single tuple.
+    ///
+    /// Returns:
+    ///     A new Stream that emits collected tuples on flush.
     fn collect(&mut self, py: Python) -> PyResult<Py<Stream>> {
         let node = Py::new(
             py,
@@ -356,6 +506,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.collect", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
             },
         )?;
 
@@ -363,6 +516,13 @@ impl Stream {
         Ok(node)
     }
 
+    /// Flush collected elements downstream.
+    ///
+    /// For collect() nodes, emits all buffered elements as a tuple
+    /// and clears the buffer. Has no effect on other node types.
+    ///
+    /// Returns:
+    ///     A coroutine if async processing is triggered, otherwise None.
     fn flush(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
@@ -374,6 +534,18 @@ impl Stream {
         }
     }
 
+    /// Apply a function to each element for side effects.
+    ///
+    /// Similar to map, but the return value of func is discarded.
+    /// Use this for terminal operations like printing or storing results.
+    ///
+    /// Args:
+    ///     func: Function to call with each element.
+    ///     *args: Additional positional arguments passed to func.
+    ///     **kwargs: Additional keyword arguments passed to func.
+    ///
+    /// Returns:
+    ///     A new Stream (for chaining, though sink typically ends a pipeline).
     #[pyo3(signature = (func, *args, **kwargs))]
     fn sink(
         &mut self,
@@ -383,6 +555,11 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "sink", &self.name)?;
+
+        // Check if the original function is sync (before wrapping/moving)
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
         let builder = get_build_map_func()?;
         let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
@@ -396,6 +573,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
             },
         )?;
 
@@ -403,12 +583,27 @@ impl Stream {
         Ok(node)
     }
 
+    /// Accumulate values using a function, emitting each intermediate state.
+    ///
+    /// Similar to functools.reduce, but emits every intermediate result.
+    /// The function receives (current_state, new_element) and returns the new state.
+    ///
+    /// Args:
+    ///     func: Accumulator function (state, element) -> new_state.
+    ///     start: Initial state value.
+    ///
+    /// Returns:
+    ///     A new Stream emitting accumulated states.
     fn accumulate(
         &mut self,
         py: Python,
         func: Py<PyAny>,
         start: Py<PyAny>,
     ) -> PyResult<Py<Stream>> {
+        // Check if the accumulator function is sync
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
         let node = Py::new(
             py,
             Stream {
@@ -416,6 +611,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.accumulate", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
             },
         )?;
 
@@ -423,6 +621,16 @@ impl Stream {
         Ok(node)
     }
 
+    /// Merge multiple streams into one.
+    ///
+    /// Creates a new stream that emits elements from this stream and all
+    /// other streams. Elements are emitted in the order they arrive.
+    ///
+    /// Args:
+    ///     *others: Other streams to merge with this one.
+    ///
+    /// Returns:
+    ///     A new Stream emitting elements from all input streams.
     #[pyo3(signature = (*others))]
     fn union(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         let node = Py::new(
@@ -432,6 +640,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.union", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
             },
         )?;
 
@@ -445,6 +656,17 @@ impl Stream {
         Ok(node)
     }
 
+    /// Combine the latest values from multiple streams.
+    ///
+    /// Emits a tuple of the most recent values from each stream whenever
+    /// any stream emits. Only starts emitting after all streams have
+    /// emitted at least one value.
+    ///
+    /// Args:
+    ///     *others: Other streams to combine with this one.
+    ///
+    /// Returns:
+    ///     A new Stream emitting tuples of latest values.
     #[pyo3(signature = (*others))]
     fn combine_latest(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         let total_sources = 1 + others.len();
@@ -457,6 +679,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.combine_latest", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
             },
         )?;
 
@@ -469,6 +694,16 @@ impl Stream {
         Ok(node)
     }
 
+    /// Zip multiple streams together element-by-element.
+    ///
+    /// Emits tuples containing one element from each stream. Waits until
+    /// all streams have an element available before emitting.
+    ///
+    /// Args:
+    ///     *others: Other streams to zip with this one.
+    ///
+    /// Returns:
+    ///     A new Stream emitting zipped tuples.
     #[pyo3(signature = (*others))]
     fn zip(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         let total_sources = 1 + others.len();
@@ -481,6 +716,9 @@ impl Stream {
                 downstreams: Vec::new(),
                 name: format!("{}.zip", self.name),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // No user function
+                frozen: false,
             },
         )?;
 
@@ -493,16 +731,46 @@ impl Stream {
         Ok(node)
     }
 
+    /// Emit a single value into the stream.
+    ///
+    /// This is the primary way to push data into a source stream.
+    /// The value propagates through all downstream nodes.
+    ///
+    /// Args:
+    ///     x: The value to emit.
+    ///
+    /// Returns:
+    ///     A coroutine if async processing is triggered, otherwise None.
     fn emit(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        // On first emit, optimize the topology
+        if !self.frozen {
+            self.optimize_topology(py);
+            self.frozen = true;
+        }
         self.update(py, x)
     }
 
+    /// Emit multiple values into the stream as a batch.
+    ///
+    /// More efficient than calling emit() multiple times when processing
+    /// many items. Values are processed together through the pipeline.
+    ///
+    /// Args:
+    ///     items: List of values to emit.
+    ///
+    /// Returns:
+    ///     A coroutine if async processing is triggered, otherwise None.
     fn emit_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
+        // On first emit, optimize the topology
+        if !self.frozen {
+            self.optimize_topology(py);
+            self.frozen = true;
+        }
         self.update_batch(py, items)
     }
 
     fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
-        let _skip_async_check = self.asynchronous == Some(false);
+        // skip_async_check is pre-computed in self.skip_async_check
         let mut output_batch = Vec::with_capacity(items.len());
 
         match &mut self.logic {
@@ -655,8 +923,7 @@ impl Stream {
     }
 
     fn propagate(&self, py: Python, val: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
-        let skip_async_check = self.asynchronous == Some(false);
-        if !skip_async_check {
+        if !self.skip_async_check {
             let is_awaitable_fn = get_is_awaitable()?;
             let is_awaitable = is_awaitable_fn.call1(py, (&val,))?.is_truthy(py)?;
             if is_awaitable {
@@ -668,14 +935,35 @@ impl Stream {
                 return Ok(Some(coro));
             }
         }
+
+        // Optimization: avoid clone_ref for single-downstream case (most common in linear pipelines)
+        let n = self.downstreams.len();
+        if n == 0 {
+            return Ok(None);
+        }
+
         let mut futures = Vec::new();
-        for child in &self.downstreams {
-            let mut child_ref = child.borrow_mut(py);
-            let res = child_ref.update(py, val.clone_ref(py))?;
-            if let Some(f) = res {
+        if n == 1 {
+            // Single downstream - move val directly, no clone needed
+            let mut child_ref = self.downstreams[0].borrow_mut(py);
+            if let Some(f) = child_ref.update(py, val)? {
+                futures.push(f);
+            }
+        } else {
+            // Multiple downstreams - clone for first n-1, move for last
+            for child in self.downstreams.iter().take(n - 1) {
+                let mut child_ref = child.borrow_mut(py);
+                if let Some(f) = child_ref.update(py, val.clone_ref(py))? {
+                    futures.push(f);
+                }
+            }
+            // Move val for the last downstream
+            let mut last_ref = self.downstreams[n - 1].borrow_mut(py);
+            if let Some(f) = last_ref.update(py, val)? {
                 futures.push(f);
             }
         }
+
         if !futures.is_empty() {
             let gather = get_gather()?;
             let gathered = gather.call1(py, (futures,))?;
@@ -685,7 +973,6 @@ impl Stream {
     }
 
     fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
-        let skip_async_check = self.asynchronous == Some(false);
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
             NodeLogic::Map { func } => {
@@ -711,7 +998,7 @@ impl Stream {
                     predicate.call1(py, (x_clone,)),
                     &self.name,
                 )?;
-                if !skip_async_check {
+                if !self.skip_async_check {
                     let is_awaitable_fn = get_is_awaitable()?;
                     let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
                     if is_awaitable {
@@ -812,10 +1099,52 @@ impl Stream {
                 downstreams: vec![target.clone_ref(py)],
                 name: format!("{}.tag({})", self.name, index),
                 asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true, // Tag has no user function
+                frozen: false,
             },
         )?;
         self.downstreams.push(tag_node);
         Ok(())
+    }
+
+    /// Optimize the topology on first emit.
+    ///
+    /// This method walks the stream graph and:
+    /// - If all nodes have sync-only functions (func_is_sync = true), enables
+    ///   skip_async_check for all nodes to avoid per-emit is_awaitable checks
+    fn optimize_topology(&mut self, py: Python) {
+        // Collect all nodes in the topology using BFS
+        let mut all_nodes: Vec<Py<Stream>> = Vec::new();
+        let mut to_visit: Vec<Py<Stream>> = self
+            .downstreams
+            .iter()
+            .map(|d| d.clone_ref(py))
+            .collect();
+        let mut all_sync = self.func_is_sync;
+
+        // BFS traversal
+        while let Some(node_py) = to_visit.pop() {
+            let node = node_py.borrow(py);
+            all_sync = all_sync && node.func_is_sync;
+            for downstream in &node.downstreams {
+                to_visit.push(downstream.clone_ref(py));
+            }
+            drop(node);
+            all_nodes.push(node_py);
+        }
+
+        // If all nodes are sync and asynchronous flag wasn't explicitly set,
+        // enable skip_async_check for all nodes
+        if all_sync && self.asynchronous.is_none() {
+            self.skip_async_check = true;
+            for node_py in all_nodes {
+                let mut node = node_py.borrow_mut(py);
+                if node.asynchronous.is_none() {
+                    node.skip_async_check = true;
+                }
+            }
+        }
     }
 }
 
@@ -835,12 +1164,14 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let filter_async = helpers_module.getattr("_filter_async")?;
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
+    let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
 
     let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
     let _ = FILTER_ASYNC.set(filter_async.unbind());
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
+    let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
