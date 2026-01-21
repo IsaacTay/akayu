@@ -2,21 +2,25 @@
 default:
     @just --list
 
+# Sync dependencies
+sync:
+    uv sync --extra dev
+
 # Build the Rust extension in development mode
-build:
-    maturin develop
+build: sync
+    uv run maturin develop
 
 # Build the Rust extension in release mode
-build-release:
-    maturin develop --release
+build-release: sync
+    uv run maturin develop --release
 
 # Run all tests
 test: build
-    pytest tests/ -v
+    .venv/bin/python -m pytest tests/ -v
 
 # Run tests without benchmarks (faster)
 test-quick: build
-    pytest tests/ -v \
+    .venv/bin/python -m pytest tests/ -v \
         --ignore=tests/test_benchmark.py \
         --ignore=tests/test_benchmark_split.py \
         --ignore=tests/test_ops_benchmark.py \
@@ -27,7 +31,7 @@ test-quick: build
 
 # Run benchmarks only
 bench: build-release
-    pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v
+    .venv/bin/python -m pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v
 
 # Run clippy lints
 clippy:

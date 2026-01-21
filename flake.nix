@@ -13,37 +13,34 @@
       in
       {
         devShells.default = pkgs.mkShell {
-                      buildInputs = with pkgs; [
-                      cargo
-                      rustc
-                      rustfmt
-                      clippy
-                      python3
-                      python3Packages.pytest
-                      python3Packages.pytest-asyncio
-                                              python3Packages.pytest-benchmark
-                                              python3Packages.psutil
-                                              python3Packages.numpy
-                                              python3Packages.streamz
-                                              python3Packages.setuptools
-                                              uv
-                                              ruff
-                                              maturin
-                                              just
-                                                        pkg-config
-                      openssl
-                    ];
+          buildInputs = with pkgs; [
+            # Rust toolchain
+            cargo
+            rustc
+            rustfmt
+            clippy
+
+            # Python and package management
+            python3
+            uv
+            maturin
+
+            # Development tools
+            ruff
+            just
+
+            # Build dependencies
+            pkg-config
+            openssl
+          ];
+
           shellHook = ''
             echo "Environment ready with Cargo, UV, and Python."
-            # Set up a local virtualenv if it doesn't exist
+            # Set up venv and sync dependencies
             if [ ! -d ".venv" ]; then
               uv venv
             fi
-            source .venv/bin/activate
-            # Install dev dependencies if pytest is missing
-            if [ ! -f ".venv/bin/pytest" ]; then
-              uv pip install pytest pytest-asyncio pytest-benchmark
-            fi
+            uv sync --extra dev
           '';
         };
       }
