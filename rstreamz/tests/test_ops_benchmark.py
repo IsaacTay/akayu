@@ -2,8 +2,8 @@ import pytest
 import rstreamz
 import streamz
 
-# Target 100,000 downstream operations/items
-N_OPS = 100_000
+# Target 500,000 downstream operations/items
+N_OPS = 500_000
 
 def run_flatten(source_cls, n):
     s = source_cls()

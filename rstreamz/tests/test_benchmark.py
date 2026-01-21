@@ -13,7 +13,7 @@ def get_memory_usage_mb():
 
 def test_benchmark_throughput(benchmark):
     """
-    Benchmarks passing 100,000 items through a simple map pipeline (Default Mode).
+    Benchmarks passing 500,000 items through a simple map pipeline (Default Mode).
     """
 
     def run_pipeline():
@@ -27,19 +27,19 @@ def test_benchmark_throughput(benchmark):
 
         s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
 
-        for i in range(100000):
+        for i in range(500000):
             s.emit(i)
 
         return count
 
     # pytest-benchmark will run this multiple times
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_throughput_sync_flag(benchmark):
     """
-    Benchmarks passing 100,000 items through a simple map pipeline (asynchronous=False).
+    Benchmarks passing 500,000 items through a simple map pipeline (asynchronous=False).
     """
 
     def run_pipeline():
@@ -54,18 +54,18 @@ def test_benchmark_throughput_sync_flag(benchmark):
 
         s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
 
-        for i in range(100000):
+        for i in range(500000):
             s.emit(i)
 
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_batch_throughput(benchmark):
     """
-    Benchmarks passing 100,000 items through a simple map pipeline using emit_batch.
+    Benchmarks passing 500,000 items through a simple map pipeline using emit_batch.
     """
 
     def run_pipeline():
@@ -82,14 +82,14 @@ def test_benchmark_batch_throughput(benchmark):
 
         # Emit in batches of 1000
         batch = list(range(1000))
-        for _ in range(100):
+        for _ in range(500):
             s.emit_batch(batch)
 
         return count
 
     # pytest-benchmark will run this multiple times
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_pure_python(benchmark):
@@ -100,7 +100,7 @@ def test_benchmark_pure_python(benchmark):
 
     def run_loop():
         count = 0
-        for i in range(100000):
+        for i in range(500000):
             # map: x + 1
             x = i + 1
             # filter: x % 2 == 0
@@ -112,7 +112,7 @@ def test_benchmark_pure_python(benchmark):
         return count
 
     result = benchmark(run_loop)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_expansion_emit(benchmark):
@@ -130,19 +130,19 @@ def test_benchmark_expansion_emit(benchmark):
             count += 1
 
         # Expansion: 1 item -> 100 items
-        # Total: 1000 inputs * 100 expansion = 100,000 operations downstream
+        # Total: 5000 inputs * 100 expansion = 500,000 operations downstream
         # Pipeline: map(expand) -> flatten -> map -> filter -> map -> sink
         s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
             lambda x: x % 2 == 0
         ).map(lambda x: x / 2).sink(inc_count)
 
-        for i in range(1000):
+        for i in range(5000):
             s.emit(i)
 
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_expansion_batch(benchmark):
@@ -160,20 +160,20 @@ def test_benchmark_expansion_batch(benchmark):
             count += 1
 
         # Expansion: 1 item -> 100 items
-        # Total: 1000 inputs * 100 expansion = 100,000 operations downstream
+        # Total: 5000 inputs * 100 expansion = 500,000 operations downstream
         # Pipeline: map(expand) -> flatten -> map -> filter -> map -> sink
         s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
             lambda x: x % 2 == 0
         ).map(lambda x: x / 2).sink(inc_count)
 
-        # Single batch of 1000 items
-        batch = list(range(1000))
+        # Single batch of 5000 items
+        batch = list(range(5000))
         s.emit_batch(batch)
 
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_memory_stability():
@@ -223,7 +223,7 @@ def test_benchmark_python_map_filter(benchmark):
 
     def run_pipeline():
         # Pipeline: map(x+1) -> filter(x%2==0) -> map(x/2)
-        iterable = range(100000)
+        iterable = range(500000)
 
         # map: x + 1
         mapped1 = map(lambda x: x + 1, iterable)
@@ -239,7 +239,7 @@ def test_benchmark_python_map_filter(benchmark):
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 
 
 def test_benchmark_python_loop_separated(benchmark):
@@ -249,7 +249,7 @@ def test_benchmark_python_loop_separated(benchmark):
     """
 
     def run_pipeline():
-        data = range(100000)
+        data = range(500000)
 
         # map
         step1 = []
@@ -272,5 +272,5 @@ def test_benchmark_python_loop_separated(benchmark):
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
 

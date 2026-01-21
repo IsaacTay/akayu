@@ -30,17 +30,17 @@ def test_benchmark_split_expansion(benchmark):
             lambda x: x % 2 == 0
         ).map(lambda x: x / 2).sink(inc_count)
 
-        # Emit 500 items.
+        # Emit 2500 items.
         # Each splits to 2 branches.
         # Each branch expands to 100 items.
-        # Total Ops: 500 * 2 * 100 = 100,000 downstream ops.
+        # Total Ops: 2500 * 2 * 100 = 500,000 downstream ops.
 
         # We use emit_batch, but the split will force single updates.
         # The optimization goal is for Flatten to re-batch.
-        batch = list(range(500))
+        batch = list(range(2500))
         s.emit_batch(batch)
 
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250000
