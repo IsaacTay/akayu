@@ -692,9 +692,19 @@ impl Stream {
     /// For `collect()` nodes, emits all buffered elements as a tuple
     /// and clears the buffer. Has no effect on other node types.
     ///
+    /// Args:
+    ///     *args: Ignored (for compatibility with streamz).
+    ///     **kwargs: Ignored (for compatibility with streamz).
+    ///
     /// Returns:
     ///     A coroutine if async processing is triggered, otherwise None.
-    fn flush(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+    #[pyo3(signature = (*_args, **_kwargs))]
+    fn flush(
+        &mut self,
+        py: Python,
+        _args: Vec<Py<PyAny>>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
