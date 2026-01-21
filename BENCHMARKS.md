@@ -17,26 +17,26 @@ Benchmarks comparing `rstreamz` performance against the original `streamz` libra
 
 ## rstreamz vs streamz
 
-### Map/Filter Pipeline (100k items)
+### Map/Filter Pipeline (500k items)
 
 | Library | Mean (ms) | Ops/sec | Speedup |
 |---------|-----------|---------|---------|
-| rstreamz | 46.45 | 21.53 | 1.0x |
-| streamz | 1,151.03 | 0.87 | **24.8x slower** |
+| rstreamz | 234.10 | 4.27 | 1.0x |
+| streamz | 5,724.34 | 0.17 | **24.5x slower** |
 
-### Flatten Operation (100k items)
-
-| Library | Mean (ms) | Ops/sec | Speedup |
-|---------|-----------|---------|---------|
-| rstreamz | 6.77 | 147.70 | 1.0x |
-| streamz | 408.37 | 2.45 | **60x slower** |
-
-### Collect Operation (100k items)
+### Flatten Operation (500k items)
 
 | Library | Mean (ms) | Ops/sec | Speedup |
 |---------|-----------|---------|---------|
-| rstreamz | 9.86 | 101.39 | 1.0x |
-| streamz | 374.00 | 2.67 | **38x slower** |
+| rstreamz | 34.47 | 29.01 | 1.0x |
+| streamz | 2,037.54 | 0.49 | **59x slower** |
+
+### Collect Operation (500k items)
+
+| Library | Mean (ms) | Ops/sec | Speedup |
+|---------|-----------|---------|---------|
+| rstreamz | 48.93 | 20.44 | 1.0x |
+| streamz | 1,852.58 | 0.54 | **38x slower** |
 
 ## rstreamz vs Pure Python
 
@@ -44,11 +44,11 @@ Comparison against equivalent pure Python implementations:
 
 | Implementation | Mean (ms) | Ops/sec | Notes |
 |----------------|-----------|---------|-------|
-| Pure Python loop | 11.26 | 88.78 | Direct list iteration |
-| Python separated map+filter | 15.73 | 63.58 | Two separate list comps |
-| Python map+filter combined | 27.99 | 35.72 | Generator chain |
-| rstreamz batch | 29.67 | 33.71 | Stream pipeline |
-| rstreamz emit | 47.00 | 21.28 | Per-item emit |
+| Pure Python loop | 57.43 | 17.41 | Direct list iteration |
+| Python separated map+filter | 78.13 | 12.80 | Two separate list comps |
+| Python map+filter combined | 139.26 | 7.18 | Generator chain |
+| rstreamz batch | 143.84 | 6.95 | Stream pipeline |
+| rstreamz emit | 238.17 | 4.20 | Per-item emit |
 
 The overhead vs pure Python is due to:
 1. Stream graph traversal
@@ -73,7 +73,7 @@ pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v --benchmark-only
 
 ## Benchmark Details
 
-All benchmarks process 100,000 items through a pipeline of:
+All benchmarks process 500,000 items through a pipeline of:
 - `map(lambda x: x + 1)`
 - `filter(lambda x: x % 2 == 0)`
 - `sink(results.append)`

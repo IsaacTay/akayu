@@ -109,7 +109,7 @@ def test_equivalence_combine_latest():
 
 # --- Benchmarks ---
 
-INPUT_SIZE = 100_000
+INPUT_SIZE = 500_000
 
 
 def run_throughput_benchmark(source_cls):
