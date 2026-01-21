@@ -990,7 +990,9 @@ impl Stream {
             self.optimize_topology(py);
             self.frozen = true;
         }
-        self.update(py, x)
+        // Emit bypasses this node's logic and propagates directly to downstreams
+        // (matching streamz behavior)
+        self.propagate(py, x)
     }
 
     /// Emit multiple values into the stream as a batch.
@@ -1009,7 +1011,9 @@ impl Stream {
             self.optimize_topology(py);
             self.frozen = true;
         }
-        self.update_batch(py, items)
+        // Emit bypasses this node's logic and propagates directly to downstreams
+        // (matching streamz behavior)
+        self.propagate_batch(py, items)
     }
 
     fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
