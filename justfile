@@ -45,3 +45,11 @@ lint:
 clean:
     cd rstreamz && cargo clean
     rm -rf rstreamz/*.so rstreamz/*.pyd
+
+# Build wheels for Python 3.12 and 3.13
+build-wheels:
+    mkdir -p rstreamz/dist
+    rm -f rstreamz/dist/*.whl
+    cd rstreamz && maturin build --release --interpreter python3.12 python3.13 --out dist
+    @echo "Wheels built:"
+    @ls -la rstreamz/dist/*.whl
