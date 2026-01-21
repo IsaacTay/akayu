@@ -28,11 +28,22 @@ This project uses **Nix** to manage the development environment and dependencies
 
 We use `maturin` to build the Rust extension and install it into the virtual environment.
 
-1.  **Build and install**:
+1.  **Standard build**:
     ```bash
     maturin develop
     ```
     This compiles the Rust code and installs the `rstreamz` package in editable mode into the current `.venv`.
+
+2.  **Release build** (optimized):
+    ```bash
+    maturin develop --release
+    ```
+
+3.  **High-performance build** (4-7x faster):
+    ```bash
+    RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release
+    ```
+    This enables the `pyo3_disable_reference_pool` flag which eliminates synchronization overhead in PyO3's deferred reference counting. See [Performance Optimization](#performance-optimization) for details.
 
 ## Running Tests
 
@@ -40,13 +51,19 @@ The project includes a comprehensive test suite using `pytest`.
 
 1.  **Run all tests**:
     ```bash
-    python -m pytest rstreamz/tests
+    python -m pytest tests
     ```
 
-2.  **Run benchmarks**:
+2.  **Run with verbose output**:
+    ```bash
+    python -m pytest tests -v
+    ```
+
+3.  **Run benchmarks**:
     The tests include performance benchmarks comparing `rstreamz` to `streamz`.
     ```bash
-    python -m pytest rstreamz/tests/test_comparison.py
+    python -m pytest tests/test_benchmark.py -v
+    python -m pytest tests/test_comparison.py -v
     ```
 
 ## Code Style
@@ -55,18 +72,46 @@ We enforce code formatting for both Rust and Python.
 
 1.  **Format Rust code**:
     ```bash
-    cargo fmt --manifest-path rstreamz/Cargo.toml
+    cargo fmt
     ```
 
-2.  **Format Python code**:
+2.  **Lint Rust code**:
     ```bash
-    ruff format rstreamz
+    cargo clippy
     ```
+
+3.  **Format Python code**:
+    ```bash
+    ruff format tests
+    ```
+
+## Performance Optimization
+
+The `pyo3_disable_reference_pool` compilation flag provides significant performance improvements (4-7x in benchmarks) by removing PyO3's global reference pool synchronization.
+
+### How it works
+
+By default, when `Py<T>` is dropped without holding the GIL, PyO3 defers the reference count decrement to a global pool. This requires synchronization on every Python-Rust boundary crossing.
+
+With the flag enabled, this overhead is eliminated entirely.
+
+### Requirements
+
+All `Py<T>` objects must be dropped while holding the GIL. This crate is designed to be compatible:
+- `from_text_file` wraps its thread body in `Python::attach` with a `move` closure
+- All other operations occur within Python callbacks where the GIL is held
+
+### Drawbacks
+
+- **Process abort on violation**: Dropping `Py<T>` outside the GIL aborts the process (no recovery)
+- **Compile-time only**: Users must rebuild from source to benefit
+- **Ecosystem compatibility**: Third-party PyO3 code may not be compatible
+- **Debugging difficulty**: Aborts provide no stack trace or error message
 
 ## Project Structure
 
-- `rstreamz/src/lib.rs`: The core Rust implementation using PyO3.
-- `rstreamz/tests/`: Python test suite.
+- `src/lib.rs`: The core Rust implementation using PyO3.
+- `tests/`: Python test suite.
     - `test_ops.py`: Unit tests for standard operations (map, filter, union, etc.).
     - `test_async.py`: Tests for async support.
     - `test_comparison.py`: Validation and benchmarking against the original `streamz`.
@@ -82,14 +127,16 @@ We enforce code formatting for both Rust and Python.
     - `test_ops_benchmark.py`: Individual operation benchmarks.
     - `test_benchmark_split.py`: Split expansion efficiency tests.
     - `test_concurrency_benchmark.py`: Async concurrency performance tests.
-- `flake.nix`: Nix environment configuration.
+- `Cargo.toml`: Rust dependencies and configuration.
+- `pyproject.toml`: Python package configuration.
+- `flake.nix`: Nix environment configuration (in parent directory).
 
 ## Development Workflow
 
-1.  Make your changes in `rstreamz/src/lib.rs`.
-2.  Run `maturin develop` to rebuild and update the Python package.
-3.  Add or update tests in `rstreamz/tests/`.
-4.  Run `python -m pytest rstreamz/tests` to verify your changes.
+1.  Make your changes in `src/lib.rs`.
+2.  Run `maturin develop --release` to rebuild and update the Python package.
+3.  Add or update tests in `tests/`.
+4.  Run `python -m pytest tests` to verify your changes.
 5.  Format your code before submitting a PR.
 
 Happy Coding!
