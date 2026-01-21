@@ -71,6 +71,17 @@ We enforce code formatting for both Rust and Python.
     - `test_async.py`: Tests for async support.
     - `test_comparison.py`: Validation and benchmarking against the original `streamz`.
     - `test_memory_comparison.py`: Memory usage verification.
+    - `test_args_kwargs.py`: Tests for args/kwargs binding in operations.
+    - `test_errors.py`: Error propagation and handling tests.
+    - `test_io.py`: File I/O operations (to_text_file, from_text_file).
+    - `test_starmap.py`: Starmap operation tests.
+    - `test_ordering.py`: Event ordering in split/union topologies.
+    - `test_branch_concurrency.py`: Concurrent branch execution tests.
+    - `test_memory_leak.py`: Memory leak detection tests.
+    - `test_benchmark.py`: General throughput benchmarking.
+    - `test_ops_benchmark.py`: Individual operation benchmarks.
+    - `test_benchmark_split.py`: Split expansion efficiency tests.
+    - `test_concurrency_benchmark.py`: Async concurrency performance tests.
 - `flake.nix`: Nix environment configuration.
 
 ## Development Workflow
