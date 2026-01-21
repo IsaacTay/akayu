@@ -23,11 +23,13 @@
                       python3Packages.pytest-asyncio
                                               python3Packages.pytest-benchmark
                                               python3Packages.psutil
+                                              python3Packages.numpy
                                               python3Packages.streamz
                                               python3Packages.setuptools
                                               uv
                                               ruff
                                               maturin
+                                              just
                                                         pkg-config
                       openssl
                     ];
@@ -38,6 +40,10 @@
               uv venv
             fi
             source .venv/bin/activate
+            # Install dev dependencies if pytest is missing
+            if [ ! -f ".venv/bin/pytest" ]; then
+              uv pip install pytest pytest-asyncio pytest-benchmark
+            fi
           '';
         };
       }

@@ -24,66 +24,74 @@ This project uses **Nix** to manage the development environment and dependencies
     ```
     This command drops you into a shell with all necessary tools installed. It will also automatically create and activate a Python virtual environment (`.venv`) if one doesn't exist.
 
+## Quick Start with Just
+
+The project includes a `justfile` for common development tasks. Run `just` to see all available commands:
+
+```bash
+just              # List all commands
+just build        # Build dev extension
+just test-quick   # Build + run tests (skipping benchmarks)
+just test         # Build + run all tests
+```
+
 ## Building the Project
 
 We use `maturin` to build the Rust extension and install it into the virtual environment.
 
-1.  **Standard build**:
-    ```bash
-    maturin develop
-    ```
-    This compiles the Rust code and installs the `rstreamz` package in editable mode into the current `.venv`.
+| Command | Description |
+|---------|-------------|
+| `just build` | Standard dev build |
+| `just build-release` | Optimized release build |
+| `just build-fast` | High-performance build with `pyo3_disable_reference_pool` (4-7x faster) |
 
-2.  **Release build** (optimized):
-    ```bash
-    maturin develop --release
-    ```
+Or manually:
 
-3.  **High-performance build** (4-7x faster):
-    ```bash
-    RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release
-    ```
-    This enables the `pyo3_disable_reference_pool` flag which eliminates synchronization overhead in PyO3's deferred reference counting. See [Performance Optimization](#performance-optimization) for details.
+```bash
+maturin develop                # Standard build
+maturin develop --release      # Release build
+RUSTFLAGS='--cfg pyo3_disable_reference_pool' maturin develop --release  # High-performance
+```
+
+The high-performance build enables the `pyo3_disable_reference_pool` flag which eliminates synchronization overhead in PyO3's deferred reference counting. See [Performance Optimization](#performance-optimization) for details.
 
 ## Running Tests
 
 The project includes a comprehensive test suite using `pytest`.
 
-1.  **Run all tests**:
-    ```bash
-    python -m pytest tests
-    ```
+| Command | Description |
+|---------|-------------|
+| `just test-quick` | Build + run tests (skipping benchmarks) |
+| `just test` | Build + run all tests |
+| `just bench` | Build release + run benchmarks only |
 
-2.  **Run with verbose output**:
-    ```bash
-    python -m pytest tests -v
-    ```
+Or manually:
 
-3.  **Run benchmarks**:
-    The tests include performance benchmarks comparing `rstreamz` to `streamz`.
-    ```bash
-    python -m pytest tests/test_benchmark.py -v
-    python -m pytest tests/test_comparison.py -v
-    ```
+```bash
+python -m pytest tests         # Run all tests
+python -m pytest tests -v      # Verbose output
+python -m pytest tests/test_benchmark.py -v  # Run benchmarks
+```
 
 ## Code Style
 
 We enforce code formatting for both Rust and Python.
 
-1.  **Format Rust code**:
-    ```bash
-    cargo fmt
-    ```
+| Command | Description |
+|---------|-------------|
+| `just fmt` | Format Rust code |
+| `just clippy` | Lint Rust code |
+| `just lint` | Lint Python tests with ruff |
+| `just clean` | Clean build artifacts |
 
-2.  **Lint Rust code**:
-    ```bash
-    cargo clippy
-    ```
+Or manually:
 
-3.  **Format Python code**:
-    ```bash
-    ruff format tests
-    ```
+```bash
+cargo fmt          # Format Rust
+cargo clippy       # Lint Rust
+ruff format tests  # Format Python
+ruff check tests   # Lint Python
+```
 
 ## Performance Optimization
 
