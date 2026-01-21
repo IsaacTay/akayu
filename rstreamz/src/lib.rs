@@ -1,5 +1,10 @@
 //! # rstreamz - High-performance reactive streams for Python
 
+// Allow clippy warnings that conflict with PyO3 patterns
+#![allow(clippy::ref_option)] // PyO3 signatures use &Option<T>
+#![allow(clippy::needless_pass_by_value)] // PyO3 requires owned values
+#![allow(clippy::too_many_lines)] // Complex stream methods need length
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use std::collections::VecDeque;
@@ -88,12 +93,12 @@ fn extract_stream_name(
             return Ok(name);
         }
     }
-    Ok(format!("{}.{}", parent_name, default_suffix))
+    Ok(format!("{parent_name}.{default_suffix}"))
 }
 
 fn wrap_error<T>(py: Python, res: PyResult<T>, node_name: &str) -> PyResult<T> {
     res.map_err(|e| {
-        let ctx_msg = format!("Stream operation failed at node '{}'", node_name);
+        let ctx_msg = format!("Stream operation failed at node '{node_name}'");
         let new_err = pyo3::exceptions::PyRuntimeError::new_err(ctx_msg);
         new_err.set_cause(py, Some(e));
         new_err
@@ -116,7 +121,7 @@ fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
     let s = data.bind(py).str()?;
     let output = s.to_string();
 
-    writeln!(file, "{}", output)?;
+    writeln!(file, "{output}")?;
     Ok(())
 }
 
@@ -155,7 +160,7 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
             let file = match py.detach(|| std::fs::File::open(&path)) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("Error opening file {}: {}", path, e);
+                    eprintln!("Error opening file {path}: {e}");
                     return;
                 }
             };
@@ -168,7 +173,7 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
                 let bytes_read = py.detach(|| reader.read_line(&mut line_buf));
 
                 match bytes_read {
-                    Ok(0) => break, // EOF
+                    Ok(0) | Err(_) => break, // EOF or error
                     Ok(_) => {
                         let text = line_buf.trim_end_matches('\n');
                         if let Ok(mut s) = stream_clone.try_borrow_mut(py) {
@@ -180,7 +185,6 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
                             py.detach(|| thread::sleep(Duration::from_secs_f64(delay)));
                         }
                     }
-                    Err(_) => break,
                 }
             }
             // stream_clone dropped here with GIL held
@@ -192,38 +196,17 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
 
 enum NodeLogic {
     Source,
-    Map {
-        func: Py<PyAny>,
-    },
-    Starmap {
-        func: Py<PyAny>,
-    },
-    Filter {
-        predicate: Py<PyAny>,
-    },
+    Map { func: Py<PyAny> },
+    Starmap { func: Py<PyAny> },
+    Filter { predicate: Py<PyAny> },
     Flatten,
-    Collect {
-        buffer: Vec<Py<PyAny>>,
-    },
-    Sink {
-        func: Py<PyAny>,
-    },
-    Accumulate {
-        func: Py<PyAny>,
-        state: Py<PyAny>,
-    },
-    Tag {
-        index: usize,
-    },
-    CombineLatest {
-        state: Vec<Option<Py<PyAny>>>,
-    },
-    Zip {
-        buffers: Vec<VecDeque<Py<PyAny>>>,
-    },
-    BatchMap {
-        func: Py<PyAny>,
-    },
+    Collect { buffer: Vec<Py<PyAny>> },
+    Sink { func: Py<PyAny> },
+    Accumulate { func: Py<PyAny>, state: Py<PyAny> },
+    Tag { index: usize },
+    CombineLatest { state: Vec<Option<Py<PyAny>>> },
+    Zip { buffers: Vec<VecDeque<Py<PyAny>>> },
+    BatchMap { func: Py<PyAny> },
 }
 
 /// A reactive stream for processing data through a pipeline of operations.
@@ -233,7 +216,7 @@ enum NodeLogic {
 /// a transformation (map, filter, etc.) before passing results downstream.
 ///
 /// Example:
-///     >>> source = Stream()
+///     >>> source = `Stream()`
 ///     >>> result = []
 ///     >>> source.map(lambda x: x * 2).sink(result.append)
 ///     >>> source.emit(5)
@@ -422,7 +405,7 @@ impl Stream {
     #[pyo3(signature = (name=None, asynchronous=None))]
     fn new(name: Option<String>, asynchronous: Option<bool>) -> Self {
         let skip_async_check = asynchronous == Some(false);
-        Stream {
+        Self {
             logic: NodeLogic::Source,
             downstreams: Vec::new(),
             name: name.unwrap_or_else(|| "source".to_string()),
@@ -439,7 +422,7 @@ impl Stream {
     ///     func: Function to apply to each element.
     ///     *args: Additional positional arguments passed to func.
     ///     **kwargs: Additional keyword arguments passed to func.
-    ///         Use stream_name="name" to set a custom name for this node.
+    ///         Use `stream_name="name`" to set a custom name for this node.
     ///
     /// Returns:
     ///     A new Stream emitting the transformed values.
@@ -450,7 +433,7 @@ impl Stream {
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-    ) -> PyResult<Py<Stream>> {
+    ) -> PyResult<Py<Self>> {
         let name = extract_stream_name(py, &kwargs, "map", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -458,15 +441,17 @@ impl Stream {
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let args_opt = if args.bind(py).is_empty() {
+            None
+        } else {
+            Some(args)
+        };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
         let node = Py::new(
             py,
-            Stream {
-                logic: NodeLogic::Map {
-                    func: wrapped_func,
-                },
+            Self {
+                logic: NodeLogic::Map { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -499,7 +484,7 @@ impl Stream {
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-    ) -> PyResult<Py<Stream>> {
+    ) -> PyResult<Py<Self>> {
         let name = extract_stream_name(py, &kwargs, "starmap", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -507,15 +492,17 @@ impl Stream {
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
         let builder = get_build_starmap_func()?;
-        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let args_opt = if args.bind(py).is_empty() {
+            None
+        } else {
+            Some(args)
+        };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
         let node = Py::new(
             py,
-            Stream {
-                logic: NodeLogic::Starmap {
-                    func: wrapped_func,
-                },
+            Self {
+                logic: NodeLogic::Starmap { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -531,24 +518,24 @@ impl Stream {
 
     /// Apply a batch-aware function to process entire batches at once.
     ///
-    /// Unlike map() which calls the function once per item, batch_map() calls
+    /// Unlike `map()` which calls the function once per item, `batch_map()` calls
     /// the function once per batch with all items as a list. This is ideal for
-    /// vectorized operations like NumPy functions that can process arrays efficiently.
+    /// vectorized operations like `NumPy` functions that can process arrays efficiently.
     ///
     /// Args:
     ///     func: Function that receives a list of items and returns an iterable of results.
     ///     *args: Additional positional arguments passed to func.
     ///     **kwargs: Additional keyword arguments passed to func.
-    ///         Use stream_name="name" to set a custom name for this node.
+    ///         Use `stream_name="name`" to set a custom name for this node.
     ///
     /// Returns:
     ///     A new Stream emitting the transformed values.
     ///
     /// Example:
     ///     >>> import numpy as np
-    ///     >>> s = Stream()
-    ///     >>> s.batch_map(np.sqrt).sink(print)
-    ///     >>> s.emit_batch([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
+    ///     >>> s = `Stream()`
+    ///     >>> `s.batch_map(np.sqrt).sink(print)`
+    ///     >>> `s.emit_batch`([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
     #[pyo3(signature = (func, *args, **kwargs))]
     fn batch_map(
         &mut self,
@@ -556,7 +543,7 @@ impl Stream {
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-    ) -> PyResult<Py<Stream>> {
+    ) -> PyResult<Py<Self>> {
         let name = extract_stream_name(py, &kwargs, "batch_map", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -564,15 +551,17 @@ impl Stream {
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let args_opt = if args.bind(py).is_empty() {
+            None
+        } else {
+            Some(args)
+        };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
         let node = Py::new(
             py,
-            Stream {
-                logic: NodeLogic::BatchMap {
-                    func: wrapped_func,
-                },
+            Self {
+                logic: NodeLogic::BatchMap { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -605,7 +594,7 @@ impl Stream {
         predicate: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-    ) -> PyResult<Py<Stream>> {
+    ) -> PyResult<Py<Self>> {
         let name = extract_stream_name(py, &kwargs, "filter", &self.name)?;
 
         // Check if the original predicate is sync (before wrapping/moving)
@@ -613,12 +602,18 @@ impl Stream {
         let func_is_sync = is_sync_callable.call1(py, (&predicate,))?.is_truthy(py)?;
 
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
-        let wrapped_func: Py<PyAny> = builder.call1(py, (predicate, args_opt, kwargs))?.extract(py)?;
+        let args_opt = if args.bind(py).is_empty() {
+            None
+        } else {
+            Some(args)
+        };
+        let wrapped_func: Py<PyAny> = builder
+            .call1(py, (predicate, args_opt, kwargs))?
+            .extract(py)?;
 
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Filter {
                     predicate: wrapped_func,
                 },
@@ -642,10 +637,10 @@ impl Stream {
     ///
     /// Returns:
     ///     A new Stream emitting the flattened elements.
-    fn flatten(&mut self, py: Python) -> PyResult<Py<Stream>> {
+    fn flatten(&mut self, py: Python) -> PyResult<Py<Self>> {
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Flatten,
                 downstreams: Vec::new(),
                 name: format!("{}.flatten", self.name),
@@ -660,17 +655,17 @@ impl Stream {
         Ok(node)
     }
 
-    /// Collect elements into a buffer until flush() is called.
+    /// Collect elements into a buffer until `flush()` is called.
     ///
-    /// Elements are accumulated in an internal buffer. When flush() is
+    /// Elements are accumulated in an internal buffer. When `flush()` is
     /// called, all collected elements are emitted as a single tuple.
     ///
     /// Returns:
     ///     A new Stream that emits collected tuples on flush.
-    fn collect(&mut self, py: Python) -> PyResult<Py<Stream>> {
+    fn collect(&mut self, py: Python) -> PyResult<Py<Self>> {
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Collect { buffer: Vec::new() },
                 downstreams: Vec::new(),
                 name: format!("{}.collect", self.name),
@@ -687,7 +682,7 @@ impl Stream {
 
     /// Flush collected elements downstream.
     ///
-    /// For collect() nodes, emits all buffered elements as a tuple
+    /// For `collect()` nodes, emits all buffered elements as a tuple
     /// and clears the buffer. Has no effect on other node types.
     ///
     /// Returns:
@@ -722,7 +717,7 @@ impl Stream {
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
-    ) -> PyResult<Py<Stream>> {
+    ) -> PyResult<Py<Self>> {
         let name = extract_stream_name(py, &kwargs, "sink", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -730,15 +725,17 @@ impl Stream {
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let args_opt = if args.bind(py).is_empty() {
+            None
+        } else {
+            Some(args)
+        };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
         let node = Py::new(
             py,
-            Stream {
-                logic: NodeLogic::Sink {
-                    func: wrapped_func,
-                },
+            Self {
+                logic: NodeLogic::Sink { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -755,27 +752,22 @@ impl Stream {
     /// Accumulate values using a function, emitting each intermediate state.
     ///
     /// Similar to functools.reduce, but emits every intermediate result.
-    /// The function receives (current_state, new_element) and returns the new state.
+    /// The function receives (`current_state`, `new_element`) and returns the new state.
     ///
     /// Args:
-    ///     func: Accumulator function (state, element) -> new_state.
+    ///     func: Accumulator function (state, element) -> `new_state`.
     ///     start: Initial state value.
     ///
     /// Returns:
     ///     A new Stream emitting accumulated states.
-    fn accumulate(
-        &mut self,
-        py: Python,
-        func: Py<PyAny>,
-        start: Py<PyAny>,
-    ) -> PyResult<Py<Stream>> {
+    fn accumulate(&mut self, py: Python, func: Py<PyAny>, start: Py<PyAny>) -> PyResult<Py<Self>> {
         // Check if the accumulator function is sync
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Accumulate { func, state: start },
                 downstreams: Vec::new(),
                 name: format!("{}.accumulate", self.name),
@@ -801,10 +793,10 @@ impl Stream {
     /// Returns:
     ///     A new Stream emitting elements from all input streams.
     #[pyo3(signature = (*others))]
-    fn union(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    fn union(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Source,
                 downstreams: Vec::new(),
                 name: format!("{}.union", self.name),
@@ -837,11 +829,11 @@ impl Stream {
     /// Returns:
     ///     A new Stream emitting tuples of latest values.
     #[pyo3(signature = (*others))]
-    fn combine_latest(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    fn combine_latest(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         let total_sources = 1 + others.len();
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::CombineLatest {
                     state: (0..total_sources).map(|_| None).collect(),
                 },
@@ -874,11 +866,11 @@ impl Stream {
     /// Returns:
     ///     A new Stream emitting zipped tuples.
     #[pyo3(signature = (*others))]
-    fn zip(&mut self, py: Python, others: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    fn zip(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         let total_sources = 1 + others.len();
         let node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Zip {
                     buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
                 },
@@ -921,7 +913,7 @@ impl Stream {
 
     /// Emit multiple values into the stream as a batch.
     ///
-    /// More efficient than calling emit() multiple times when processing
+    /// More efficient than calling `emit()` multiple times when processing
     /// many items. Values are processed together through the pipeline.
     ///
     /// Args:
@@ -946,29 +938,15 @@ impl Stream {
             NodeLogic::Source => {
                 output_batch = items;
             }
-            NodeLogic::Map { func } => {
+            NodeLogic::Map { func } | NodeLogic::Starmap { func } => {
                 for x in items {
-                    let res =
-                        wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                    let res = wrap_error(py, func.call1(py, (x,)), &self.name)?;
                     output_batch.push(res);
                 }
             }
-            NodeLogic::Starmap { func } => {
+            NodeLogic::Filter { predicate } => {
                 for x in items {
-                    let res =
-                        wrap_error(py, func.call1(py, (x,)), &self.name)?;
-                    output_batch.push(res);
-                }
-            }
-            NodeLogic::Filter {
-                predicate,
-            } => {
-                for x in items {
-                    let res = wrap_error(
-                        py,
-                        predicate.call1(py, (x.clone_ref(py),)),
-                        &self.name,
-                    )?;
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
                     if res.is_truthy(py)? {
                         output_batch.push(x);
                     }
@@ -1014,7 +992,7 @@ impl Stream {
                     if idx < state.len() {
                         state[idx] = Some(val);
                     }
-                    if state.iter().all(|s| s.is_some()) {
+                    if state.iter().all(std::option::Option::is_some) {
                         let values: Vec<Py<PyAny>> = state
                             .iter()
                             .map(|s| s.as_ref().unwrap().clone_ref(py))
@@ -1108,7 +1086,7 @@ impl Stream {
             let is_awaitable = is_awaitable_fn.call1(py, (&val,))?.is_truthy(py)?;
             if is_awaitable {
                 let process_async = get_process_async()?;
-                let downstreams_list: Vec<Py<Stream>> =
+                let downstreams_list: Vec<Py<Self>> =
                     self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
                 let dl = PyList::new(py, downstreams_list)?;
                 let coro = process_async.call1(py, (val, dl))?;
@@ -1155,35 +1133,18 @@ impl Stream {
     fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func } => {
-                Some(wrap_error(
-                    py,
-                    func.call1(py, (x,)),
-                    &self.name,
-                )?)
+            NodeLogic::Map { func } | NodeLogic::Starmap { func } => {
+                Some(wrap_error(py, func.call1(py, (x,)), &self.name)?)
             }
-            NodeLogic::Starmap { func } => {
-                Some(wrap_error(
-                    py,
-                    func.call1(py, (x,)),
-                    &self.name,
-                )?)
-            }
-            NodeLogic::Filter {
-                predicate,
-            } => {
+            NodeLogic::Filter { predicate } => {
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(
-                    py,
-                    predicate.call1(py, (x_clone,)),
-                    &self.name,
-                )?;
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
                 if !self.skip_async_check {
                     let is_awaitable_fn = get_is_awaitable()?;
                     let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
                     if is_awaitable {
                         let filter_async = get_filter_async()?;
-                        let downstreams_list: Vec<Py<Stream>> =
+                        let downstreams_list: Vec<Py<Self>> =
                             self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
                         let dl = PyList::new(py, downstreams_list)?;
                         let coro = filter_async.call1(py, (res, x, dl))?;
@@ -1207,11 +1168,7 @@ impl Stream {
                 return Ok(None);
             }
             NodeLogic::Sink { func } => {
-                wrap_error(
-                    py,
-                    func.call1(py, (x,)),
-                    &self.name,
-                )?;
+                wrap_error(py, func.call1(py, (x,)), &self.name)?;
                 None
             }
             NodeLogic::Accumulate { func, state } => {
@@ -1232,7 +1189,7 @@ impl Stream {
                 if idx < state.len() {
                     state[idx] = Some(val);
                 }
-                if state.iter().all(|s| s.is_some()) {
+                if state.iter().all(std::option::Option::is_some) {
                     let values: Vec<Py<PyAny>> = state
                         .iter()
                         .map(|s| s.as_ref().unwrap().clone_ref(py))
@@ -1282,10 +1239,10 @@ impl Stream {
 }
 
 impl Stream {
-    fn add_tag_node(&mut self, py: Python, index: usize, target: &Py<Stream>) -> PyResult<()> {
+    fn add_tag_node(&mut self, py: Python, index: usize, target: &Py<Self>) -> PyResult<()> {
         let tag_node = Py::new(
             py,
-            Stream {
+            Self {
                 logic: NodeLogic::Tag { index },
                 downstreams: vec![target.clone_ref(py)],
                 name: format!("{}.tag({})", self.name, index),
@@ -1304,20 +1261,17 @@ impl Stream {
     /// This method walks the stream graph and:
     /// - Fuses consecutive Map operations into a single composed Map
     /// - Fuses consecutive Filter operations into a single composed Filter
-    /// - If all nodes have sync-only functions (func_is_sync = true), enables
-    ///   skip_async_check for all nodes to avoid per-emit is_awaitable checks
+    /// - If all nodes have sync-only functions (`func_is_sync` = true), enables
+    ///   `skip_async_check` for all nodes to avoid per-emit `is_awaitable` checks
     fn optimize_topology(&mut self, py: Python) {
         // Phase 1: Fuse consecutive maps and filters
         // We need to process nodes that might have fusable children
         self.fuse_linear_chains(py);
 
         // Phase 2: Collect all nodes and check sync status
-        let mut all_nodes: Vec<Py<Stream>> = Vec::new();
-        let mut to_visit: Vec<Py<Stream>> = self
-            .downstreams
-            .iter()
-            .map(|d| d.clone_ref(py))
-            .collect();
+        let mut all_nodes: Vec<Py<Self>> = Vec::new();
+        let mut to_visit: Vec<Py<Self>> =
+            self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
         let mut all_sync = self.func_is_sync;
 
         // BFS traversal
@@ -1353,77 +1307,66 @@ impl Stream {
         }
 
         // Try to fuse this node with its single downstream if applicable
-        if self.downstreams.len() == 1 {
-            let child_py = &self.downstreams[0];
-            let child = child_py.borrow_mut(py);
+        if self.downstreams.len() != 1 {
+            return;
+        }
 
-            // Check if we can fuse Map -> Map
-            if let NodeLogic::Map { func: ref my_func } = self.logic {
-                if let NodeLogic::Map {
-                    func: ref child_func,
-                } = child.logic
-                {
-                    // Fuse: compose the functions
-                    if let Ok(compose) = get_compose_maps() {
-                        if let Ok(composed) = compose.call1(py, (my_func, child_func)) {
-                            // Clone child's downstreams before modifying self
-                            let new_downstreams: Vec<Py<Stream>> = child
-                                .downstreams
-                                .iter()
-                                .map(|d| d.clone_ref(py))
-                                .collect();
-                            let child_name = child.name.clone();
-                            let child_func_is_sync = child.func_is_sync;
-                            drop(child); // Release borrow before modifying self
+        let child_py = &self.downstreams[0];
+        let child = child_py.borrow_mut(py);
 
-                            // Update this node's function to the composed one
-                            self.logic = NodeLogic::Map { func: composed };
-                            // Update name to show fusion
-                            self.name = format!("{}+{}", self.name, child_name);
-                            // Bypass child: point to child's downstreams
-                            self.downstreams = new_downstreams;
-                            // Inherit func_is_sync (both must be sync for composed to be sync)
-                            self.func_is_sync = self.func_is_sync && child_func_is_sync;
-                            return;
-                        }
-                    }
-                }
-            }
+        // Check if we can fuse Map -> Map
+        if let NodeLogic::Map { func: ref my_func } = self.logic
+            && let NodeLogic::Map {
+                func: ref child_func,
+            } = child.logic
+            && let Ok(compose) = get_compose_maps()
+            && let Ok(composed) = compose.call1(py, (my_func, child_func))
+        {
+            // Clone child's downstreams before modifying self
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            drop(child); // Release borrow before modifying self
 
-            // Check if we can fuse Filter -> Filter
-            if let NodeLogic::Filter { predicate: ref my_pred } = self.logic {
-                if let NodeLogic::Filter {
-                    predicate: ref child_pred,
-                } = child.logic
-                {
-                    // Fuse: compose the predicates with AND
-                    if let Ok(compose) = get_compose_filters() {
-                        if let Ok(composed) = compose.call1(py, (my_pred, child_pred)) {
-                            // Clone child's downstreams before modifying self
-                            let new_downstreams: Vec<Py<Stream>> = child
-                                .downstreams
-                                .iter()
-                                .map(|d| d.clone_ref(py))
-                                .collect();
-                            let child_name = child.name.clone();
-                            let child_func_is_sync = child.func_is_sync;
-                            drop(child); // Release borrow before modifying self
+            // Update this node's function to the composed one
+            self.logic = NodeLogic::Map { func: composed };
+            // Update name to show fusion
+            self.name = format!("{}+{}", self.name, child_name);
+            // Bypass child: point to child's downstreams
+            self.downstreams = new_downstreams;
+            // Inherit func_is_sync (both must be sync for composed to be sync)
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            return;
+        }
 
-                            // Update this node's predicate to the composed one
-                            self.logic = NodeLogic::Filter {
-                                predicate: composed,
-                            };
-                            // Update name to show fusion
-                            self.name = format!("{}+{}", self.name, child_name);
-                            // Bypass child: point to child's downstreams
-                            self.downstreams = new_downstreams;
-                            // Inherit func_is_sync
-                            self.func_is_sync = self.func_is_sync && child_func_is_sync;
-                            return;
-                        }
-                    }
-                }
-            }
+        // Check if we can fuse Filter -> Filter
+        if let NodeLogic::Filter {
+            predicate: ref my_pred,
+        } = self.logic
+            && let NodeLogic::Filter {
+                predicate: ref child_pred,
+            } = child.logic
+            && let Ok(compose) = get_compose_filters()
+            && let Ok(composed) = compose.call1(py, (my_pred, child_pred))
+        {
+            // Clone child's downstreams before modifying self
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            drop(child); // Release borrow before modifying self
+
+            // Update this node's predicate to the composed one
+            self.logic = NodeLogic::Filter {
+                predicate: composed,
+            };
+            // Update name to show fusion
+            self.name = format!("{}+{}", self.name, child_name);
+            // Bypass child: point to child's downstreams
+            self.downstreams = new_downstreams;
+            // Inherit func_is_sync
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
         }
     }
 }

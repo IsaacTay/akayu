@@ -9,7 +9,6 @@ Tests various patterns:
 - Multiple joins (combine_latest, zip)
 """
 
-import pytest
 import rstreamz
 import streamz
 

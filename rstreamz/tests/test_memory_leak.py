@@ -1,4 +1,3 @@
-import pytest
 import rstreamz
 import psutil
 import os

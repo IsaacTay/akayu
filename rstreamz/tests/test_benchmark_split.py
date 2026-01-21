@@ -1,9 +1,4 @@
 import rstreamz
-import time
-import psutil
-import os
-import pytest
-import gc
 
 
 def test_benchmark_split_expansion(benchmark):
