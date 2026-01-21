@@ -241,6 +241,9 @@ enum NodeLogic {
     Zip {
         buffers: Vec<VecDeque<Py<PyAny>>>,
     },
+    BatchMap {
+        func: Py<PyAny>,
+    },
 }
 
 /// A reactive stream for processing data through a pipeline of operations.
@@ -453,6 +456,63 @@ impl Stream {
             py,
             Stream {
                 logic: NodeLogic::Starmap {
+                    func: wrapped_func,
+                },
+                downstreams: Vec::new(),
+                name,
+                asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync,
+                frozen: false,
+            },
+        )?;
+
+        self.downstreams.push(node.clone_ref(py));
+        Ok(node)
+    }
+
+    /// Apply a batch-aware function to process entire batches at once.
+    ///
+    /// Unlike map() which calls the function once per item, batch_map() calls
+    /// the function once per batch with all items as a list. This is ideal for
+    /// vectorized operations like NumPy functions that can process arrays efficiently.
+    ///
+    /// Args:
+    ///     func: Function that receives a list of items and returns an iterable of results.
+    ///     *args: Additional positional arguments passed to func.
+    ///     **kwargs: Additional keyword arguments passed to func.
+    ///         Use stream_name="name" to set a custom name for this node.
+    ///
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
+    ///
+    /// Example:
+    ///     >>> import numpy as np
+    ///     >>> s = Stream()
+    ///     >>> s.batch_map(np.sqrt).sink(print)
+    ///     >>> s.emit_batch([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn batch_map(
+        &mut self,
+        py: Python,
+        func: Py<PyAny>,
+        args: Py<PyTuple>,
+        kwargs: Option<Py<PyDict>>,
+    ) -> PyResult<Py<Stream>> {
+        let name = extract_stream_name(py, &kwargs, "batch_map", &self.name)?;
+
+        // Check if the original function is sync (before wrapping/moving)
+        let is_sync_callable = get_is_sync_callable()?;
+        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
+        let builder = get_build_map_func()?;
+        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+
+        let node = Py::new(
+            py,
+            Stream {
+                logic: NodeLogic::BatchMap {
                     func: wrapped_func,
                 },
                 downstreams: Vec::new(),
@@ -925,6 +985,17 @@ impl Stream {
                     output_batch.push(tuple_out.into());
                 }
             }
+            NodeLogic::BatchMap { func } => {
+                // Convert Vec<Py<PyAny>> to Python list
+                let py_list = PyList::new(py, &items)?;
+                // Call function once with entire batch
+                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
+                // Convert result back to Vec
+                let result_list = result.bind(py);
+                for item in result_list.try_iter()? {
+                    output_batch.push(item?.into());
+                }
+            }
         }
 
         self.propagate_batch(py, output_batch)
@@ -1131,6 +1202,17 @@ impl Stream {
                     Some(tuple_out.into())
                 } else {
                     None
+                }
+            }
+            NodeLogic::BatchMap { func } => {
+                // Wrap single item in list, call func, extract single result
+                let py_list = PyList::new(py, &[x])?;
+                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
+                let result_list = result.bind(py);
+                let mut iter = result_list.try_iter()?;
+                match iter.next() {
+                    Some(item) => Some(item?.into()),
+                    None => return Ok(None),
                 }
             }
         };
