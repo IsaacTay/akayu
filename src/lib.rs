@@ -4,6 +4,7 @@
 #![allow(clippy::ref_option)] // PyO3 signatures use &Option<T>
 #![allow(clippy::needless_pass_by_value)] // PyO3 requires owned values
 #![allow(clippy::too_many_lines)] // Complex stream methods need length
+#![allow(clippy::doc_markdown)] // Python docstrings use Python conventions, not Rust
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
@@ -203,24 +204,40 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
 
 enum NodeLogic {
     Source,
-    Map { func: Py<PyAny> },
-    Starmap { func: Py<PyAny> },
-    Filter { predicate: Py<PyAny> },
+    Map {
+        func: Py<PyAny>,
+    },
+    Starmap {
+        func: Py<PyAny>,
+    },
+    Filter {
+        predicate: Py<PyAny>,
+    },
     Flatten,
-    Collect { buffer: Vec<Py<PyAny>> },
-    Sink { func: Py<PyAny> },
+    Collect {
+        buffer: Vec<Py<PyAny>>,
+    },
+    Sink {
+        func: Py<PyAny>,
+    },
     Accumulate {
         func: Py<PyAny>,
         state: Py<PyAny>,
         returns_state: bool,
     },
-    Tag { index: usize },
+    Tag {
+        index: usize,
+    },
     CombineLatest {
         state: Vec<Option<Py<PyAny>>>,
         emit_on_indices: Vec<usize>, // Empty = emit on any, non-empty = only these indices
     },
-    Zip { buffers: Vec<VecDeque<Py<PyAny>>> },
-    BatchMap { func: Py<PyAny> },
+    Zip {
+        buffers: Vec<VecDeque<Py<PyAny>>>,
+    },
+    BatchMap {
+        func: Py<PyAny>,
+    },
     /// Parallel node: propagates to downstreams in parallel threads
     Parallel,
 }
@@ -1423,8 +1440,7 @@ impl Stream {
                 state,
                 returns_state,
             } => {
-                let result =
-                    wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
+                let result = wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
                 if *returns_state {
                     // func returns (new_state, emit_value)
                     let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;

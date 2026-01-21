@@ -1,4 +1,5 @@
 """Tests for parallel branch execution."""
+
 import time
 import threading
 from rstreamz import Stream, union
@@ -49,7 +50,7 @@ def test_par_single_downstream():
 def test_par_no_downstream():
     """Test par with no downstreams."""
     s = Stream()
-    p = s.par()
+    _p = s.par()
 
     # Should not raise
     s.emit(1)
@@ -341,5 +342,5 @@ def test_par_seq_timing():
     seq_elapsed = time.time() - start
 
     # Parallel should be ~50ms, sequential should be ~100ms
-    assert par_elapsed < 0.08, f"par should be ~50ms, got {par_elapsed*1000:.0f}ms"
-    assert seq_elapsed > 0.09, f"seq should be ~100ms, got {seq_elapsed*1000:.0f}ms"
+    assert par_elapsed < 0.08, f"par should be ~50ms, got {par_elapsed * 1000:.0f}ms"
+    assert seq_elapsed > 0.09, f"seq should be ~100ms, got {seq_elapsed * 1000:.0f}ms"
