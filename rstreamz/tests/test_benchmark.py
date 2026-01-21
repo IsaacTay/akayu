@@ -1,8 +1,6 @@
 import rstreamz
-import time
 import psutil
 import os
-import pytest
 import gc
 
 
@@ -191,9 +189,7 @@ def test_memory_stability():
         pass
 
     # Create a reasonably deep pipeline
-    pipeline = (
-        s.map(lambda x: x * 2).map(lambda x: x + 1).filter(lambda x: x > 10).sink(no_op)
-    )
+    s.map(lambda x: x * 2).map(lambda x: x + 1).filter(lambda x: x > 10).sink(no_op)
 
     # Process 1 million items
     count = 1_000_000
@@ -202,8 +198,7 @@ def test_memory_stability():
     for i in range(count):
         s.emit(i)
         if i % batch_size == 0:
-            current_mem = get_memory_usage_mb()
-            # print(f"Processed {i}, Mem: {current_mem:.2f} MB")
+            get_memory_usage_mb()  # Check memory periodically
 
     gc.collect()
     end_mem = get_memory_usage_mb()

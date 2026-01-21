@@ -1,5 +1,4 @@
 import rstreamz
-import pytest
 
 def test_ordering_split_union_scalar_vs_batch():
     """

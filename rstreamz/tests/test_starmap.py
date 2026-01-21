@@ -1,5 +1,4 @@
 import rstreamz
-import pytest
 
 
 def test_starmap():

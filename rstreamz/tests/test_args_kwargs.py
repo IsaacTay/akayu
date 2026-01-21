@@ -1,5 +1,4 @@
 import rstreamz
-import pytest
 
 
 def test_map_args_kwargs():
