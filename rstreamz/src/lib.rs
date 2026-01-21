@@ -1371,11 +1371,152 @@ impl Stream {
     }
 }
 
+/// Merge multiple streams into one.
+///
+/// Creates a new stream that emits elements from all input streams.
+/// Elements are emitted in the order they arrive from any source.
+///
+/// Args:
+///     *streams: Two or more streams to merge.
+///
+/// Returns:
+///     A new Stream emitting elements from all input streams.
+///
+/// Example:
+///     >>> s1 = rstreamz.Stream()
+///     >>> s2 = rstreamz.Stream()
+///     >>> merged = rstreamz.union(s1, s2)
+#[pyfunction]
+#[pyo3(signature = (*streams))]
+fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    if streams.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "union requires at least one stream",
+        ));
+    }
+
+    let node = Py::new(
+        py,
+        Stream {
+            logic: NodeLogic::Source,
+            downstreams: Vec::new(),
+            name: "union".to_string(),
+            asynchronous: None,
+            skip_async_check: false,
+            func_is_sync: true,
+            frozen: false,
+        },
+    )?;
+
+    for stream in streams {
+        let mut stream_ref = stream.borrow_mut(py);
+        stream_ref.downstreams.push(node.clone_ref(py));
+    }
+
+    Ok(node)
+}
+
+/// Combine the latest values from multiple streams.
+///
+/// Creates a new stream that emits a tuple of the most recent values
+/// from each input stream whenever any stream emits. Only starts
+/// emitting after all streams have emitted at least one value.
+///
+/// Args:
+///     *streams: Two or more streams to combine.
+///
+/// Returns:
+///     A new Stream emitting tuples of latest values.
+///
+/// Example:
+///     >>> s1 = rstreamz.Stream()
+///     >>> s2 = rstreamz.Stream()
+///     >>> combined = rstreamz.combine_latest(s1, s2)
+#[pyfunction]
+#[pyo3(signature = (*streams))]
+fn combine_latest(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    if streams.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "combine_latest requires at least one stream",
+        ));
+    }
+
+    let total_sources = streams.len();
+    let node = Py::new(
+        py,
+        Stream {
+            logic: NodeLogic::CombineLatest {
+                state: (0..total_sources).map(|_| None).collect(),
+            },
+            downstreams: Vec::new(),
+            name: "combine_latest".to_string(),
+            asynchronous: None,
+            skip_async_check: false,
+            func_is_sync: true,
+            frozen: false,
+        },
+    )?;
+
+    for (i, stream) in streams.iter().enumerate() {
+        let mut stream_ref = stream.borrow_mut(py);
+        stream_ref.add_tag_node(py, i, &node)?;
+    }
+
+    Ok(node)
+}
+
+/// Zip multiple streams together.
+///
+/// Creates a new stream that waits for one item from each input stream,
+/// then emits them as a tuple. Buffers items until all streams have
+/// contributed one value.
+///
+/// Args:
+///     *streams: Two or more streams to zip together.
+///
+/// Returns:
+///     A new stream that emits tuples of values from all input streams.
+#[pyfunction]
+#[pyo3(signature = (*streams))]
+fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+    if streams.len() < 2 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "zip requires at least two streams",
+        ));
+    }
+
+    let total_sources = streams.len();
+    let node = Py::new(
+        py,
+        Stream {
+            logic: NodeLogic::Zip {
+                buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
+            },
+            downstreams: Vec::new(),
+            name: "zip".to_string(),
+            asynchronous: None,
+            skip_async_check: false,
+            func_is_sync: true,
+            frozen: false,
+        },
+    )?;
+
+    for (i, stream) in streams.iter().enumerate() {
+        let mut stream_ref = stream.borrow_mut(py);
+        stream_ref.add_tag_node(py, i, &node)?;
+    }
+
+    Ok(node)
+}
+
 #[pymodule]
 fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(from_text_file, m)?)?;
+    m.add_function(wrap_pyfunction!(union, m)?)?;
+    m.add_function(wrap_pyfunction!(combine_latest, m)?)?;
+    m.add_function(wrap_pyfunction!(zip, m)?)?;
 
     let code = CString::new(HELPERS).unwrap();
     let fname = CString::new("helpers.py").unwrap();
