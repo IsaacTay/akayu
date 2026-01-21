@@ -12,6 +12,8 @@ static IS_AWAITABLE: OnceLock<Py<PyAny>> = OnceLock::new();
 static PROCESS_ASYNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static GATHER: OnceLock<Py<PyAny>> = OnceLock::new();
 static FILTER_ASYNC: OnceLock<Py<PyAny>> = OnceLock::new();
+static BUILD_MAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
+static BUILD_STARMAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 
 fn get_is_awaitable() -> PyResult<&'static Py<PyAny>> {
     IS_AWAITABLE.get().ok_or_else(|| {
@@ -33,6 +35,18 @@ fn get_gather() -> PyResult<&'static Py<PyAny>> {
 
 fn get_filter_async() -> PyResult<&'static Py<PyAny>> {
     FILTER_ASYNC.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_build_map_func() -> PyResult<&'static Py<PyAny>> {
+    BUILD_MAP_FUNC.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_build_starmap_func() -> PyResult<&'static Py<PyAny>> {
+    BUILD_STARMAP_FUNC.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
     })
 }
@@ -112,18 +126,12 @@ enum NodeLogic {
     Source,
     Map {
         func: Py<PyAny>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
     },
     Starmap {
         func: Py<PyAny>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
     },
     Filter {
         predicate: Py<PyAny>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
     },
     Flatten,
     Collect {
@@ -131,8 +139,6 @@ enum NodeLogic {
     },
     Sink {
         func: Py<PyAny>,
-        args: Py<PyTuple>,
-        kwargs: Option<Py<PyDict>>,
     },
     Accumulate {
         func: Py<PyAny>,
@@ -184,6 +190,47 @@ async def _filter_async(coro, x, downstreams):
                 results.append(res)
         if results:
             await asyncio.gather(*results)
+
+def _build_map_func(func, args, kwargs):
+    # args is a tuple or None, kwargs is a dict or None
+    if not args and not kwargs:
+        return func
+    
+    if kwargs:
+        if args:
+            def wrapper(x):
+                return func(x, *args, **kwargs)
+            return wrapper
+        else:
+            def wrapper(x):
+                return func(x, **kwargs)
+            return wrapper
+    else:
+        # only args
+        def wrapper(x):
+            return func(x, *args)
+        return wrapper
+
+def _build_starmap_func(func, args, kwargs):
+    # args is tuple or None, kwargs is dict or None
+    if not args and not kwargs:
+        def wrapper_simple(x):
+            return func(*x)
+        return wrapper_simple
+    
+    if kwargs:
+        if args:
+            def wrapper(x):
+                return func(*x, *args, **kwargs)
+            return wrapper
+        else:
+            def wrapper(x):
+                return func(*x, **kwargs)
+            return wrapper
+    else:
+        def wrapper(x):
+            return func(*x, *args)
+        return wrapper
 "#;
 
 #[pymethods]
@@ -208,10 +255,16 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "map", &self.name)?;
+        let builder = get_build_map_func()?;
+        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+        
         let node = Py::new(
             py,
             Stream {
-                logic: NodeLogic::Map { func, args, kwargs },
+                logic: NodeLogic::Map {
+                    func: wrapped_func,
+                },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -231,10 +284,16 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "starmap", &self.name)?;
+        let builder = get_build_starmap_func()?;
+        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+
         let node = Py::new(
             py,
             Stream {
-                logic: NodeLogic::Starmap { func, args, kwargs },
+                logic: NodeLogic::Starmap {
+                    func: wrapped_func,
+                },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -254,13 +313,15 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "filter", &self.name)?;
+        let builder = get_build_map_func()?;
+        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let wrapped_func: Py<PyAny> = builder.call1(py, (predicate, args_opt, kwargs))?.extract(py)?;
+
         let node = Py::new(
             py,
             Stream {
                 logic: NodeLogic::Filter {
-                    predicate,
-                    args,
-                    kwargs,
+                    predicate: wrapped_func,
                 },
                 downstreams: Vec::new(),
                 name,
@@ -322,10 +383,16 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Stream>> {
         let name = extract_stream_name(py, &kwargs, "sink", &self.name)?;
+        let builder = get_build_map_func()?;
+        let args_opt = if args.bind(py).is_empty() { None } else { Some(args) };
+        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+
         let node = Py::new(
             py,
             Stream {
-                logic: NodeLogic::Sink { func, args, kwargs },
+                logic: NodeLogic::Sink {
+                    func: wrapped_func,
+                },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -442,70 +509,29 @@ impl Stream {
             NodeLogic::Source => {
                 output_batch = items;
             }
-            NodeLogic::Map { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let kwargs_ref = kwargs.as_ref().map(|k| k.bind(py));
-                let args_empty = args_ref.is_empty();
+            NodeLogic::Map { func } => {
                 for x in items {
-                    let res = if args_empty {
-                        wrap_error(py, func.call1(py, (x,)), &self.name)?
-                    } else {
-                        let x_tuple = PyTuple::new(py, &[x.clone_ref(py)])?;
-                        let full_args = x_tuple.add(args_ref)?;
-                        let full_args_tuple = full_args.cast_into::<PyTuple>()?;
-                        wrap_error(py, func.call(py, full_args_tuple, kwargs_ref), &self.name)?
-                    };
+                    let res =
+                        wrap_error(py, func.call1(py, (x,)), &self.name)?;
                     output_batch.push(res);
                 }
             }
-            NodeLogic::Starmap { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let kwargs_ref = kwargs.as_ref().map(|k| k.bind(py));
+            NodeLogic::Starmap { func } => {
                 for x in items {
-                    let x_bound = x.bind(py);
-                    let x_tuple: pyo3::Bound<'_, PyTuple> = if x_bound.is_instance_of::<PyTuple>() {
-                        x_bound.clone().cast_into::<PyTuple>()?
-                    } else if x_bound.is_instance_of::<PyList>() {
-                        let list = x_bound.cast::<PyList>()?;
-                        list.to_tuple()
-                    } else {
-                        let iter = x_bound.try_iter()?;
-                        let elements: Result<Vec<_>, _> = iter.collect();
-                        PyTuple::new(py, elements?)?
-                    };
-                    let full_args = x_tuple.add(args_ref)?;
-                    let full_args_tuple = full_args.cast_into::<PyTuple>()?;
                     let res =
-                        wrap_error(py, func.call(py, full_args_tuple, kwargs_ref), &self.name)?;
+                        wrap_error(py, func.call1(py, (x,)), &self.name)?;
                     output_batch.push(res);
                 }
             }
             NodeLogic::Filter {
                 predicate,
-                args,
-                kwargs,
             } => {
-                let args_ref = args.bind(py);
-                let kwargs_ref = kwargs.as_ref().map(|k| k.bind(py));
-                let args_empty = args_ref.is_empty();
                 for x in items {
-                    let res = if args_empty {
-                        wrap_error(
-                            py,
-                            predicate.call1(py, (x.clone_ref(py),)),
-                            &self.name,
-                        )?
-                    } else {
-                        let x_clone = x.clone_ref(py);
-                        let x_tuple = PyTuple::new(py, &[x_clone])?;
-                        let full_args = x_tuple.add(args_ref)?;
-                        let full_args_tuple = full_args.cast_into::<PyTuple>()?;
-                        wrap_error(
-                            py,
-                            predicate.call(py, full_args_tuple, kwargs_ref),
-                            &self.name,
-                        )?
-                    };
+                    let res = wrap_error(
+                        py,
+                        predicate.call1(py, (x.clone_ref(py),)),
+                        &self.name,
+                    )?;
                     if res.is_truthy(py)? {
                         output_batch.push(x);
                     }
@@ -524,19 +550,9 @@ impl Stream {
                 buffer.extend(items);
                 return Ok(None);
             }
-            NodeLogic::Sink { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let kwargs_ref = kwargs.as_ref().map(|k| k.bind(py));
-                let args_empty = args_ref.is_empty();
+            NodeLogic::Sink { func } => {
                 for x in items {
-                    if args_empty {
-                        wrap_error(py, func.call1(py, (x,)), &self.name)?;
-                    } else {
-                        let x_tuple = PyTuple::new(py, &[x.clone_ref(py)])?;
-                        let full_args = x_tuple.add(args_ref)?;
-                        let full_args_tuple = full_args.cast_into::<PyTuple>()?;
-                        wrap_error(py, func.call(py, full_args_tuple, kwargs_ref), &self.name)?;
-                    }
+                    wrap_error(py, func.call1(py, (x,)), &self.name)?;
                 }
             }
             NodeLogic::Accumulate { func, state } => {
@@ -672,51 +688,27 @@ impl Stream {
         let skip_async_check = self.asynchronous == Some(false);
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let x_tuple = PyTuple::new(py, vec![x])?;
-                let full_args = x_tuple.add(args_ref)?;
-                let full_args_tuple = full_args.cast_into::<PyTuple>()?;
+            NodeLogic::Map { func } => {
                 Some(wrap_error(
                     py,
-                    func.call(py, full_args_tuple, kwargs.as_ref().map(|k| k.bind(py))),
+                    func.call1(py, (x,)),
                     &self.name,
                 )?)
             }
-            NodeLogic::Starmap { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let x_bound = x.bind(py);
-                let x_tuple: pyo3::Bound<'_, PyTuple> = if x_bound.is_instance_of::<PyTuple>() {
-                    x_bound.clone().cast_into::<PyTuple>()?
-                } else if x_bound.is_instance_of::<PyList>() {
-                    let list = x_bound.cast::<PyList>()?;
-                    list.to_tuple()
-                } else {
-                    let iter = x_bound.try_iter()?;
-                    let elements: Result<Vec<_>, _> = iter.collect();
-                    PyTuple::new(py, elements?)?
-                };
-                let full_args = x_tuple.add(args_ref)?;
-                let full_args_tuple = full_args.cast_into::<PyTuple>()?;
+            NodeLogic::Starmap { func } => {
                 Some(wrap_error(
                     py,
-                    func.call(py, full_args_tuple, kwargs.as_ref().map(|k| k.bind(py))),
+                    func.call1(py, (x,)),
                     &self.name,
                 )?)
             }
             NodeLogic::Filter {
                 predicate,
-                args,
-                kwargs,
             } => {
-                let args_ref = args.bind(py);
                 let x_clone = x.clone_ref(py);
-                let x_tuple = PyTuple::new(py, vec![x_clone])?;
-                let full_args = x_tuple.add(args_ref)?;
-                let full_args_tuple = full_args.cast_into::<PyTuple>()?;
                 let res = wrap_error(
                     py,
-                    predicate.call(py, full_args_tuple, kwargs.as_ref().map(|k| k.bind(py))),
+                    predicate.call1(py, (x_clone,)),
                     &self.name,
                 )?;
                 if !skip_async_check {
@@ -747,14 +739,10 @@ impl Stream {
                 buffer.push(x);
                 return Ok(None);
             }
-            NodeLogic::Sink { func, args, kwargs } => {
-                let args_ref = args.bind(py);
-                let x_tuple = PyTuple::new(py, vec![x])?;
-                let full_args = x_tuple.add(args_ref)?;
-                let full_args_tuple = full_args.cast_into::<PyTuple>()?;
+            NodeLogic::Sink { func } => {
                 wrap_error(
                     py,
-                    func.call(py, full_args_tuple, kwargs.as_ref().map(|k| k.bind(py))),
+                    func.call1(py, (x,)),
                     &self.name,
                 )?;
                 None
@@ -845,10 +833,14 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let process_async = helpers_module.getattr("_process_async")?;
     let gather = helpers_module.getattr("_gather")?;
     let filter_async = helpers_module.getattr("_filter_async")?;
+    let build_map_func = helpers_module.getattr("_build_map_func")?;
+    let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
 
     let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
     let _ = FILTER_ASYNC.set(filter_async.unbind());
+    let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
+    let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
