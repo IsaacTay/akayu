@@ -208,7 +208,10 @@ enum NodeLogic {
         returns_state: bool,
     },
     Tag { index: usize },
-    CombineLatest { state: Vec<Option<Py<PyAny>>> },
+    CombineLatest {
+        state: Vec<Option<Py<PyAny>>>,
+        emit_on_indices: Vec<usize>, // Empty = emit on any, non-empty = only these indices
+    },
     Zip { buffers: Vec<VecDeque<Py<PyAny>>> },
     BatchMap { func: Py<PyAny> },
 }
@@ -843,17 +846,68 @@ impl Stream {
     ///
     /// Args:
     ///     *others: Other streams to combine with this one.
+    ///     emit_on: Stream or list of streams that trigger emission.
+    ///              If None (default), emit on update from any stream.
     ///
     /// Returns:
     ///     A new Stream emitting tuples of latest values.
-    #[pyo3(signature = (*others))]
-    fn combine_latest(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (*others, emit_on=None))]
+    fn combine_latest(
+        &mut self,
+        py: Python,
+        others: Vec<Py<Self>>,
+        emit_on: Option<Py<PyAny>>,
+    ) -> PyResult<Py<Self>> {
         let total_sources = 1 + others.len();
+
+        // Helper to find stream index. Returns Some(0) if stream is self (can't borrow),
+        // Some(i+1) if stream matches others[i], or None if not found.
+        let find_stream_index = |stream: &Py<Self>| -> Option<usize> {
+            // Try to borrow - if it fails, it's self (already mutably borrowed)
+            if stream.try_borrow(py).is_err() {
+                return Some(0); // It's self
+            }
+            // Check against others
+            for (i, other) in others.iter().enumerate() {
+                if stream.as_ptr() == other.as_ptr() {
+                    return Some(i + 1);
+                }
+            }
+            None
+        };
+
+        // Resolve emit_on to indices
+        let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
+            let mut indices = Vec::new();
+
+            // Check if it's a single stream or a list
+            if let Ok(single_stream) = emit_on_obj.extract::<Py<Self>>(py) {
+                if let Some(idx) = find_stream_index(&single_stream) {
+                    indices.push(idx);
+                }
+            } else if let Ok(stream_list) = emit_on_obj.extract::<Vec<Py<Self>>>(py) {
+                for stream in &stream_list {
+                    if let Some(idx) = find_stream_index(stream) {
+                        indices.push(idx);
+                    }
+                }
+            } else {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "emit_on must be a Stream or list of Streams",
+                ));
+            }
+
+            indices
+        } else {
+            Vec::new() // Empty means emit on any
+        };
+
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::CombineLatest {
                     state: (0..total_sources).map(|_| None).collect(),
+                    emit_on_indices,
                 },
                 downstreams: Vec::new(),
                 name: format!("{}.combine_latest", self.name),
@@ -1015,14 +1069,20 @@ impl Stream {
                     output_batch.push(tuple.into());
                 }
             }
-            NodeLogic::CombineLatest { state } => {
+            NodeLogic::CombineLatest {
+                state,
+                emit_on_indices,
+            } => {
                 for x in items {
                     let tuple: (usize, Py<PyAny>) = x.extract(py)?;
                     let (idx, val) = tuple;
                     if idx < state.len() {
                         state[idx] = Some(val);
                     }
-                    if state.iter().all(std::option::Option::is_some) {
+                    // Check if we should emit: all values present AND (emit_on empty OR idx in emit_on)
+                    let should_emit = state.iter().all(std::option::Option::is_some)
+                        && (emit_on_indices.is_empty() || emit_on_indices.contains(&idx));
+                    if should_emit {
                         let values: Vec<Py<PyAny>> = state
                             .iter()
                             .map(|s| s.as_ref().unwrap().clone_ref(py))
@@ -1225,13 +1285,19 @@ impl Stream {
                 let tuple = PyTuple::new(py, elements)?;
                 Some(tuple.into())
             }
-            NodeLogic::CombineLatest { state } => {
+            NodeLogic::CombineLatest {
+                state,
+                emit_on_indices,
+            } => {
                 let tuple: (usize, Py<PyAny>) = x.extract(py)?;
                 let (idx, val) = tuple;
                 if idx < state.len() {
                     state[idx] = Some(val);
                 }
-                if state.iter().all(std::option::Option::is_some) {
+                // Check if we should emit: all values present AND (emit_on empty OR idx in emit_on)
+                let should_emit = state.iter().all(std::option::Option::is_some)
+                    && (emit_on_indices.is_empty() || emit_on_indices.contains(&idx));
+                if should_emit {
                     let values: Vec<Py<PyAny>> = state
                         .iter()
                         .map(|s| s.as_ref().unwrap().clone_ref(py))
@@ -1466,6 +1532,8 @@ fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
 ///
 /// Args:
 ///     *streams: Two or more streams to combine.
+///     emit_on: Stream or list of streams that trigger emission.
+///              If None (default), emit on update from any stream.
 ///
 /// Returns:
 ///     A new Stream emitting tuples of latest values.
@@ -1474,14 +1542,53 @@ fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
 ///     >>> s1 = rstreamz.Stream()
 ///     >>> s2 = rstreamz.Stream()
 ///     >>> combined = rstreamz.combine_latest(s1, s2)
+///     >>> combined_on_s1 = rstreamz.combine_latest(s1, s2, emit_on=s1)
 #[pyfunction]
-#[pyo3(signature = (*streams))]
-fn combine_latest(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
+#[pyo3(signature = (*streams, emit_on=None))]
+fn combine_latest(
+    py: Python,
+    streams: Vec<Py<Stream>>,
+    emit_on: Option<Py<PyAny>>,
+) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
         return Err(pyo3::exceptions::PyValueError::new_err(
             "combine_latest requires at least one stream",
         ));
     }
+
+    // Resolve emit_on to indices within the streams vector
+    let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
+        let mut indices = Vec::new();
+
+        // Check if it's a single stream or a list
+        if let Ok(single_stream) = emit_on_obj.extract::<Py<Stream>>(py) {
+            // Single stream - find its index by comparing Python object pointers
+            for (i, s) in streams.iter().enumerate() {
+                if single_stream.as_ptr() == s.as_ptr() {
+                    indices.push(i);
+                    break;
+                }
+            }
+        } else if let Ok(stream_list) = emit_on_obj.extract::<Vec<Py<Stream>>>(py) {
+            // List of streams
+            for stream in &stream_list {
+                for (i, s) in streams.iter().enumerate() {
+                    if stream.as_ptr() == s.as_ptr() {
+                        indices.push(i);
+                        break;
+                    }
+                }
+            }
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "emit_on must be a Stream or list of Streams",
+            ));
+        }
+
+        indices
+    } else {
+        Vec::new() // Empty means emit on any
+    };
 
     let total_sources = streams.len();
     let node = Py::new(
@@ -1489,6 +1596,7 @@ fn combine_latest(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> 
         Stream {
             logic: NodeLogic::CombineLatest {
                 state: (0..total_sources).map(|_| None).collect(),
+                emit_on_indices,
             },
             downstreams: Vec::new(),
             name: "combine_latest".to_string(),
