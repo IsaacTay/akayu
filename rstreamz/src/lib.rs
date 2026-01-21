@@ -17,6 +17,8 @@ static FILTER_ASYNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static BUILD_MAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static BUILD_STARMAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 static IS_SYNC_CALLABLE: OnceLock<Py<PyAny>> = OnceLock::new();
+static COMPOSE_MAPS: OnceLock<Py<PyAny>> = OnceLock::new();
+static COMPOSE_FILTERS: OnceLock<Py<PyAny>> = OnceLock::new();
 
 fn get_is_awaitable() -> PyResult<&'static Py<PyAny>> {
     IS_AWAITABLE.get().ok_or_else(|| {
@@ -56,6 +58,18 @@ fn get_build_starmap_func() -> PyResult<&'static Py<PyAny>> {
 
 fn get_is_sync_callable() -> PyResult<&'static Py<PyAny>> {
     IS_SYNC_CALLABLE.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_compose_maps() -> PyResult<&'static Py<PyAny>> {
+    COMPOSE_MAPS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_compose_filters() -> PyResult<&'static Py<PyAny>> {
+    COMPOSE_FILTERS.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
     })
 }
@@ -316,6 +330,84 @@ def _build_starmap_func(func, args, kwargs):
         def wrapper(x):
             return func(*x, *args)
         return wrapper
+
+def _compose_maps(f, g):
+    """Compose two map functions into a flat chain."""
+    # Get existing function lists or create new ones
+    f_funcs = getattr(f, '_chain', [f])
+    g_funcs = getattr(g, '_chain', [g])
+    all_funcs = f_funcs + g_funcs
+
+    # Create a flat composed function based on chain length
+    if len(all_funcs) == 2:
+        f1, f2 = all_funcs
+        def composed2(x):
+            return f2(f1(x))
+        composed2._chain = all_funcs
+        return composed2
+    elif len(all_funcs) == 3:
+        f1, f2, f3 = all_funcs
+        def composed3(x):
+            return f3(f2(f1(x)))
+        composed3._chain = all_funcs
+        return composed3
+    elif len(all_funcs) == 4:
+        f1, f2, f3, f4 = all_funcs
+        def composed4(x):
+            return f4(f3(f2(f1(x))))
+        composed4._chain = all_funcs
+        return composed4
+    elif len(all_funcs) == 5:
+        f1, f2, f3, f4, f5 = all_funcs
+        def composed5(x):
+            return f5(f4(f3(f2(f1(x)))))
+        composed5._chain = all_funcs
+        return composed5
+    else:
+        # Fallback for longer chains: use reduce-style
+        def composed_long(x):
+            result = x
+            for fn in all_funcs:
+                result = fn(result)
+            return result
+        composed_long._chain = all_funcs
+        return composed_long
+
+def _compose_filters(p1, p2):
+    """Compose two filter predicates into a flat chain."""
+    # Get existing predicate lists or create new ones
+    p1_preds = getattr(p1, '_chain', [p1])
+    p2_preds = getattr(p2, '_chain', [p2])
+    all_preds = p1_preds + p2_preds
+
+    # Create a flat composed predicate based on chain length
+    if len(all_preds) == 2:
+        pred1, pred2 = all_preds
+        def composed2(x):
+            return pred1(x) and pred2(x)
+        composed2._chain = all_preds
+        return composed2
+    elif len(all_preds) == 3:
+        pred1, pred2, pred3 = all_preds
+        def composed3(x):
+            return pred1(x) and pred2(x) and pred3(x)
+        composed3._chain = all_preds
+        return composed3
+    elif len(all_preds) == 4:
+        pred1, pred2, pred3, pred4 = all_preds
+        def composed4(x):
+            return pred1(x) and pred2(x) and pred3(x) and pred4(x)
+        composed4._chain = all_preds
+        return composed4
+    else:
+        # Fallback for longer chains
+        def composed_long(x):
+            for pred in all_preds:
+                if not pred(x):
+                    return False
+            return True
+        composed_long._chain = all_preds
+        return composed_long
 "#;
 
 #[pymethods]
@@ -1210,10 +1302,16 @@ impl Stream {
     /// Optimize the topology on first emit.
     ///
     /// This method walks the stream graph and:
+    /// - Fuses consecutive Map operations into a single composed Map
+    /// - Fuses consecutive Filter operations into a single composed Filter
     /// - If all nodes have sync-only functions (func_is_sync = true), enables
     ///   skip_async_check for all nodes to avoid per-emit is_awaitable checks
     fn optimize_topology(&mut self, py: Python) {
-        // Collect all nodes in the topology using BFS
+        // Phase 1: Fuse consecutive maps and filters
+        // We need to process nodes that might have fusable children
+        self.fuse_linear_chains(py);
+
+        // Phase 2: Collect all nodes and check sync status
         let mut all_nodes: Vec<Py<Stream>> = Vec::new();
         let mut to_visit: Vec<Py<Stream>> = self
             .downstreams
@@ -1245,6 +1343,89 @@ impl Stream {
             }
         }
     }
+
+    /// Recursively fuse linear chains of Map or Filter nodes.
+    fn fuse_linear_chains(&mut self, py: Python) {
+        // Process each downstream
+        for downstream in &self.downstreams {
+            let mut child = downstream.borrow_mut(py);
+            child.fuse_linear_chains(py);
+        }
+
+        // Try to fuse this node with its single downstream if applicable
+        if self.downstreams.len() == 1 {
+            let child_py = &self.downstreams[0];
+            let child = child_py.borrow_mut(py);
+
+            // Check if we can fuse Map -> Map
+            if let NodeLogic::Map { func: ref my_func } = self.logic {
+                if let NodeLogic::Map {
+                    func: ref child_func,
+                } = child.logic
+                {
+                    // Fuse: compose the functions
+                    if let Ok(compose) = get_compose_maps() {
+                        if let Ok(composed) = compose.call1(py, (my_func, child_func)) {
+                            // Clone child's downstreams before modifying self
+                            let new_downstreams: Vec<Py<Stream>> = child
+                                .downstreams
+                                .iter()
+                                .map(|d| d.clone_ref(py))
+                                .collect();
+                            let child_name = child.name.clone();
+                            let child_func_is_sync = child.func_is_sync;
+                            drop(child); // Release borrow before modifying self
+
+                            // Update this node's function to the composed one
+                            self.logic = NodeLogic::Map { func: composed };
+                            // Update name to show fusion
+                            self.name = format!("{}+{}", self.name, child_name);
+                            // Bypass child: point to child's downstreams
+                            self.downstreams = new_downstreams;
+                            // Inherit func_is_sync (both must be sync for composed to be sync)
+                            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Check if we can fuse Filter -> Filter
+            if let NodeLogic::Filter { predicate: ref my_pred } = self.logic {
+                if let NodeLogic::Filter {
+                    predicate: ref child_pred,
+                } = child.logic
+                {
+                    // Fuse: compose the predicates with AND
+                    if let Ok(compose) = get_compose_filters() {
+                        if let Ok(composed) = compose.call1(py, (my_pred, child_pred)) {
+                            // Clone child's downstreams before modifying self
+                            let new_downstreams: Vec<Py<Stream>> = child
+                                .downstreams
+                                .iter()
+                                .map(|d| d.clone_ref(py))
+                                .collect();
+                            let child_name = child.name.clone();
+                            let child_func_is_sync = child.func_is_sync;
+                            drop(child); // Release borrow before modifying self
+
+                            // Update this node's predicate to the composed one
+                            self.logic = NodeLogic::Filter {
+                                predicate: composed,
+                            };
+                            // Update name to show fusion
+                            self.name = format!("{}+{}", self.name, child_name);
+                            // Bypass child: point to child's downstreams
+                            self.downstreams = new_downstreams;
+                            // Inherit func_is_sync
+                            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[pymodule]
@@ -1264,6 +1445,8 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
     let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
+    let compose_maps = helpers_module.getattr("_compose_maps")?;
+    let compose_filters = helpers_module.getattr("_compose_filters")?;
 
     let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
@@ -1271,6 +1454,8 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
     let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
+    let _ = COMPOSE_MAPS.set(compose_maps.unbind());
+    let _ = COMPOSE_FILTERS.set(compose_filters.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
