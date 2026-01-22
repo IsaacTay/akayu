@@ -1,5 +1,5 @@
 import random
-from rstreamz import Stream
+from akayu import Stream
 
 def safe_inc(x):
     if isinstance(x, int):

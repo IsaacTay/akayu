@@ -1,8 +1,8 @@
-import rstreamz
+import akayu
 
 
 def test_starmap():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     def adder(x, y, offset=0):
@@ -19,7 +19,7 @@ def test_starmap():
 
 def test_starmap_batch():
     """Test starmap with emit_batch."""
-    s = rstreamz.Stream(asynchronous=False)
+    s = akayu.Stream(asynchronous=False)
     L = []
     s.starmap(lambda a, b: a + b).sink(L.append)
     s.emit_batch([(1, 2), (3, 4), (5, 6)])

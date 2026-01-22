@@ -1,6 +1,6 @@
 # Benchmarks
 
-Benchmarks comparing `rstreamz` performance against the original `streamz` library and pure Python implementations.
+Benchmarks comparing `akayu` performance against the original `streamz` library and pure Python implementations.
 
 **Environment:**
 - Python 3.13.11
@@ -11,39 +11,39 @@ Benchmarks comparing `rstreamz` performance against the original `streamz` libra
 
 | Comparison | Speedup |
 |------------|---------|
-| rstreamz vs streamz (map/filter pipeline) | **~24x faster** |
-| rstreamz vs streamz (flatten) | **~62x faster** |
-| rstreamz vs streamz (collect) | **~37x faster** |
-| rstreamz vs streamz (complex topologies) | **~21-45x faster** |
+| akayu vs streamz (map/filter pipeline) | **~24x faster** |
+| akayu vs streamz (flatten) | **~62x faster** |
+| akayu vs streamz (collect) | **~37x faster** |
+| akayu vs streamz (complex topologies) | **~21-45x faster** |
 
-## rstreamz vs streamz
+## akayu vs streamz
 
 ### Map/Filter Pipeline (500k items)
 
 | Library | Mean (ms) | Ops/sec | Speedup |
 |---------|-----------|---------|---------|
-| rstreamz | 235.88 | 4.24 | 1.0x |
+| akayu | 235.88 | 4.24 | 1.0x |
 | streamz | 5,752.09 | 0.17 | **24x slower** |
 
 ### Flatten Operation (500k items)
 
 | Library | Mean (ms) | Ops/sec | Speedup |
 |---------|-----------|---------|---------|
-| rstreamz | 33.32 | 30.02 | 1.0x |
+| akayu | 33.32 | 30.02 | 1.0x |
 | streamz | 2,051.00 | 0.49 | **62x slower** |
 
 ### Collect Operation (500k items)
 
 | Library | Mean (ms) | Ops/sec | Speedup |
 |---------|-----------|---------|---------|
-| rstreamz | 50.52 | 19.80 | 1.0x |
+| akayu | 50.52 | 19.80 | 1.0x |
 | streamz | 1,854.79 | 0.54 | **37x slower** |
 
 ## Complex Flow Topologies (100k items)
 
 Benchmarks for complex stream patterns with multiple branches, joins, and deep pipelines.
 
-| Topology | rstreamz (ms) | streamz (ms) | Speedup |
+| Topology | akayu (ms) | streamz (ms) | Speedup |
 |----------|---------------|--------------|---------|
 | Multi-union (4 sources) | 33.73 | 1,525.04 | **45x faster** |
 | Combine latest (3 sources) | 41.63 | 863.77 | **21x faster** |
@@ -64,7 +64,7 @@ Benchmarks for complex stream patterns with multiple branches, joins, and deep p
 - **Complex DAG**: Split with one branch using flatten, then union
 - **Fan-out**: Single source with 5 parallel map→filter→sink branches
 
-## rstreamz vs Pure Python
+## akayu vs Pure Python
 
 Comparison against equivalent pure Python implementations:
 
@@ -73,21 +73,21 @@ Comparison against equivalent pure Python implementations:
 | Pure Python loop | 55.82 | 17.92 | Direct list iteration |
 | Python separated map+filter | 77.33 | 12.93 | Two separate list comps |
 | Python map+filter combined | 138.35 | 7.23 | Generator chain |
-| rstreamz batch | 142.76 | 7.00 | Stream pipeline |
-| rstreamz emit | 229.91 | 4.35 | Per-item emit |
+| akayu batch | 142.76 | 7.00 | Stream pipeline |
+| akayu emit | 229.91 | 4.35 | Per-item emit |
 
 The overhead vs pure Python is due to:
 1. Stream graph traversal
 2. Python function call overhead per operation
 3. Dynamic dispatch for node types
 
-For batch operations, rstreamz approaches pure Python performance while providing the reactive programming model.
+For batch operations, akayu approaches pure Python performance while providing the reactive programming model.
 
 ## Optimizations
 
 ### Parallel Execution (`par()` + `prefetch()`)
 
-rstreamz provides two mechanisms for parallel execution that work efficiently together:
+akayu provides two mechanisms for parallel execution that work efficiently together:
 
 - **`par()`**: Executes all downstream branches concurrently in a shared thread pool
 - **`prefetch(n)`**: Processes up to `n` items concurrently while preserving output order
@@ -99,11 +99,11 @@ rstreamz provides two mechanisms for parallel execution that work efficiently to
 | `prefetch(4)` alone | ~135ms | 1.0x |
 | `par()` + `prefetch(4)` | ~136ms | ~1.01x |
 
-**Lock Optimization**: When `prefetch()` is used inside `par()` branches, rstreamz only locks at convergence points (like `union`), not the entire branch. This minimizes lock contention while maintaining thread safety.
+**Lock Optimization**: When `prefetch()` is used inside `par()` branches, akayu only locks at convergence points (like `union`), not the entire branch. This minimizes lock contention while maintaining thread safety.
 
 ### Map/Filter Fusion
 
-On first emit, rstreamz optimizes the stream graph by fusing consecutive operations:
+On first emit, akayu optimizes the stream graph by fusing consecutive operations:
 - **Consecutive maps**: `map(f1) → map(f2) → map(f3)` becomes a single `map(compose(f1, f2, f3))`
 - **Consecutive filters**: `filter(p1) → filter(p2)` becomes `filter(p1 and p2)`
 

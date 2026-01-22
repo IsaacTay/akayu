@@ -1,6 +1,6 @@
 import random
 import pytest
-from rstreamz import Stream
+from akayu import Stream
 
 def test_fuzz_dynamic_topology():
     """

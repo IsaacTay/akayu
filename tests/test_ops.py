@@ -1,4 +1,4 @@
-from rstreamz import Stream
+from akayu import Stream
 
 
 def test_map():

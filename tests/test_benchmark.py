@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 
 
 def test_benchmark_throughput(benchmark):
@@ -7,7 +7,7 @@ def test_benchmark_throughput(benchmark):
     """
 
     def run_pipeline():
-        s = rstreamz.Stream()
+        s = akayu.Stream()
         # Create a pipeline: map -> filter -> sink
         count = 0
 
@@ -36,7 +36,7 @@ def test_benchmark_throughput_sync_flag(benchmark):
 
     def run_pipeline():
         # Set asynchronous=False to enable sync-only optimization
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         # Create a pipeline: map -> filter -> sink
         count = 0
 
@@ -64,7 +64,7 @@ def test_benchmark_batch_throughput(benchmark):
 
     def run_pipeline():
         # Set asynchronous=False to enable sync-only optimization + batching
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         # Create a pipeline: map -> filter -> sink
         count = 0
 
@@ -118,7 +118,7 @@ def test_benchmark_expansion_emit(benchmark):
     """
 
     def run_pipeline():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         count = 0
 
         def inc_count(x):
@@ -148,7 +148,7 @@ def test_benchmark_expansion_batch(benchmark):
     """
 
     def run_pipeline():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         count = 0
 
         def inc_count(x):

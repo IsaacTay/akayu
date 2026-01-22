@@ -1,4 +1,4 @@
-from rstreamz import Stream
+from akayu import Stream
 
 def test_add_node_after_emit():
     """Test adding a node to source after an emit."""
@@ -58,7 +58,7 @@ def test_split_optimization_interleaved():
     
     # Add Branch 2 to n1 (which might have been fused/modified?)
     # If n1 was fused into a composed node, can we still add to it?
-    # In rstreamz implementation, fusion modifies the *upstream* node to contain the composed logic
+    # In akayu implementation, fusion modifies the *upstream* node to contain the composed logic
     # and points to the *downstream* node's downstreams.
     # Wait, if n1 -> n2. Fuse n1+n2.
     # n1.logic becomes composed. n1.downstreams becomes n2.downstreams.

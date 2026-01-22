@@ -2,7 +2,7 @@
 
 import time
 import threading
-from rstreamz import Stream, union
+from akayu import Stream, union
 
 
 def test_par_basic():

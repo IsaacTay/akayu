@@ -53,12 +53,12 @@ clean:
 
 # Clean all caches (use when builds seem stale)
 clean-all: clean
-    rm -rf .venv/lib/python*/site-packages/rstreamz/*.so
-    uv cache clean rstreamz 2>/dev/null || true
+    rm -rf .venv/lib/python*/site-packages/akayu/*.so
+    uv cache clean akayu 2>/dev/null || true
 
 # Force rebuild (bypasses uv cache)
 rebuild: sync
-    uv pip install -e . --reinstall-package rstreamz
+    uv pip install -e . --reinstall-package akayu
 
 # Build wheels for Python 3.12
 build-wheels:

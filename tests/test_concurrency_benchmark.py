@@ -1,5 +1,5 @@
 import pytest
-import rstreamz
+import akayu
 import streamz
 import asyncio
 import time
@@ -46,8 +46,8 @@ async def test_benchmark_concurrency_streamz():
 
 
 @pytest.mark.asyncio
-async def test_benchmark_concurrency_rstreamz():
-    duration = await benchmark_concurrency(rstreamz.Stream)
+async def test_benchmark_concurrency_akayu():
+    duration = await benchmark_concurrency(akayu.Stream)
     print(f"\nRStreamz (Async) Duration: {duration:.4f}s")
 
 
@@ -88,6 +88,6 @@ def test_benchmark_sync_streamz(benchmark):
     print(f"\nStreamz (Sync) Duration: {duration:.4f}s")
 
 
-def test_benchmark_sync_rstreamz(benchmark):
-    duration = benchmark_sync(rstreamz.Stream)
+def test_benchmark_sync_akayu(benchmark):
+    duration = benchmark_sync(akayu.Stream)
     print(f"\nRStreamz (Sync) Duration: {duration:.4f}s")

@@ -345,9 +345,9 @@ impl Stream {
 ///     A new Stream emitting elements from all input streams.
 ///
 /// Example:
-///     >>> s1 = rstreamz.Stream()
-///     >>> s2 = rstreamz.Stream()
-///     >>> merged = rstreamz.union(s1, s2)
+///     >>> s1 = akayu.Stream()
+///     >>> s2 = akayu.Stream()
+///     >>> merged = akayu.union(s1, s2)
 #[pyfunction]
 #[pyo3(signature = (*streams))]
 pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
@@ -401,10 +401,10 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
 ///     A new Stream emitting tuples of latest values.
 ///
 /// Example:
-///     >>> s1 = rstreamz.Stream()
-///     >>> s2 = rstreamz.Stream()
-///     >>> combined = rstreamz.combine_latest(s1, s2)
-///     >>> combined_on_s1 = rstreamz.combine_latest(s1, s2, emit_on=s1)
+///     >>> s1 = akayu.Stream()
+///     >>> s2 = akayu.Stream()
+///     >>> combined = akayu.combine_latest(s1, s2)
+///     >>> combined_on_s1 = akayu.combine_latest(s1, s2, emit_on=s1)
 #[pyfunction]
 #[pyo3(signature = (*streams, emit_on=None))]
 pub fn combine_latest(

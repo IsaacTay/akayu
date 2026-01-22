@@ -1,9 +1,9 @@
 import pytest
-import rstreamz
+import akayu
 
 
 def test_error_propagation():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
 
     def failing_func(x):
         raise ValueError("Original Error")
@@ -23,7 +23,7 @@ def test_error_propagation():
 
 
 def test_error_propagation_batch():
-    s = rstreamz.Stream(asynchronous=False)
+    s = akayu.Stream(asynchronous=False)
 
     def failing_func(x):
         if x == 2:
@@ -41,7 +41,7 @@ def test_error_propagation_batch():
 
 def test_error_in_filter():
     """Test error propagation from filter predicate."""
-    s = rstreamz.Stream()
+    s = akayu.Stream()
 
     def bad_pred(x):
         raise ValueError("predicate error")

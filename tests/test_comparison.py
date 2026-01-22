@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 import streamz
 
 # --- Functional Equivalence Tests ---
@@ -6,7 +6,7 @@ import streamz
 
 def test_equivalence_basic():
     """
-    Verifies that rstreamz matches streamz behavior for Map -> Filter -> Accumulate.
+    Verifies that akayu matches streamz behavior for Map -> Filter -> Accumulate.
     """
 
     # Setup Logic
@@ -15,13 +15,13 @@ def test_equivalence_basic():
         res = []
 
         # map(x*2) -> filter(x>10) -> accumulate(sum) -> sink
-        # Note: streamz accumulate default emits state on every update, same as rstreamz impl.
+        # Note: streamz accumulate default emits state on every update, same as akayu impl.
         # streamz accumulate signature: accumulate(func, start=no_default)
 
         node = s.map(lambda x: x * 2).filter(lambda x: x > 10)
 
-        # Streamz accumulate vs rstreamz accumulate
-        # rstreamz: accumulate(func, start)
+        # Streamz accumulate vs akayu accumulate
+        # akayu: accumulate(func, start)
         # streamz: accumulate(func, start=...)
         # Both behave similarly for simple reductions.
 
@@ -41,7 +41,7 @@ def test_equivalence_basic():
         s_orig.emit(i)
 
     # Run RStreamz
-    s_new, res_new = pipeline_setup(rstreamz.Stream)
+    s_new, res_new = pipeline_setup(akayu.Stream)
     for i in inputs:
         s_new.emit(i)
 
@@ -68,7 +68,7 @@ def test_equivalence_union():
     s1_o.emit(3)
 
     # RStreamz
-    s1_n, s2_n, res_n = setup(rstreamz.Stream)
+    s1_n, s2_n, res_n = setup(akayu.Stream)
     s1_n.emit(1)
     s2_n.emit(2)
     s1_n.emit(3)
@@ -96,7 +96,7 @@ def test_equivalence_combine_latest():
     s1_o.emit(30)  # s1=30 -> (30, 20)
 
     # RStreamz
-    s1_n, s2_n, res_n = setup(rstreamz.Stream)
+    s1_n, s2_n, res_n = setup(akayu.Stream)
     s1_n.emit(10)
     s2_n.emit(20)
     s1_n.emit(30)
