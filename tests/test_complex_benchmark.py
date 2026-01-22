@@ -1,5 +1,5 @@
 """
-Benchmarks for complex stream topologies comparing rstreamz vs streamz.
+Benchmarks for complex stream topologies comparing akayu vs streamz.
 
 Tests various patterns:
 - Fan-out (split to multiple branches)
@@ -9,7 +9,7 @@ Tests various patterns:
 - Multiple joins (combine_latest, zip)
 """
 
-import rstreamz
+import akayu
 import streamz
 
 N_ITEMS = 100_000
@@ -34,9 +34,9 @@ def run_fanout(source_cls, n_branches=5):
     return count
 
 
-def test_benchmark_fanout_rstreamz(benchmark):
+def test_benchmark_fanout_akayu(benchmark):
     """Fan-out: 1 source -> 5 branches"""
-    result = benchmark(run_fanout, rstreamz.Stream, 5)
+    result = benchmark(run_fanout, akayu.Stream, 5)
     assert result == N_ITEMS // 2 * 5
 
 
@@ -68,9 +68,9 @@ def run_deep_pipeline(source_cls, depth=10):
     return count
 
 
-def test_benchmark_deep_pipeline_rstreamz(benchmark):
+def test_benchmark_deep_pipeline_akayu(benchmark):
     """Deep pipeline: 10 chained maps"""
-    result = benchmark(run_deep_pipeline, rstreamz.Stream, 10)
+    result = benchmark(run_deep_pipeline, akayu.Stream, 10)
     assert result == N_ITEMS
 
 
@@ -100,9 +100,9 @@ def run_diamond(source_cls):
     return len(results)
 
 
-def test_benchmark_diamond_rstreamz(benchmark):
+def test_benchmark_diamond_akayu(benchmark):
     """Diamond: split -> 2 branches -> union"""
-    result = benchmark(run_diamond, rstreamz.Stream)
+    result = benchmark(run_diamond, akayu.Stream)
     assert result == N_ITEMS * 2
 
 
@@ -137,9 +137,9 @@ def run_multi_union(source_cls, n_sources=4):
     return count
 
 
-def test_benchmark_multi_union_rstreamz(benchmark):
+def test_benchmark_multi_union_akayu(benchmark):
     """Multi-union: 4 sources merged"""
-    result = benchmark(run_multi_union, rstreamz.Stream, 4)
+    result = benchmark(run_multi_union, akayu.Stream, 4)
     assert result == N_ITEMS
 
 
@@ -171,9 +171,9 @@ def run_combine_latest(source_cls):
     return len(results)
 
 
-def test_benchmark_combine_latest_rstreamz(benchmark):
+def test_benchmark_combine_latest_akayu(benchmark):
     """Combine latest: 3 sources"""
-    result = benchmark(run_combine_latest, rstreamz.Stream)
+    result = benchmark(run_combine_latest, akayu.Stream)
     assert result == N_ITEMS
 
 
@@ -201,9 +201,9 @@ def run_zip_streams(source_cls):
     return len(results)
 
 
-def test_benchmark_zip_rstreamz(benchmark):
+def test_benchmark_zip_akayu(benchmark):
     """Zip: 3 sources"""
-    result = benchmark(run_zip_streams, rstreamz.Stream)
+    result = benchmark(run_zip_streams, akayu.Stream)
     assert result == N_ITEMS
 
 
@@ -243,9 +243,9 @@ def run_complex_dag(source_cls):
     return count
 
 
-def test_benchmark_complex_dag_rstreamz(benchmark):
+def test_benchmark_complex_dag_akayu(benchmark):
     """Complex DAG with split, flatten, union"""
-    benchmark(run_complex_dag, rstreamz.Stream)
+    benchmark(run_complex_dag, akayu.Stream)
 
 
 def test_benchmark_complex_dag_streamz(benchmark):
@@ -282,9 +282,9 @@ def run_accumulate_branches(source_cls):
     return results["count"]
 
 
-def test_benchmark_accumulate_branches_rstreamz(benchmark):
+def test_benchmark_accumulate_branches_akayu(benchmark):
     """3 accumulate branches from single source"""
-    result = benchmark(run_accumulate_branches, rstreamz.Stream)
+    result = benchmark(run_accumulate_branches, akayu.Stream)
     assert result == N_ITEMS
 
 

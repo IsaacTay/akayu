@@ -1,4 +1,4 @@
-//! # rstreamz - High-performance reactive streams for Python
+//! # akayu - High-performance reactive streams for Python
 
 // Allow clippy warnings that conflict with PyO3 patterns
 #![allow(clippy::ref_option)] // PyO3 signatures use &Option<T>
@@ -58,10 +58,10 @@ pub struct Stream {
     pub(crate) compiled: bool,
 }
 
-const HELPERS: &str = include_str!("rstreamz.py");
+const HELPERS: &str = include_str!("akayu.py");
 
 #[pymodule]
-fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(from_text_file, m)?)?;

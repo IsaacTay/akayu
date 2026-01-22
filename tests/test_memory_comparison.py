@@ -1,5 +1,5 @@
 import pytest
-import rstreamz
+import akayu
 import streamz
 import psutil
 import os
@@ -51,7 +51,7 @@ def run_pipeline_and_measure(source_cls, items):
 
 @pytest.mark.parametrize(
     "library_name, stream_cls",
-    [("streamz", streamz.Stream), ("rstreamz", rstreamz.Stream)],
+    [("streamz", streamz.Stream), ("akayu", akayu.Stream)],
 )
 def test_memory_footprint(library_name, stream_cls):
     items = 200_000
@@ -72,4 +72,4 @@ def test_memory_footprint(library_name, stream_cls):
 if __name__ == "__main__":
     # Allow running manually to see print output easily
     test_memory_footprint("streamz", streamz.Stream)
-    test_memory_footprint("rstreamz", rstreamz.Stream)
+    test_memory_footprint("akayu", akayu.Stream)

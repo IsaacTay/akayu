@@ -1,5 +1,5 @@
 import asyncio
-from rstreamz import Stream
+from akayu import Stream
 
 async def my_coro():
     return 42
@@ -43,7 +43,7 @@ def test_async_default_awaits():
     
     ret = source.emit(coro)
     
-    # rstreamz returns a coroutine/future when async processing happens
+    # akayu returns a coroutine/future when async processing happens
     assert asyncio.iscoroutine(ret) or asyncio.isfuture(ret)
     
     asyncio.run(ret)

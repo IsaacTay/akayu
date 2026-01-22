@@ -18,7 +18,7 @@ macro_rules! define_py_helper {
 
         pub(crate) fn $getter_name() -> PyResult<&'static Py<PyAny>> {
             $static_name.get().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("akayu not initialized")
             })
         }
     };

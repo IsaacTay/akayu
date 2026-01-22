@@ -1,11 +1,11 @@
-import rstreamz
+import akayu
 import asyncio
 import pytest
 
 
 @pytest.mark.asyncio
 async def test_async_map():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     async def slow_double(x):
@@ -22,7 +22,7 @@ async def test_async_map():
 
 @pytest.mark.asyncio
 async def test_async_filter():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     async def async_pred(x):
@@ -39,7 +39,7 @@ async def test_async_filter():
 
 @pytest.mark.asyncio
 async def test_mixed_sync_async():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     # Sync map
@@ -62,7 +62,7 @@ async def test_mixed_sync_async():
 @pytest.mark.asyncio
 async def test_async_map_error():
     """Test error propagation in async map."""
-    s = rstreamz.Stream()
+    s = akayu.Stream()
 
     async def failing_async(x):
         await asyncio.sleep(0.001)
@@ -77,7 +77,7 @@ async def test_async_map_error():
 @pytest.mark.asyncio
 async def test_async_filter_error():
     """Test error in async filter predicate."""
-    s = rstreamz.Stream()
+    s = akayu.Stream()
 
     async def failing_pred(x):
         raise ValueError("filter boom")

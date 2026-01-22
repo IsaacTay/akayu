@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 
 
 def test_benchmark_split_expansion(benchmark):
@@ -9,7 +9,7 @@ def test_benchmark_split_expansion(benchmark):
 
     def run_pipeline():
         # asynchronous=False enables the Sync Fast Path
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         count = 0
 
         def inc_count(x):

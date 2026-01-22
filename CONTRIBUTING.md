@@ -1,6 +1,6 @@
-# Contributing to rstreamz
+# Contributing to akayu
 
-Thank you for your interest in contributing to `rstreamz`! This project aims to provide a high-performance, memory-safe, and async-capable implementation of the `streamz` library using Rust.
+Thank you for your interest in contributing to `akayu`! This project aims to provide a high-performance, memory-safe, and async-capable implementation of the `streamz` library using Rust.
 
 ## Prerequisites
 
@@ -13,8 +13,8 @@ This project uses **Nix** to manage the development environment and dependencies
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/your-username/rstreamz.git
-    cd rstreamz
+    git clone https://github.com/your-username/akayu.git
+    cd akayu
     ```
 
 2.  **Enter the development shell**:
@@ -77,7 +77,7 @@ If you encounter unexpected behavior after changing Rust code, you may have a st
 
 3. **Manual fix**:
    ```bash
-   uv pip install -e . --reinstall-package rstreamz
+   uv pip install -e . --reinstall-package akayu
    ```
 
 The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to track Rust source files, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.

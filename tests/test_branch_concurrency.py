@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 import asyncio
 import pytest
 import time
@@ -6,7 +6,7 @@ import time
 
 @pytest.mark.asyncio
 async def test_concurrent_branches():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res1 = []
     res2 = []
 
@@ -25,7 +25,7 @@ async def test_concurrent_branches():
     start = time.time()
 
     # Emit creates two coroutines, one for each branch.
-    # rstreamz should gather them.
+    # akayu should gather them.
     # If sequential: 0.1s + 0.1s = 0.2s
     # If concurrent: max(0.1, 0.1) = 0.1s
     await s.emit(10)

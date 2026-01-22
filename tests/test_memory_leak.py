@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 import psutil
 import os
 import gc
@@ -37,7 +37,7 @@ def test_leak_async_false_pipeline():
     """Test standard map/filter/sink pipeline with asynchronous=False."""
 
     def setup():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         # Chain typical nodes to exercise argument packing optimizations
         s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).sink(lambda x: None)
         return s
@@ -53,7 +53,7 @@ def test_leak_emit_batch():
     """Test repeated emit_batch calls."""
 
     def setup():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         s.map(lambda x: x).sink(lambda x: None)
         return s
 
@@ -72,7 +72,7 @@ def test_leak_split_union_cloning():
     """Test the cloning logic in propagate_batch at splits."""
 
     def setup():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         # 3 branches to force 2 clones + 1 move in propagate_batch
         b1 = s.map(lambda x: x)
         b2 = s.map(lambda x: x)
@@ -96,7 +96,7 @@ def test_leak_accumulate_state():
     """Test accumulate which holds state, ensuring old state is dropped."""
 
     def setup():
-        s = rstreamz.Stream(asynchronous=False)
+        s = akayu.Stream(asynchronous=False)
         s.accumulate(lambda acc, x: x, start=0).sink(lambda x: None)
         return s
 

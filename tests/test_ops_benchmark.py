@@ -1,4 +1,4 @@
-import rstreamz
+import akayu
 
 # Target 500,000 downstream operations/items
 N_OPS = 500_000
@@ -18,8 +18,8 @@ def run_flatten(source_cls, n):
         s.emit(data)
 
 
-def test_benchmark_flatten_rstreamz(benchmark):
-    benchmark(run_flatten, rstreamz.Stream, N_OPS)
+def test_benchmark_flatten_akayu(benchmark):
+    benchmark(run_flatten, akayu.Stream, N_OPS)
 
 
 def run_collect(source_cls, n):
@@ -32,5 +32,5 @@ def run_collect(source_cls, n):
         s.emit(i)
 
 
-def test_benchmark_collect_rstreamz(benchmark):
-    benchmark(run_collect, rstreamz.Stream, N_OPS)
+def test_benchmark_collect_akayu(benchmark):
+    benchmark(run_collect, akayu.Stream, N_OPS)

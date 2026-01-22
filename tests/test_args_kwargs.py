@@ -1,8 +1,8 @@
-import rstreamz
+import akayu
 
 
 def test_map_args_kwargs():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     def multiplier(x, factor, offset=0):
@@ -19,7 +19,7 @@ def test_map_args_kwargs():
 
 
 def test_filter_args_kwargs():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     # Check if x is instance of type t
@@ -34,7 +34,7 @@ def test_filter_args_kwargs():
 
 
 def test_sink_args_kwargs():
-    s = rstreamz.Stream()
+    s = akayu.Stream()
     res = []
 
     def my_sink(x, prefix=""):

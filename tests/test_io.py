@@ -1,4 +1,4 @@
-from rstreamz import Stream, to_text_file, from_text_file
+from akayu import Stream, to_text_file, from_text_file
 import tempfile
 import time
 import os
