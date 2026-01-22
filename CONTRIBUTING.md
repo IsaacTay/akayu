@@ -43,13 +43,44 @@ We use `maturin` to build the Rust extension and install it into the virtual env
 |---------|-------------|
 | `just build` | Standard dev build |
 | `just build-release` | Optimized release build |
+| `just rebuild` | Force rebuild (bypasses cache) |
+| `just clean-all` | Clean all caches |
 
 Or manually:
 
 ```bash
-maturin develop                # Standard build
-maturin develop --release      # Release build
+uv run maturin develop --uv                # Standard build
+uv run maturin develop --release --uv      # Release build
 ```
+
+### Troubleshooting Stale Builds
+
+If you encounter unexpected behavior after changing Rust code, you may have a stale cached build. This can happen because `uv` caches wheel builds aggressively.
+
+**Symptoms of stale builds:**
+- Tests fail with errors referencing code you've already changed
+- Changes to `src/lib.rs` don't seem to take effect
+- Error messages reference functions that no longer exist
+
+**Solutions:**
+
+1. **Force rebuild** (recommended):
+   ```bash
+   just rebuild
+   ```
+
+2. **Clean all caches**:
+   ```bash
+   just clean-all
+   just build
+   ```
+
+3. **Manual fix**:
+   ```bash
+   uv pip install -e . --reinstall-package rstreamz
+   ```
+
+The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to track Rust source files, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.
 
 ## Running Tests
 
@@ -64,9 +95,9 @@ The project includes a comprehensive test suite using `pytest`.
 Or manually:
 
 ```bash
-python -m pytest tests         # Run all tests
-python -m pytest tests -v      # Verbose output
-python -m pytest tests/test_benchmark.py -v  # Run benchmarks
+uv run python -m pytest tests            # Run all tests
+uv run python -m pytest tests -v         # Verbose output
+uv run python -m pytest tests/test_benchmark.py -v  # Run benchmarks
 ```
 
 ## Code Style
@@ -83,10 +114,10 @@ We enforce code formatting for both Rust and Python.
 Or manually:
 
 ```bash
-cargo fmt          # Format Rust
-cargo clippy       # Lint Rust
-ruff format tests  # Format Python
-ruff check tests   # Lint Python
+cargo fmt              # Format Rust
+cargo clippy           # Lint Rust
+uv run ruff format tests  # Format Python
+uv run ruff check tests   # Lint Python
 ```
 
 ## Project Structure
@@ -116,9 +147,10 @@ ruff check tests   # Lint Python
 ## Development Workflow
 
 1.  Make your changes in `src/lib.rs`.
-2.  Run `maturin develop --release` to rebuild and update the Python package.
+2.  Run `just build` (or `just build-release` for optimized builds) to rebuild.
 3.  Add or update tests in `tests/`.
-4.  Run `python -m pytest tests` to verify your changes.
-5.  Format your code before submitting a PR.
+4.  Run `just test-quick` to verify your changes.
+5.  If tests behave unexpectedly, try `just rebuild` to bypass any cached builds.
+6.  Format your code with `just fmt` before submitting a PR.
 
 Happy Coding!
