@@ -27,11 +27,12 @@ test-quick: build
         --ignore=tests/test_concurrency_benchmark.py \
         --ignore=tests/test_memory_comparison.py \
         --ignore=tests/test_memory_leak.py \
-        --ignore=tests/test_comparison.py
+        --ignore=tests/test_comparison.py \
+        --ignore=tests/test_compile_benchmark.py
 
 # Run benchmarks only
 bench: build-release
-    uv run python -m pytest tests/test_benchmark.py tests/test_ops_benchmark.py -v
+    uv run python -m pytest tests/test_benchmark.py tests/test_ops_benchmark.py tests/test_compile_benchmark.py -v
 
 # Run clippy lints
 clippy:
