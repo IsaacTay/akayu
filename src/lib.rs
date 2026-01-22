@@ -26,6 +26,10 @@ static IS_SYNC_CALLABLE: OnceLock<Py<PyAny>> = OnceLock::new();
 static COMPOSE_MAPS: OnceLock<Py<PyAny>> = OnceLock::new();
 static COMPOSE_FILTERS: OnceLock<Py<PyAny>> = OnceLock::new();
 static PARALLEL_EXECUTE: OnceLock<Py<PyAny>> = OnceLock::new();
+static PREFETCH_STATE_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
+static PREFETCH_FILTER_STATE_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
+static SAFE_UPDATE: OnceLock<Py<PyAny>> = OnceLock::new();
+static SAFE_UPDATE_BATCH: OnceLock<Py<PyAny>> = OnceLock::new();
 
 fn get_is_awaitable() -> PyResult<&'static Py<PyAny>> {
     IS_AWAITABLE.get().ok_or_else(|| {
@@ -83,6 +87,30 @@ fn get_compose_filters() -> PyResult<&'static Py<PyAny>> {
 
 fn get_parallel_execute() -> PyResult<&'static Py<PyAny>> {
     PARALLEL_EXECUTE.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_prefetch_state_class() -> PyResult<&'static Py<PyAny>> {
+    PREFETCH_STATE_CLASS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_prefetch_filter_state_class() -> PyResult<&'static Py<PyAny>> {
+    PREFETCH_FILTER_STATE_CLASS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_safe_update() -> PyResult<&'static Py<PyAny>> {
+    SAFE_UPDATE.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+fn get_safe_update_batch() -> PyResult<&'static Py<PyAny>> {
+    SAFE_UPDATE_BATCH.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
     })
 }
@@ -157,6 +185,7 @@ fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<P
             skip_async_check: false,
             func_is_sync: true,
             frozen: false,
+            needs_lock: false,
         },
     )?;
     let stream_clone = stream.clone_ref(py);
@@ -240,6 +269,26 @@ enum NodeLogic {
     },
     /// Parallel node: propagates to downstreams in parallel threads
     Parallel,
+    /// Prefetch marker: signals that the next map should prefetch items
+    Prefetch {
+        size: usize,
+    },
+    /// Prefetch map: processes items concurrently while preserving order
+    PrefetchMap {
+        #[allow(dead_code)] // Stored for debugging/inspection
+        func: Py<PyAny>,
+        #[allow(dead_code)] // Stored for debugging/inspection
+        size: usize,
+        state: Py<PyAny>, // Python _PrefetchState object
+    },
+    /// Prefetch filter: filters items concurrently while preserving order
+    PrefetchFilter {
+        #[allow(dead_code)] // Stored for debugging/inspection
+        predicate: Py<PyAny>,
+        #[allow(dead_code)] // Stored for debugging/inspection
+        size: usize,
+        state: Py<PyAny>, // Python _PrefetchState object
+    },
 }
 
 /// A reactive stream for processing data through a pipeline of operations.
@@ -256,6 +305,7 @@ enum NodeLogic {
 ///     >>> result
 ///     [10]
 #[pyclass(subclass)]
+#[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 struct Stream {
     logic: NodeLogic,
     downstreams: Vec<Py<Stream>>,
@@ -267,6 +317,8 @@ struct Stream {
     func_is_sync: bool,
     /// True if topology has been frozen/optimized on first emit
     frozen: bool,
+    /// True if this node needs thread-safe locking (convergence point from parallel branches)
+    needs_lock: bool,
 }
 
 const HELPERS: &str = r#"
@@ -427,7 +479,19 @@ def _compose_filters(p1, p2):
 
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
+import threading
 _thread_pool = None
+_node_locks = {}  # Per-node locks to prevent concurrent update calls
+_node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
+
+def _get_node_lock(node):
+    """Get or create a lock for a specific node."""
+    node_id = id(node)
+    if node_id not in _node_locks:
+        with _node_locks_lock:
+            if node_id not in _node_locks:
+                _node_locks[node_id] = threading.RLock()
+    return _node_locks[node_id]
 
 def _parallel_execute(val, downstreams):
     """Execute downstream updates in parallel using a thread pool."""
@@ -439,7 +503,10 @@ def _parallel_execute(val, downstreams):
         # Copy context for THIS specific thread (each thread gets its own copy)
         ctx = contextvars.copy_context()
         def update_in_context():
-            return ctx.run(d.update, v)
+            # Acquire per-node lock to prevent concurrent borrows
+            lock = _get_node_lock(d)
+            with lock:
+                return ctx.run(d.update, v)
         return update_in_context
 
     # Submit all downstream updates to the thread pool
@@ -466,6 +533,147 @@ def _parallel_execute(val, downstreams):
     if results:
         return asyncio.gather(*results)
     return None
+
+def _safe_update(node, val):
+    """Call node.update(val) with per-node locking to prevent concurrent borrows."""
+    lock = _get_node_lock(node)
+    with lock:
+        return node.update(val)
+
+def _safe_update_batch(node, items):
+    """Call node.update_batch(items) with per-node locking to prevent concurrent borrows."""
+    lock = _get_node_lock(node)
+    with lock:
+        return node.update_batch(items)
+
+class _PrefetchState:
+    """State manager for prefetch map operations.
+
+    Manages concurrent execution of map functions while preserving output order.
+    Uses a thread pool to process items ahead while emitting results in sequence order.
+
+    Returns results to Rust for propagation instead of calling d.update() directly,
+    to avoid thread-safety issues with PyO3 borrows.
+    """
+
+    def __init__(self, func, size):
+        import threading
+        self.func = func
+        self.size = size
+        self.executor = ThreadPoolExecutor(max_workers=size)
+        self.pending = {}    # {seq_num: future}
+        self.next_seq = 0    # next item sequence number
+        self.next_emit = 0   # next sequence to emit
+        self.ready = {}      # {seq_num: result} for completed out-of-order
+        self._lock = threading.Lock()  # Protect against concurrent access
+
+    def update(self, item):
+        """Process an item and return ready results in order."""
+        with self._lock:
+            seq = self.next_seq
+            self.next_seq += 1
+
+            # Submit to thread pool
+            future = self.executor.submit(self.func, item)
+            self.pending[seq] = future
+
+            # If at capacity, block and drain
+            if len(self.pending) >= self.size:
+                self._drain_one()
+
+            # Return any ready results in order
+            return self._collect_ready()
+
+    def _drain_one(self):
+        """Wait for the next expected result to complete."""
+        if self.next_emit in self.pending:
+            # Wait for the next expected result
+            result = self.pending[self.next_emit].result()
+            self.ready[self.next_emit] = result
+            del self.pending[self.next_emit]
+
+    def _collect_ready(self):
+        """Collect all consecutive ready results."""
+        results = []
+        while self.next_emit in self.ready:
+            result = self.ready.pop(self.next_emit)
+            results.append(result)
+            self.next_emit += 1
+        return results
+
+    def flush(self):
+        """Wait for all pending items and return in order."""
+        with self._lock:
+            # Wait for all pending futures
+            for seq in sorted(self.pending.keys()):
+                self.ready[seq] = self.pending[seq].result()
+            self.pending.clear()
+
+            # Return all in order
+            return self._collect_ready()
+
+class _PrefetchFilterState:
+    """State manager for prefetch filter operations.
+
+    Like _PrefetchState but for filter predicates. The wrapped predicate
+    returns (keep, value) tuples, and we only emit values where keep is True.
+
+    Returns results to Rust for propagation instead of calling d.update() directly,
+    to avoid thread-safety issues with PyO3 borrows.
+    """
+
+    def __init__(self, wrapped_predicate, size):
+        import threading
+        self.wrapped_predicate = wrapped_predicate
+        self.size = size
+        self.executor = ThreadPoolExecutor(max_workers=size)
+        self.pending = {}    # {seq_num: future}
+        self.next_seq = 0
+        self.next_emit = 0
+        self.ready = {}      # {seq_num: (keep, value)}
+        self._lock = threading.Lock()  # Protect against concurrent access
+
+    def update(self, item):
+        """Process an item and return ready results in order (only those that passed filter)."""
+        with self._lock:
+            seq = self.next_seq
+            self.next_seq += 1
+
+            # Submit to thread pool - wrapped_predicate returns (keep, value)
+            future = self.executor.submit(self.wrapped_predicate, item)
+            self.pending[seq] = future
+
+            # If at capacity, block and drain
+            if len(self.pending) >= self.size:
+                self._drain_one()
+
+            # Return any ready results in order
+            return self._collect_ready()
+
+    def _drain_one(self):
+        """Wait for the next expected result to complete."""
+        if self.next_emit in self.pending:
+            result = self.pending[self.next_emit].result()
+            self.ready[self.next_emit] = result
+            del self.pending[self.next_emit]
+
+    def _collect_ready(self):
+        """Collect all consecutive ready results where predicate was True."""
+        results = []
+        while self.next_emit in self.ready:
+            keep, value = self.ready.pop(self.next_emit)
+            if keep:  # Only include if predicate returned True
+                results.append(value)
+            self.next_emit += 1
+        return results
+
+    def flush(self):
+        """Wait for all pending items and return in order (only those that passed filter)."""
+        with self._lock:
+            for seq in sorted(self.pending.keys()):
+                self.ready[seq] = self.pending[seq].result()
+            self.pending.clear()
+            return self._collect_ready()
 "#;
 
 #[pymethods]
@@ -488,6 +696,7 @@ impl Stream {
             skip_async_check,
             func_is_sync: true, // Source has no function, treat as sync
             frozen: false,
+            needs_lock: false,
         }
     }
 
@@ -533,9 +742,44 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
+        self.downstreams.push(node.clone_ref(py));
+        Ok(node)
+    }
+
+    /// Enable prefetching for the next map operation.
+    ///
+    /// When followed by a `.map()`, this causes the map to process up to `n` items
+    /// concurrently while preserving output order.
+    ///
+    /// Args:
+    ///     n: Maximum number of items to process concurrently.
+    ///
+    /// Returns:
+    ///     A new Stream that will modify the next map to use prefetching.
+    #[pyo3(name = "prefetch", signature = (n))]
+    fn prefetch(&mut self, py: Python, n: usize) -> PyResult<Py<Self>> {
+        if n == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "prefetch size must be at least 1",
+            ));
+        }
+        let node = Py::new(
+            py,
+            Self {
+                logic: NodeLogic::Prefetch { size: n },
+                downstreams: Vec::new(),
+                name: format!("{}.prefetch({})", self.name, n),
+                asynchronous: self.asynchronous,
+                skip_async_check: self.skip_async_check,
+                func_is_sync: true,
+                frozen: false,
+                needs_lock: false,
+            },
+        )?;
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -584,6 +828,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -643,6 +888,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -698,6 +944,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -723,6 +970,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -748,6 +996,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -773,14 +1022,54 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
+        let mut futures = Vec::new();
+
+        // Handle this node's flush behavior
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
                 let tuple = PyTuple::new(py, items)?;
-                self.propagate(py, tuple.into())
+                if let Some(f) = self.propagate(py, tuple.into())? {
+                    futures.push(f);
+                }
             }
-            _ => Ok(None),
+            NodeLogic::PrefetchMap { state, .. } => {
+                // Flush the prefetch state - wait for all pending items and propagate
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            NodeLogic::PrefetchFilter { state, .. } => {
+                // Flush the prefetch filter state - wait for all pending items and propagate
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            _ => {}
         }
+
+        // Propagate flush to all downstream nodes
+        for downstream in &self.downstreams {
+            let mut d = downstream.borrow_mut(py);
+            if let Some(f) = d.flush(py, vec![], None)? {
+                futures.push(f);
+            }
+        }
+
+        if !futures.is_empty() {
+            let gather = get_gather()?;
+            let gathered = gather.call1(py, (futures,))?;
+            return Ok(Some(gathered));
+        }
+        Ok(None)
     }
 
     /// Apply a function to each element for side effects.
@@ -827,6 +1116,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -874,6 +1164,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -911,6 +1202,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -950,6 +1242,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
@@ -979,14 +1272,22 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
         self.downstreams.push(node.clone_ref(py));
 
         for other in others {
-            let mut other_ref = other.borrow_mut(py);
-            other_ref.downstreams.push(node.clone_ref(py));
+            // Use try_borrow_mut to handle case where other is self (already borrowed)
+            match other.try_borrow_mut(py) {
+                Ok(mut other_ref) => {
+                    other_ref.downstreams.push(node.clone_ref(py));
+                }
+                Err(_) => {
+                    // Already borrowed - means it's self, skip (already added above)
+                }
+            }
         }
 
         Ok(node)
@@ -1069,13 +1370,22 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
         self.add_tag_node(py, 0, &node)?;
         for (i, other) in others.iter().enumerate() {
-            let mut other_ref = other.borrow_mut(py);
-            other_ref.add_tag_node(py, i + 1, &node)?;
+            // Use try_borrow_mut to handle case where other is self (already borrowed)
+            match other.try_borrow_mut(py) {
+                Ok(mut other_ref) => {
+                    other_ref.add_tag_node(py, i + 1, &node)?;
+                }
+                Err(_) => {
+                    // Already borrowed - means it's self, use self directly
+                    self.add_tag_node(py, i + 1, &node)?;
+                }
+            }
         }
 
         Ok(node)
@@ -1106,13 +1416,22 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
 
         self.add_tag_node(py, 0, &node)?;
         for (i, other) in others.iter().enumerate() {
-            let mut other_ref = other.borrow_mut(py);
-            other_ref.add_tag_node(py, i + 1, &node)?;
+            // Use try_borrow_mut to handle case where other is self (already borrowed)
+            match other.try_borrow_mut(py) {
+                Ok(mut other_ref) => {
+                    other_ref.add_tag_node(py, i + 1, &node)?;
+                }
+                Err(_) => {
+                    // Already borrowed - means it's self, use self directly
+                    self.add_tag_node(py, i + 1, &node)?;
+                }
+            }
         }
 
         Ok(node)
@@ -1296,6 +1615,27 @@ impl Stream {
                 }
                 return Ok(None);
             }
+            NodeLogic::Prefetch { .. } => {
+                // Prefetch without a following Map just passes through
+                output_batch = items;
+            }
+            NodeLogic::PrefetchMap { state, .. } | NodeLogic::PrefetchFilter { state, .. } => {
+                // Get ready results from Python state, collect them first
+                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
+                for x in items {
+                    let results =
+                        wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                    let results_list = results.bind(py);
+                    for result in results_list.try_iter()? {
+                        to_propagate.push(result?.into());
+                    }
+                }
+                // Propagate after releasing the borrow on self.logic
+                for val in to_propagate {
+                    self.propagate(py, val)?;
+                }
+                return Ok(None);
+            }
         }
 
         self.propagate_batch(py, output_batch)
@@ -1309,37 +1649,63 @@ impl Stream {
         if output_batch.is_empty() {
             return Ok(None);
         }
-        if self.downstreams.len() == 1 {
-            let mut child_ref = self.downstreams[0].borrow_mut(py);
-            return child_ref.update_batch(py, output_batch);
-        } else if !self.downstreams.is_empty() {
-            let mut futures = Vec::new();
-            let len = self.downstreams.len();
 
-            let mut child_refs = Vec::with_capacity(len);
-            for child in &self.downstreams {
-                child_refs.push(child.borrow_mut(py));
+        let n = self.downstreams.len();
+        if n == 0 {
+            return Ok(None);
+        }
+
+        // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
+        let use_lock = self.needs_lock;
+
+        if n == 1 {
+            let batch_list = PyList::new(py, &output_batch)?;
+            let result = if use_lock {
+                let safe_update_batch = get_safe_update_batch()?;
+                safe_update_batch.call1(py, (&self.downstreams[0], batch_list))?
+            } else {
+                self.downstreams[0].call_method1(py, "update_batch", (batch_list,))?
+            };
+            if result.is_none(py) {
+                return Ok(None);
             }
+            return Ok(Some(result));
+        }
 
+        let mut futures = Vec::new();
+        if use_lock {
+            let safe_update = get_safe_update()?;
             for val in output_batch {
-                for child in child_refs.iter_mut().take(len - 1) {
-                    let res = child.update(py, val.clone_ref(py))?;
-                    if let Some(f) = res {
-                        futures.push(f);
+                for child in self.downstreams.iter().take(n - 1) {
+                    let result = safe_update.call1(py, (child, val.clone_ref(py)))?;
+                    if !result.is_none(py) {
+                        futures.push(result);
                     }
                 }
-                if len > 0 {
-                    let res = child_refs[len - 1].update(py, val)?;
-                    if let Some(f) = res {
-                        futures.push(f);
-                    }
+                let result = safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
+                if !result.is_none(py) {
+                    futures.push(result);
                 }
             }
-            if !futures.is_empty() {
-                let gather = get_gather()?;
-                let gathered = gather.call1(py, (futures,))?;
-                return Ok(Some(gathered));
+        } else {
+            for val in output_batch {
+                for child in self.downstreams.iter().take(n - 1) {
+                    let result = child.call_method1(py, "update", (val.clone_ref(py),))?;
+                    if !result.is_none(py) {
+                        futures.push(result);
+                    }
+                }
+                let result = self.downstreams[n - 1].call_method1(py, "update", (&val,))?;
+                if !result.is_none(py) {
+                    futures.push(result);
+                }
             }
+        }
+
+        if !futures.is_empty() {
+            let gather = get_gather()?;
+            let gathered = gather.call1(py, (futures,))?;
+            return Ok(Some(gathered));
         }
         Ok(None)
     }
@@ -1358,31 +1724,53 @@ impl Stream {
             }
         }
 
-        // Optimization: avoid clone_ref for single-downstream case (most common in linear pipelines)
         let n = self.downstreams.len();
         if n == 0 {
             return Ok(None);
         }
 
+        // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
+        // for all downstream calls to prevent borrow conflicts at convergence points.
+        let use_lock = self.needs_lock;
         let mut futures = Vec::new();
-        if n == 1 {
-            // Single downstream - move val directly, no clone needed
-            let mut child_ref = self.downstreams[0].borrow_mut(py);
-            if let Some(f) = child_ref.update(py, val)? {
-                futures.push(f);
-            }
-        } else {
-            // Multiple downstreams - clone for first n-1, move for last
-            for child in self.downstreams.iter().take(n - 1) {
-                let mut child_ref = child.borrow_mut(py);
-                if let Some(f) = child_ref.update(py, val.clone_ref(py))? {
-                    futures.push(f);
+
+        if use_lock {
+            let safe_update = get_safe_update()?;
+            if n == 1 {
+                let result = safe_update.call1(py, (&self.downstreams[0], &val))?;
+                if !result.is_none(py) {
+                    futures.push(result);
+                }
+            } else {
+                for child in self.downstreams.iter().take(n - 1) {
+                    let result = safe_update.call1(py, (child, val.clone_ref(py)))?;
+                    if !result.is_none(py) {
+                        futures.push(result);
+                    }
+                }
+                let result = safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
+                if !result.is_none(py) {
+                    futures.push(result);
                 }
             }
-            // Move val for the last downstream
-            let mut last_ref = self.downstreams[n - 1].borrow_mut(py);
-            if let Some(f) = last_ref.update(py, val)? {
-                futures.push(f);
+        } else {
+            // Fast path: no locking needed, use direct method calls
+            if n == 1 {
+                let result = self.downstreams[0].call_method1(py, "update", (&val,))?;
+                if !result.is_none(py) {
+                    futures.push(result);
+                }
+            } else {
+                for child in self.downstreams.iter().take(n - 1) {
+                    let result = child.call_method1(py, "update", (val.clone_ref(py),))?;
+                    if !result.is_none(py) {
+                        futures.push(result);
+                    }
+                }
+                let result = self.downstreams[n - 1].call_method1(py, "update", (&val,))?;
+                if !result.is_none(py) {
+                    futures.push(result);
+                }
             }
         }
 
@@ -1515,6 +1903,31 @@ impl Stream {
                 // Parallel node passes value through, but uses parallel propagation
                 return self.propagate_parallel(py, x);
             }
+            NodeLogic::Prefetch { .. } => {
+                // Prefetch without a following Map just passes through
+                // (this shouldn't happen after optimization, but handle it gracefully)
+                Some(x)
+            }
+            NodeLogic::PrefetchMap { state, .. } => {
+                // Get ready results from Python state (handles threading and ordering)
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                // Propagate each ready result to downstreams (done in Rust for thread safety)
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    self.propagate(py, result?.into())?;
+                }
+                return Ok(None);
+            }
+            NodeLogic::PrefetchFilter { state, .. } => {
+                // Get ready results from Python state (handles threading, ordering, and filtering)
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                // Propagate each ready result to downstreams (done in Rust for thread safety)
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    self.propagate(py, result?.into())?;
+                }
+                return Ok(None);
+            }
         };
         if let Some(val) = result {
             return self.propagate(py, val);
@@ -1535,6 +1948,7 @@ impl Stream {
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // Tag has no user function
                 frozen: false,
+                needs_lock: false,
             },
         )?;
         self.downstreams.push(tag_node);
@@ -1602,10 +2016,187 @@ impl Stream {
         // enable skip_async_check for all nodes
         if all_sync && self.asynchronous.is_none() {
             self.skip_async_check = true;
-            for node_py in all_nodes {
+            for node_py in &all_nodes {
                 let mut node = node_py.borrow_mut(py);
                 if node.asynchronous.is_none() {
                     node.skip_async_check = true;
+                }
+            }
+        }
+
+        // Phase 3: Mark prefetch nodes inside par branches as needing locks
+        // These nodes use internal threading which can conflict with par's threading
+        self.mark_prefetch_in_par(py, &all_nodes);
+    }
+
+    /// Mark nodes that need locking due to being downstream of a prefetch within a par branch.
+    /// When prefetch is inside par, its internal threading combined with par's threading
+    /// can cause borrow conflicts at any downstream node (especially convergence points like union).
+    /// We mark ALL nodes from the prefetch onwards as needing locks.
+    #[allow(clippy::unused_self)] // Called as method for consistency with other topology methods
+    fn mark_prefetch_in_par(&self, py: Python, all_nodes: &[Py<Self>]) {
+        use std::collections::{HashMap, HashSet};
+
+        // Find all Par nodes
+        let mut par_nodes: Vec<Py<Self>> = Vec::new();
+        for node_py in all_nodes {
+            let node = node_py.borrow(py);
+            if matches!(node.logic, NodeLogic::Parallel) {
+                drop(node);
+                par_nodes.push(node_py.clone_ref(py));
+            }
+        }
+
+        if par_nodes.is_empty() {
+            return; // No parallel branches, no prefetch locking needed
+        }
+
+        for par_py in par_nodes {
+            let par = par_py.borrow(py);
+            let branches: Vec<Py<Self>> = par.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            drop(par);
+
+            if branches.len() < 2 {
+                continue; // Need at least 2 branches for convergence
+            }
+
+            // Check if any branch contains a prefetch
+            let mut has_prefetch = false;
+            for branch_py in &branches {
+                let mut visited: HashSet<usize> = HashSet::new();
+                let mut stack: Vec<Py<Self>> = vec![branch_py.clone_ref(py)];
+
+                while let Some(node_py) = stack.pop() {
+                    let node_ptr = node_py.as_ptr() as usize;
+                    if visited.contains(&node_ptr) {
+                        continue;
+                    }
+                    visited.insert(node_ptr);
+
+                    let node = node_py.borrow(py);
+                    if matches!(
+                        node.logic,
+                        NodeLogic::PrefetchMap { .. } | NodeLogic::PrefetchFilter { .. }
+                    ) {
+                        has_prefetch = true;
+                        break;
+                    }
+                    for downstream in &node.downstreams {
+                        stack.push(downstream.clone_ref(py));
+                    }
+                }
+                if has_prefetch {
+                    break;
+                }
+            }
+
+            if !has_prefetch {
+                continue; // No prefetch in this par, no locking needed
+            }
+
+            // Find convergence points: nodes reachable from multiple branches
+            // Track which branch indices can reach each node
+            let mut node_branches: HashMap<usize, HashSet<usize>> = HashMap::new();
+            let mut node_refs: HashMap<usize, Py<Self>> = HashMap::new();
+
+            for (branch_idx, branch_py) in branches.iter().enumerate() {
+                let mut visited: HashSet<usize> = HashSet::new();
+                let mut stack: Vec<Py<Self>> = vec![branch_py.clone_ref(py)];
+
+                while let Some(node_py) = stack.pop() {
+                    let node_ptr = node_py.as_ptr() as usize;
+                    if visited.contains(&node_ptr) {
+                        continue;
+                    }
+                    visited.insert(node_ptr);
+
+                    node_branches.entry(node_ptr).or_default().insert(branch_idx);
+                    node_refs.entry(node_ptr).or_insert_with(|| node_py.clone_ref(py));
+
+                    let node = node_py.borrow(py);
+                    for downstream in &node.downstreams {
+                        stack.push(downstream.clone_ref(py));
+                    }
+                }
+            }
+
+            // Find convergence points (nodes reachable from 2+ branches)
+            let convergence_ids: HashSet<usize> = node_branches
+                .iter()
+                .filter(|(_, branch_set)| branch_set.len() >= 2)
+                .map(|(id, _)| *id)
+                .collect();
+
+            if convergence_ids.is_empty() {
+                continue; // No convergence points, no locking needed
+            }
+
+            // Build reverse graph to find nodes that can reach convergence points
+            let mut can_reach_convergence: HashSet<usize> = HashSet::new();
+
+            // For each node, check if it can reach any convergence point
+            for (node_id, node_py) in &node_refs {
+                if can_reach_convergence.contains(node_id) {
+                    continue;
+                }
+
+                // BFS to check if this node can reach a convergence point
+                let mut visited: HashSet<usize> = HashSet::new();
+                let mut stack: Vec<Py<Self>> = vec![node_py.clone_ref(py)];
+                let mut reaches_convergence = false;
+
+                while let Some(n_py) = stack.pop() {
+                    let n_id = n_py.as_ptr() as usize;
+                    if visited.contains(&n_id) {
+                        continue;
+                    }
+                    visited.insert(n_id);
+
+                    if convergence_ids.contains(&n_id) {
+                        reaches_convergence = true;
+                        break;
+                    }
+
+                    let n = n_py.borrow(py);
+                    for downstream in &n.downstreams {
+                        stack.push(downstream.clone_ref(py));
+                    }
+                }
+
+                if reaches_convergence {
+                    // Mark all visited nodes as able to reach convergence
+                    can_reach_convergence.extend(visited);
+                }
+            }
+
+            // Mark all nodes that can reach convergence points (and convergence points themselves)
+            for node_id in &can_reach_convergence {
+                if let Some(node_py) = node_refs.get(node_id) {
+                    let mut node = node_py.borrow_mut(py);
+                    node.needs_lock = true;
+                }
+            }
+
+            // Also mark all nodes downstream of convergence points
+            let mut marked: HashSet<usize> = can_reach_convergence;
+            for conv_id in &convergence_ids {
+                if let Some(conv_py) = node_refs.get(conv_id) {
+                    let mut to_mark: Vec<Py<Self>> = vec![conv_py.clone_ref(py)];
+
+                    while let Some(node_py) = to_mark.pop() {
+                        let node_ptr = node_py.as_ptr() as usize;
+                        if marked.contains(&node_ptr) {
+                            continue;
+                        }
+                        marked.insert(node_ptr);
+
+                        let mut node = node_py.borrow_mut(py);
+                        node.needs_lock = true;
+
+                        for downstream in &node.downstreams {
+                            to_mark.push(downstream.clone_ref(py));
+                        }
+                    }
                 }
             }
         }
@@ -1680,6 +2271,92 @@ impl Stream {
             self.downstreams = new_downstreams;
             // Inherit func_is_sync
             self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            return;
+        }
+
+        // Check if we can fuse Prefetch -> Map into PrefetchMap
+        if let NodeLogic::Prefetch { size } = self.logic
+            && let NodeLogic::Map { ref func } = child.logic
+            && let Ok(prefetch_state_class) = get_prefetch_state_class()
+            && let Ok(state) = prefetch_state_class.call1(py, (func, size))
+        {
+            // Clone child's downstreams before modifying self
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            let child_func = func.clone_ref(py);
+            drop(child); // Release borrow before modifying self
+
+            // Replace this node with PrefetchMap
+            self.logic = NodeLogic::PrefetchMap {
+                func: child_func,
+                size,
+                state,
+            };
+            // Update name to show fusion
+            self.name = format!("prefetch_map({size})+{child_name}");
+            // Bypass child: point to child's downstreams
+            self.downstreams = new_downstreams;
+            // Inherit func_is_sync
+            self.func_is_sync = child_func_is_sync;
+            return;
+        }
+
+        // Check if we can fuse Prefetch -> Starmap into PrefetchMap
+        if let NodeLogic::Prefetch { size } = self.logic
+            && let NodeLogic::Starmap { ref func } = child.logic
+            && let Ok(prefetch_state_class) = get_prefetch_state_class()
+            && let Ok(state) = prefetch_state_class.call1(py, (func, size))
+        {
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            let child_func = func.clone_ref(py);
+            drop(child);
+
+            self.logic = NodeLogic::PrefetchMap {
+                func: child_func,
+                size,
+                state,
+            };
+            self.name = format!("prefetch_starmap({size})+{child_name}");
+            self.downstreams = new_downstreams;
+            self.func_is_sync = child_func_is_sync;
+            return;
+        }
+
+        // Check if we can fuse Prefetch -> Filter into PrefetchFilter
+        // Note: For filter, we wrap the predicate to return (keep, value) tuples
+        if let NodeLogic::Prefetch { size } = self.logic
+            && let NodeLogic::Filter { ref predicate } = child.logic
+            && let Ok(prefetch_filter_state_class) = get_prefetch_filter_state_class()
+        {
+            // Create a wrapper that returns (predicate_result, original_value)
+            let pred_clone = predicate.clone_ref(py);
+            let wrapper_code = "lambda p: lambda x: (p(x), x)";
+            if let Ok(builtins) = py.import("builtins")
+                && let Ok(eval_fn) = builtins.getattr("eval")
+                && let Ok(make_wrapper) = eval_fn.call1((wrapper_code,))
+                && let Ok(wrapped_pred) = make_wrapper.call1((pred_clone,))
+                && let Ok(state) = prefetch_filter_state_class.call1(py, (&wrapped_pred, size))
+            {
+                let new_downstreams: Vec<Py<Self>> =
+                    child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+                let child_name = child.name.clone();
+                let child_func_is_sync = child.func_is_sync;
+                drop(child);
+
+                self.logic = NodeLogic::PrefetchFilter {
+                    predicate: wrapped_pred.unbind(),
+                    size,
+                    state,
+                };
+                self.name = format!("prefetch_filter({size})+{child_name}");
+                self.downstreams = new_downstreams;
+                self.func_is_sync = child_func_is_sync;
+            }
         }
     }
 }
@@ -1718,6 +2395,7 @@ fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             skip_async_check: false,
             func_is_sync: true,
             frozen: false,
+            needs_lock: false,
         },
     )?;
 
@@ -1809,6 +2487,7 @@ fn combine_latest(
             skip_async_check: false,
             func_is_sync: true,
             frozen: false,
+            needs_lock: false,
         },
     )?;
 
@@ -1853,6 +2532,7 @@ fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             skip_async_check: false,
             func_is_sync: true,
             frozen: false,
+            needs_lock: false,
         },
     )?;
 
@@ -1887,6 +2567,10 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let compose_maps = helpers_module.getattr("_compose_maps")?;
     let compose_filters = helpers_module.getattr("_compose_filters")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
+    let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
+    let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
+    let safe_update = helpers_module.getattr("_safe_update")?;
+    let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
 
     let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
@@ -1897,6 +2581,10 @@ fn rstreamz(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = COMPOSE_MAPS.set(compose_maps.unbind());
     let _ = COMPOSE_FILTERS.set(compose_filters.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
+    let _ = SAFE_UPDATE.set(safe_update.unbind());
+    let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
+    let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
+    let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
