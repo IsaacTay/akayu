@@ -26,3 +26,8 @@ dev = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.uv]
+# Track Rust source files so uv rebuilds when they change
+# See: https://github.com/PyO3/maturin/issues/2314
+cache-keys = [{ file = "Cargo.toml" }, { file = "src/**/*.rs" }]
