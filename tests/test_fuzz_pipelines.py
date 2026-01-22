@@ -1,5 +1,4 @@
 import random
-import pytest
 from rstreamz import Stream
 
 def safe_inc(x):
@@ -134,7 +133,7 @@ def run_random_pipeline(seed):
     for s in streams:
         try:
             s.flush()
-        except:
+        except Exception:
             pass
 
     # Basic assertion: code didn't crash

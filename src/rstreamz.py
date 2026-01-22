@@ -1,5 +1,8 @@
 import asyncio
+import contextvars
 import inspect
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 async def _process_async(awaitable, downstreams):
     val = await awaitable
@@ -211,9 +214,6 @@ def _compose_filter_map(predicate, func):
         return (False, None)
     return filter_map
 
-from concurrent.futures import ThreadPoolExecutor
-import contextvars
-import threading
 _thread_pool = None
 _node_locks = {}  # Per-node locks to prevent concurrent update calls
 _node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
@@ -502,3 +502,78 @@ class _PrefetchBatchMapState:
                 self.ready[seq] = self.pending[seq].result()
             self.pending.clear()
             return self._collect_ready()
+
+
+class _AsyncState:
+    """State manager for async map operations with asynchronous=True.
+
+    Manages concurrent execution of async coroutines while preserving output order.
+    Uses a dedicated event loop running in a background thread.
+
+    Returns results to Rust for propagation instead of calling d.update() directly,
+    to avoid thread-safety issues with PyO3 borrows.
+    """
+
+    def __init__(self):
+        import threading
+        self.loop = asyncio.new_event_loop()
+        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
+        self.loop_thread.start()
+        self.pending = {}    # {seq_num: Future}
+        self.next_seq = 0    # next item sequence number
+        self.next_emit = 0   # next sequence to emit
+        self.ready = {}      # {seq_num: result} for completed out-of-order
+        self._lock = threading.Lock()
+
+    def submit(self, coro):
+        """Submit coroutine, return ready results in order."""
+        with self._lock:
+            seq = self.next_seq
+            self.next_seq += 1
+            future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+            self.pending[seq] = future
+
+        # Collect ready results in order
+        results = []
+        with self._lock:
+            # First, check if any completed pending futures can be moved to ready
+            for s in list(self.pending.keys()):
+                if self.pending[s].done():
+                    res = self.pending.pop(s).result()
+                    if s == self.next_emit:
+                        results.append(res)
+                        self.next_emit += 1
+                    else:
+                        self.ready[s] = res
+
+            # Then emit any consecutive ready results
+            while self.next_emit in self.ready:
+                results.append(self.ready.pop(self.next_emit))
+                self.next_emit += 1
+
+        return results
+
+    def flush(self):
+        """Wait for all pending and return in order."""
+        results = []
+        with self._lock:
+            pending_items = list(self.pending.items())
+
+        # Wait for all pending futures (outside lock to avoid deadlock)
+        for seq, future in pending_items:
+            res = future.result()
+            with self._lock:
+                if seq == self.next_emit:
+                    results.append(res)
+                    self.next_emit += 1
+                else:
+                    self.ready[seq] = res
+                self.pending.pop(seq, None)
+
+        # Collect any remaining ready results in order
+        with self._lock:
+            while self.next_emit in self.ready:
+                results.append(self.ready.pop(self.next_emit))
+                self.next_emit += 1
+
+        return results

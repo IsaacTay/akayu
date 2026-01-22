@@ -3,8 +3,9 @@
 use pyo3::prelude::*;
 use std::collections::VecDeque;
 
-use crate::node::NodeLogic;
 use crate::Stream;
+use crate::helpers::check_not_compiled;
+use crate::node::NodeLogic;
 
 // Stream methods for combinators
 #[pymethods]
@@ -33,12 +34,7 @@ impl Stream {
     ///     >>> s.emit(filename)  # a and b run in parallel
     #[pyo3(name = "par")]
     pub fn par(&mut self, py: Python) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let node = Py::new(
             py,
             Self {
@@ -80,12 +76,7 @@ impl Stream {
     ///     >>> merged.map(f1).sink(...)    # Sequential from here
     ///     >>> merged.map(f2).sink(...)
     pub fn seq(&mut self, py: Python) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let node = Py::new(
             py,
             Self {
@@ -117,21 +108,11 @@ impl Stream {
     ///     A new Stream emitting elements from all input streams.
     #[pyo3(signature = (*others))]
     pub fn union(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         // Check if any of the other streams are frozen
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
-                if other_ref.compiled {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                        other_ref.name
-                    )));
-                }
+                check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
         let node = Py::new(
@@ -153,14 +134,10 @@ impl Stream {
 
         for other in others {
             // Use try_borrow_mut to handle case where other is self (already borrowed)
-            match other.try_borrow_mut(py) {
-                Ok(mut other_ref) => {
-                    other_ref.downstreams.push(node.clone_ref(py));
-                }
-                Err(_) => {
-                    // Already borrowed - means it's self, skip (already added above)
-                }
+            if let Ok(mut other_ref) = other.try_borrow_mut(py) {
+                other_ref.downstreams.push(node.clone_ref(py));
             }
+            // If borrow fails, it means it's self (already added above), so skip
         }
 
         Ok(node)
@@ -186,21 +163,11 @@ impl Stream {
         others: Vec<Py<Self>>,
         emit_on: Option<Py<PyAny>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         // Check if any of the other streams are frozen
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
-                if other_ref.compiled {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                        other_ref.name
-                    )));
-                }
+                check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
         let total_sources = 1 + others.len();
@@ -294,21 +261,11 @@ impl Stream {
     ///     A new Stream emitting zipped tuples.
     #[pyo3(signature = (*others))]
     pub fn zip(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         // Check if any of the other streams are frozen
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
-                if other_ref.compiled {
-                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                        other_ref.name
-                    )));
-                }
+                check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
         let total_sources = 1 + others.len();
@@ -403,12 +360,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
-        if stream_ref.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                stream_ref.name
-            )));
-        }
+        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
 
     let node = Py::new(
@@ -469,12 +421,7 @@ pub fn combine_latest(
     // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
-        if stream_ref.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                stream_ref.name
-            )));
-        }
+        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
 
     // Resolve emit_on to indices within the streams vector
@@ -561,12 +508,7 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
-        if stream_ref.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                stream_ref.name
-            )));
-        }
+        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
 
     let total_sources = streams.len();

@@ -3,13 +3,13 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use crate::Stream;
 use crate::helpers::{
-    extract_stream_name, get_build_map_func, get_build_starmap_func, get_gather,
-    get_is_sync_callable, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
-    get_prefetch_state_class, wrap_error,
+    check_not_compiled, extract_stream_name, get_async_state_class, get_build_map_func,
+    get_build_starmap_func, get_gather, get_is_sync_callable, get_prefetch_batch_map_state_class,
+    get_prefetch_filter_state_class, get_prefetch_state_class, wrap_error,
 };
 use crate::node::NodeLogic;
-use crate::Stream;
 
 #[pymethods]
 impl Stream {
@@ -55,12 +55,7 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
-        if this.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                this.name
-            )));
-        }
+        check_not_compiled(this.compiled, &this.name)?;
         let name = extract_stream_name(py, &kwargs, "map", &this.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -89,6 +84,33 @@ impl Stream {
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
+        }
+
+        // If asynchronous=True, create AsyncMap node for non-blocking emit
+        if this.asynchronous == Some(true) {
+            let async_state_class = get_async_state_class()?;
+            let state = async_state_class.call0(py)?;
+
+            let node = Py::new(
+                py,
+                Self {
+                    logic: NodeLogic::AsyncMap {
+                        func: wrapped_func,
+                        state,
+                    },
+                    downstreams: Vec::new(),
+                    name,
+                    asynchronous: this.asynchronous,
+                    skip_async_check: true, // AsyncMap handles async internally
+                    func_is_sync: false,    // By definition, async
+                    frozen: false,
+                    needs_lock: false,
+                    compiled: false,
+                },
+            )?;
+
+            this.downstreams.push(node.clone_ref(py));
+            return Ok(node);
         }
 
         let node = Py::new(
@@ -123,12 +145,7 @@ impl Stream {
     ///     A new Stream that will modify the next map to use prefetching.
     #[pyo3(name = "prefetch", signature = (n))]
     pub fn prefetch(&mut self, py: Python, n: usize) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         if n == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
                 "prefetch size must be at least 1",
@@ -172,12 +189,7 @@ impl Stream {
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let name = extract_stream_name(py, &kwargs, "starmap", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -240,12 +252,7 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
-        if this.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                this.name
-            )));
-        }
+        check_not_compiled(this.compiled, &this.name)?;
         let name = extract_stream_name(py, &kwargs, "batch_map", &this.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -316,12 +323,7 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
-        if this.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                this.name
-            )));
-        }
+        check_not_compiled(this.compiled, &this.name)?;
         let name = extract_stream_name(py, &kwargs, "filter", &this.name)?;
 
         // Check if the original predicate is sync (before wrapping/moving)
@@ -389,12 +391,7 @@ impl Stream {
     /// Returns:
     ///     A new Stream emitting the flattened elements.
     pub fn flatten(&mut self, py: Python) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let node = Py::new(
             py,
             Self {
@@ -422,12 +419,7 @@ impl Stream {
     /// Returns:
     ///     A new Stream that emits collected tuples on flush.
     pub fn collect(&mut self, py: Python) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let node = Py::new(
             py,
             Self {
@@ -506,6 +498,16 @@ impl Stream {
                     }
                 }
             }
+            NodeLogic::AsyncMap { state, .. } => {
+                // Flush the async state - wait for all pending items and propagate
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
             _ => {}
         }
 
@@ -545,12 +547,7 @@ impl Stream {
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         let name = extract_stream_name(py, &kwargs, "sink", &self.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
@@ -606,12 +603,7 @@ impl Stream {
         start: Py<PyAny>,
         returns_state: bool,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
-            )));
-        }
+        check_not_compiled(self.compiled, &self.name)?;
         // Check if the accumulator function is sync
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;

@@ -3,16 +3,20 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyList, PyTuple};
 
+use crate::Stream;
 use crate::helpers::{
     get_filter_async, get_gather, get_is_awaitable, get_parallel_execute, get_process_async,
     get_safe_update, get_safe_update_batch, wrap_error,
 };
 use crate::node::NodeLogic;
-use crate::Stream;
 
 #[pymethods]
 impl Stream {
-    pub fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn update_batch(
+        &mut self,
+        py: Python,
+        items: Vec<Py<PyAny>>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         // skip_async_check is pre-computed in self.skip_async_check
         let mut output_batch = Vec::with_capacity(items.len());
 
@@ -236,6 +240,24 @@ impl Stream {
                 }
                 return Ok(None); // Terminal node
             }
+            NodeLogic::AsyncMap { func, state } => {
+                // Async map: call func to get coroutine, submit to async state
+                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
+                for x in items {
+                    let coro = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                    let results =
+                        wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name)?;
+                    let results_list = results.bind(py);
+                    for result in results_list.try_iter()? {
+                        to_propagate.push(result?.into());
+                    }
+                }
+                // Propagate after releasing the borrow on self.logic
+                for val in to_propagate {
+                    self.propagate(py, val)?;
+                }
+                return Ok(None);
+            }
         }
 
         self.propagate_batch(py, output_batch)
@@ -244,9 +266,7 @@ impl Stream {
     pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func } => {
-                Some(wrap_error(py, func.call1(py, (x,)), &self.name)?)
-            }
+            NodeLogic::Map { func } => Some(wrap_error(py, func.call1(py, (x,)), &self.name)?),
             NodeLogic::Filter { predicate } => {
                 let x_clone = x.clone_ref(py);
                 let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
@@ -443,6 +463,19 @@ impl Stream {
                 }
                 return Ok(None); // Terminal node
             }
+            NodeLogic::AsyncMap { func, state } => {
+                // Call func(x) to get coroutine
+                let coro = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                // Submit to async state
+                let results =
+                    wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name)?;
+                // Propagate ready results
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    self.propagate(py, result?.into())?;
+                }
+                return Ok(None);
+            }
         };
         if let Some(val) = result {
             return self.propagate(py, val);
@@ -595,7 +628,11 @@ impl Stream {
     }
 
     /// Propagate value to downstreams in parallel using thread pool.
-    pub(crate) fn propagate_parallel(&self, py: Python, val: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    pub(crate) fn propagate_parallel(
+        &self,
+        py: Python,
+        val: Py<PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         let n = self.downstreams.len();
         if n == 0 {
             return Ok(None);
