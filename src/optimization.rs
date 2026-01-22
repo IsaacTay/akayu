@@ -21,29 +21,17 @@ impl Stream {
     pub fn optimize_topology(&mut self, py: Python) {
         // Phase 1: Fuse consecutive maps and filters
         // DISABLED: Unsafe for dynamic topologies (where nodes are added after first emit)
+        // Use optimize_topology_full() via compile() if you want fusion enabled.
         // self.fuse_linear_chains(py);
 
         // Phase 2: Collect all nodes and check sync status
-        let mut all_nodes: Vec<Py<Self>> = Vec::new();
-        let mut to_visit: Vec<Py<Self>> =
-            self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-        // let mut all_sync = self.func_is_sync;
-
-        // BFS traversal
-        while let Some(node_py) = to_visit.pop() {
-            let node = node_py.borrow(py);
-            // all_sync = all_sync && node.func_is_sync;
-            for downstream in &node.downstreams {
-                to_visit.push(downstream.clone_ref(py));
-            }
-            drop(node);
-            all_nodes.push(node_py);
-        }
+        let all_nodes = self.collect_all_nodes(py);
 
         // If all nodes are sync and asynchronous flag wasn't explicitly set,
         // enable skip_async_check for all nodes
         // DISABLED: Unsafe if async nodes are added later to a "sync" optimized graph
         /*
+        let all_sync = self.func_is_sync && all_nodes.iter().all(|n| n.borrow(py).func_is_sync);
         if all_sync && self.asynchronous.is_none() {
             self.skip_async_check = true;
             for node_py in &all_nodes {
@@ -58,6 +46,64 @@ impl Stream {
         // Phase 3: Mark prefetch nodes inside par branches as needing locks
         // These nodes use internal threading which can conflict with par's threading
         self.mark_prefetch_in_par(py, &all_nodes);
+    }
+
+    /// Full optimization pass, safe because graph is being frozen via compile().
+    ///
+    /// This enables all optimizations including chain fusion, which is only safe
+    /// when the topology is guaranteed not to change after optimization.
+    pub fn optimize_topology_full(&mut self, py: Python) {
+        // Phase 1: Fuse consecutive maps and filters (NOW ENABLED)
+        self.fuse_linear_chains(py);
+
+        // Phase 2: Collect all nodes
+        let all_nodes = self.collect_all_nodes(py);
+
+        // Phase 3: Mark prefetch nodes inside par branches as needing locks
+        self.mark_prefetch_in_par(py, &all_nodes);
+    }
+
+    /// Collect all nodes reachable from this node's downstreams.
+    fn collect_all_nodes(&self, py: Python) -> Vec<Py<Self>> {
+        let mut all_nodes: Vec<Py<Self>> = Vec::new();
+        let mut to_visit: Vec<Py<Self>> =
+            self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+
+        // BFS traversal
+        while let Some(node_py) = to_visit.pop() {
+            let node = node_py.borrow(py);
+            for downstream in &node.downstreams {
+                to_visit.push(downstream.clone_ref(py));
+            }
+            drop(node);
+            all_nodes.push(node_py);
+        }
+
+        all_nodes
+    }
+
+    /// Mark this node and all downstream nodes as frozen and compiled.
+    ///
+    /// This is called by compile() to prevent any further modifications
+    /// to the stream graph after optimization.
+    pub fn freeze_all(&mut self, py: Python) {
+        self.frozen = true;
+        self.compiled = true;
+
+        // BFS to freeze all reachable nodes
+        let mut to_visit: Vec<Py<Self>> =
+            self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+
+        while let Some(node_py) = to_visit.pop() {
+            let mut node = node_py.borrow_mut(py);
+            if !node.frozen {
+                node.frozen = true;
+                node.compiled = true;
+                for downstream in &node.downstreams {
+                    to_visit.push(downstream.clone_ref(py));
+                }
+            }
+        }
     }
 
     /// Mark nodes that need locking due to being downstream of a prefetch within a par branch.
@@ -173,7 +219,6 @@ impl Stream {
     }
 
     /// Recursively fuse linear chains of Map or Filter nodes.
-    #[allow(dead_code)] // Currently disabled but kept for future use
     pub(crate) fn fuse_linear_chains(&mut self, py: Python) {
         // Process each downstream
         for downstream in &self.downstreams {
