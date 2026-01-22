@@ -3,9 +3,45 @@
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
+use crate::Stream;
 use crate::helpers::{get_compose_batch_maps, get_compose_filters, get_compose_maps};
 use crate::node::NodeLogic;
-use crate::Stream;
+
+/// Data extracted from a child node needed for fusion.
+struct FusionChildData {
+    downstreams: Vec<Py<Stream>>,
+    name: String,
+    func_is_sync: bool,
+}
+
+impl FusionChildData {
+    /// Extract data from a borrowed child node.
+    fn from_child(py: Python, child: &Stream) -> Self {
+        Self {
+            downstreams: child.downstreams.iter().map(|d| d.clone_ref(py)).collect(),
+            name: child.name.clone(),
+            func_is_sync: child.func_is_sync,
+        }
+    }
+}
+
+impl Stream {
+    /// Apply a fusion by updating this node's logic and bypassing the child.
+    fn apply_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
+        self.logic = new_logic;
+        self.name = format!("{}+{}", self.name, child_data.name);
+        self.downstreams = child_data.downstreams;
+        self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
+    }
+
+    /// Apply a terminal fusion (fusing into a sink - no downstreams).
+    fn apply_terminal_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
+        self.logic = new_logic;
+        self.name = format!("{}+{}", self.name, child_data.name);
+        self.downstreams = Vec::new();
+        self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
+    }
+}
 
 impl Stream {
     /// Optimize the topology on first emit.
@@ -53,8 +89,21 @@ impl Stream {
         // Phase 1: Fuse consecutive maps and filters (NOW ENABLED)
         self.fuse_linear_chains(py);
 
-        // Phase 2: Collect all nodes
+        // Phase 2: Collect all nodes and check sync status
         let all_nodes = self.collect_all_nodes(py);
+
+        // If all nodes are sync and asynchronous flag wasn't explicitly set,
+        // enable skip_async_check for all nodes
+        let all_sync = self.func_is_sync && all_nodes.iter().all(|n| n.borrow(py).func_is_sync);
+        if all_sync && self.asynchronous.is_none() {
+            self.skip_async_check = true;
+            for node_py in &all_nodes {
+                let mut node = node_py.borrow_mut(py);
+                if node.asynchronous.is_none() {
+                    node.skip_async_check = true;
+                }
+            }
+        }
 
         // Phase 3: Mark prefetch nodes inside par branches as needing locks
         self.mark_prefetch_in_par(py, &all_nodes);
@@ -184,8 +233,13 @@ impl Stream {
                     }
                     visited.insert(node_ptr);
 
-                    node_branches.entry(node_ptr).or_default().insert(branch_idx);
-                    node_refs.entry(node_ptr).or_insert_with(|| node_py.clone_ref(py));
+                    node_branches
+                        .entry(node_ptr)
+                        .or_default()
+                        .insert(branch_idx);
+                    node_refs
+                        .entry(node_ptr)
+                        .or_insert_with(|| node_py.clone_ref(py));
 
                     let node = node_py.borrow(py);
                     for downstream in &node.downstreams {
@@ -241,21 +295,9 @@ impl Stream {
             && let Ok(compose) = get_compose_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
-            // Clone child's downstreams before modifying self
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
-            drop(child); // Release borrow before modifying self
-
-            // Update this node's function to the composed one
-            self.logic = NodeLogic::Map { func: composed };
-            // Update name to show fusion
-            self.name = format!("{}+{}", self.name, child_name);
-            // Bypass child: point to child's downstreams
-            self.downstreams = new_downstreams;
-            // Inherit func_is_sync (both must be sync for composed to be sync)
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
+            drop(child);
+            self.apply_fusion(NodeLogic::Map { func: composed }, child_data);
             return;
         }
 
@@ -269,23 +311,14 @@ impl Stream {
             && let Ok(compose) = get_compose_filters()
             && let Ok(composed) = compose.call1(py, (my_pred, child_pred))
         {
-            // Clone child's downstreams before modifying self
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
-            drop(child); // Release borrow before modifying self
-
-            // Update this node's predicate to the composed one
-            self.logic = NodeLogic::Filter {
-                predicate: composed,
-            };
-            // Update name to show fusion
-            self.name = format!("{}+{}", self.name, child_name);
-            // Bypass child: point to child's downstreams
-            self.downstreams = new_downstreams;
-            // Inherit func_is_sync
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
+            drop(child);
+            self.apply_fusion(
+                NodeLogic::Filter {
+                    predicate: composed,
+                },
+                child_data,
+            );
             return;
         }
 
@@ -300,21 +333,9 @@ impl Stream {
             && let Ok(compose) = get_compose_batch_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
-            // Clone child's downstreams before modifying self
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
-            drop(child); // Release borrow before modifying self
-
-            // Update this node's function to the composed one
-            self.logic = NodeLogic::BatchMap { func: composed };
-            // Update name to show fusion
-            self.name = format!("{}+{}", self.name, child_name);
-            // Bypass child: point to child's downstreams
-            self.downstreams = new_downstreams;
-            // Inherit func_is_sync (both must be sync for composed to be sync)
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
+            drop(child);
+            self.apply_fusion(NodeLogic::BatchMap { func: composed }, child_data);
             return;
         }
 
@@ -327,26 +348,17 @@ impl Stream {
                 func: ref child_func,
             } = child.logic
         {
-            // Clone child's downstreams before modifying self
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
             let pred = my_pred.clone_ref(py);
             let func = child_func.clone_ref(py);
-            drop(child); // Release borrow before modifying self
-
-            // Create FilterMap node
-            self.logic = NodeLogic::FilterMap {
-                predicate: pred,
-                func,
-            };
-            // Update name to show fusion
-            self.name = format!("{}+{}", self.name, child_name);
-            // Bypass child: point to child's downstreams
-            self.downstreams = new_downstreams;
-            // Inherit func_is_sync
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
+            drop(child);
+            self.apply_fusion(
+                NodeLogic::FilterMap {
+                    predicate: pred,
+                    func,
+                },
+                child_data,
+            );
             return;
         }
 
@@ -361,25 +373,16 @@ impl Stream {
             && let Ok(compose) = get_compose_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
-            // Clone child's downstreams before modifying self
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
             let pred = my_pred.clone_ref(py);
-            drop(child); // Release borrow before modifying self
-
-            // Update FilterMap with composed map function
-            self.logic = NodeLogic::FilterMap {
-                predicate: pred,
-                func: composed,
-            };
-            // Update name to show fusion
-            self.name = format!("{}+{}", self.name, child_name);
-            // Bypass child: point to child's downstreams
-            self.downstreams = new_downstreams;
-            // Inherit func_is_sync
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
+            drop(child);
+            self.apply_fusion(
+                NodeLogic::FilterMap {
+                    predicate: pred,
+                    func: composed,
+                },
+                child_data,
+            );
             return;
         }
 
@@ -387,15 +390,10 @@ impl Stream {
         // Pattern: any_node -> Source -> downstream => any_node -> downstream
         // This reduces graph traversal overhead
         if let NodeLogic::Source = child.logic {
-            // Source nodes just pass through, so bypass them
             let new_downstreams: Vec<Py<Self>> =
                 child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            drop(child); // Release borrow before modifying self
-
-            // Bypass the Source node: point directly to its downstreams
+            drop(child);
             self.downstreams = new_downstreams;
-            // Note: Don't return here - we may be able to apply more fusions
-            // with the new downstream after eliminating the passthrough
             return;
         }
 
@@ -407,17 +405,15 @@ impl Stream {
         {
             let map_f = map_func.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
             drop(child);
-
-            self.logic = NodeLogic::MapSink {
-                map_func: map_f,
-                sink_func: sink_f,
-            };
-            self.name = format!("{}+{}", self.name, child_name);
-            self.downstreams = Vec::new(); // Terminal node
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            self.apply_terminal_fusion(
+                NodeLogic::MapSink {
+                    map_func: map_f,
+                    sink_func: sink_f,
+                },
+                child_data,
+            );
             return;
         }
 
@@ -431,17 +427,15 @@ impl Stream {
         {
             let p = pred.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
             drop(child);
-
-            self.logic = NodeLogic::FilterSink {
-                predicate: p,
-                sink_func: sink_f,
-            };
-            self.name = format!("{}+{}", self.name, child_name);
-            self.downstreams = Vec::new(); // Terminal node
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            self.apply_terminal_fusion(
+                NodeLogic::FilterSink {
+                    predicate: p,
+                    sink_func: sink_f,
+                },
+                child_data,
+            );
             return;
         }
 
@@ -457,18 +451,16 @@ impl Stream {
             let p = pred.clone_ref(py);
             let map_f = map_func.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
-            let child_name = child.name.clone();
-            let child_func_is_sync = child.func_is_sync;
+            let child_data = FusionChildData::from_child(py, &child);
             drop(child);
-
-            self.logic = NodeLogic::FilterMapSink {
-                predicate: p,
-                map_func: map_f,
-                sink_func: sink_f,
-            };
-            self.name = format!("{}+{}", self.name, child_name);
-            self.downstreams = Vec::new(); // Terminal node
-            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            self.apply_terminal_fusion(
+                NodeLogic::FilterMapSink {
+                    predicate: p,
+                    map_func: map_f,
+                    sink_func: sink_f,
+                },
+                child_data,
+            );
         }
     }
 }

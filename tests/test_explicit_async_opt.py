@@ -1,4 +1,3 @@
-import pytest
 import asyncio
 from rstreamz import Stream
 

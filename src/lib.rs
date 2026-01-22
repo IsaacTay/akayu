@@ -5,6 +5,9 @@
 #![allow(clippy::needless_pass_by_value)] // PyO3 requires owned values
 #![allow(clippy::too_many_lines)] // Complex stream methods need length
 #![allow(clippy::doc_markdown)] // Python docstrings use Python conventions, not Rust
+#![allow(clippy::missing_errors_doc)] // Errors documented in Python docstrings
+#![allow(clippy::missing_panics_doc)] // Internal panics on invariant violations
+#![allow(clippy::must_use_candidate)] // PyO3 handles return value usage
 #![allow(dead_code)] // Optimizations temporarily disabled
 #![allow(unused_variables)] // Optimizations temporarily disabled
 

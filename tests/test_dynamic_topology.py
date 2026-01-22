@@ -1,6 +1,4 @@
-import pytest
 from rstreamz import Stream
-import random
 
 def test_add_node_after_emit():
     """Test adding a node to source after an emit."""

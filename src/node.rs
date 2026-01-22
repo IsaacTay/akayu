@@ -92,4 +92,12 @@ pub enum NodeLogic {
         map_func: Py<PyAny>,
         sink_func: Py<PyAny>,
     },
+    /// Async map: non-blocking emit with buffered results for async functions
+    /// When asynchronous=True is set on a map, coroutines are submitted to a background
+    /// event loop and results are returned in order when ready or on flush()
+    AsyncMap {
+        #[allow(dead_code)] // Stored for debugging/inspection
+        func: Py<PyAny>,
+        state: Py<PyAny>, // Python _AsyncState object
+    },
 }
