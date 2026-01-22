@@ -57,3 +57,32 @@ async def test_mixed_sync_async():
     await s.emit(10)  # 10 -> 11 -> 22
 
     assert res == [22]
+
+
+@pytest.mark.asyncio
+async def test_async_map_error():
+    """Test error propagation in async map."""
+    s = rstreamz.Stream()
+
+    async def failing_async(x):
+        await asyncio.sleep(0.001)
+        raise ValueError("async boom")
+
+    s.map(failing_async).sink(lambda x: None)
+    # Async errors propagate directly as ValueError
+    with pytest.raises(ValueError, match="async boom"):
+        await s.emit(1)
+
+
+@pytest.mark.asyncio
+async def test_async_filter_error():
+    """Test error in async filter predicate."""
+    s = rstreamz.Stream()
+
+    async def failing_pred(x):
+        raise ValueError("filter boom")
+
+    s.filter(failing_pred).sink(lambda x: None)
+    # Async errors propagate directly as ValueError
+    with pytest.raises(ValueError, match="filter boom"):
+        await s.emit(1)

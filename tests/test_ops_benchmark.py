@@ -1,5 +1,4 @@
 import rstreamz
-import streamz
 
 # Target 500,000 downstream operations/items
 N_OPS = 500_000
@@ -23,10 +22,6 @@ def test_benchmark_flatten_rstreamz(benchmark):
     benchmark(run_flatten, rstreamz.Stream, N_OPS)
 
 
-def test_benchmark_flatten_streamz(benchmark):
-    benchmark(run_flatten, streamz.Stream, N_OPS)
-
-
 def run_collect(source_cls, n):
     s = source_cls()
     # Note: collect() accumulates everything into a list until flushed.
@@ -39,7 +34,3 @@ def run_collect(source_cls, n):
 
 def test_benchmark_collect_rstreamz(benchmark):
     benchmark(run_collect, rstreamz.Stream, N_OPS)
-
-
-def test_benchmark_collect_streamz(benchmark):
-    benchmark(run_collect, streamz.Stream, N_OPS)

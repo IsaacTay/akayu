@@ -37,3 +37,16 @@ def test_error_propagation_batch():
 
     assert "Stream operation failed at node 'batch_fail_node'" in str(excinfo.value)
     assert "Batch Error" in str(excinfo.value.__cause__)
+
+
+def test_error_in_filter():
+    """Test error propagation from filter predicate."""
+    s = rstreamz.Stream()
+
+    def bad_pred(x):
+        raise ValueError("predicate error")
+
+    s.filter(bad_pred, stream_name="bad_filter").sink(lambda x: None)
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    assert "bad_filter" in str(exc.value)
