@@ -17,5 +17,14 @@ def test_starmap():
     assert res == [4, 8]
 
 
+def test_starmap_batch():
+    """Test starmap with emit_batch."""
+    s = rstreamz.Stream(asynchronous=False)
+    L = []
+    s.starmap(lambda a, b: a + b).sink(L.append)
+    s.emit_batch([(1, 2), (3, 4), (5, 6)])
+    assert L == [3, 7, 11]
+
+
 if __name__ == "__main__":
     test_starmap()

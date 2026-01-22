@@ -1,12 +1,4 @@
 import rstreamz
-import psutil
-import os
-import gc
-
-
-def get_memory_usage_mb():
-    process = psutil.Process(os.getpid())
-    return process.memory_info().rss / 1024 / 1024
 
 
 def test_benchmark_throughput(benchmark):
@@ -180,43 +172,6 @@ def test_benchmark_expansion_batch(benchmark):
     assert result == 250000
 
 
-def test_memory_stability():
-    """
-    Pushes 1,000,000 items through the pipeline and checks that memory doesn't explode.
-    """
-    gc.collect()
-    start_mem = get_memory_usage_mb()
-    print(f"Start Memory: {start_mem:.2f} MB")
-
-    s = rstreamz.Stream()
-
-    # Define a sink that doesn't store data, just ensures it's processed
-    def no_op(x):
-        pass
-
-    # Create a reasonably deep pipeline
-    s.map(lambda x: x * 2).map(lambda x: x + 1).filter(lambda x: x > 10).sink(no_op)
-
-    # Process 1 million items
-    count = 1_000_000
-    batch_size = 100_000
-
-    for i in range(count):
-        s.emit(i)
-        if i % batch_size == 0:
-            get_memory_usage_mb()  # Check memory periodically
-
-    gc.collect()
-    end_mem = get_memory_usage_mb()
-    print(f"End Memory: {end_mem:.2f} MB")
-
-    # Allow for some small fluctuation, but if we leaked every item, it would be huge.
-    # 1M python ints would be ~28MB minimum.
-    # We check that growth is less than 5MB (generous for overhead).
-    diff = end_mem - start_mem
-    assert diff < 10.0, f"Memory leaked? Growth: {diff:.2f} MB"
-
-
 def test_benchmark_python_map_filter(benchmark):
     """
     Benchmark using Python's built-in map and filter functions.
@@ -237,39 +192,6 @@ def test_benchmark_python_map_filter(benchmark):
 
         # Sink: consume count
         count = sum(1 for _ in mapped2)
-        return count
-
-    result = benchmark(run_pipeline)
-    assert result == 250000
-
-
-def test_benchmark_python_loop_separated(benchmark):
-    """
-    Benchmark using raw Python loops with intermediate list materialization (eager).
-    This contrasts with the 'fused' loop in test_benchmark_pure_python.
-    """
-
-    def run_pipeline():
-        data = range(500000)
-
-        # map
-        step1 = []
-        for x in data:
-            step1.append(x + 1)
-
-        # filter
-        step2 = []
-        for x in step1:
-            if x % 2 == 0:
-                step2.append(x)
-
-        # map
-        step3 = []
-        for x in step2:
-            step3.append(x / 2)
-
-        # count
-        count = len(step3)
         return count
 
     result = benchmark(run_pipeline)

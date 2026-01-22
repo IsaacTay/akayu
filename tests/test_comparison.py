@@ -126,9 +126,5 @@ def run_throughput_benchmark(source_cls):
     return count
 
 
-def test_perf_rstreamz(benchmark):
-    benchmark(run_throughput_benchmark, rstreamz.Stream)
-
-
 def test_perf_streamz(benchmark):
     benchmark(run_throughput_benchmark, streamz.Stream)
