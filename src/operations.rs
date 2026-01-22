@@ -5,7 +5,8 @@ use pyo3::types::{PyDict, PyTuple};
 
 use crate::helpers::{
     extract_stream_name, get_build_map_func, get_build_starmap_func, get_gather,
-    get_is_sync_callable, wrap_error,
+    get_is_sync_callable, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
+    get_prefetch_state_class, wrap_error,
 };
 use crate::node::NodeLogic;
 use crate::Stream;
@@ -47,19 +48,20 @@ impl Stream {
     ///     A new Stream emitting the transformed values.
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn map(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
+        let mut this = slf.borrow_mut();
+        if this.compiled {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
+                this.name
             )));
         }
-        let name = extract_stream_name(py, &kwargs, "map", &self.name)?;
+        let name = extract_stream_name(py, &kwargs, "map", &this.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -73,14 +75,30 @@ impl Stream {
         };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
+        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchMap
+        if let NodeLogic::Prefetch { size } = this.logic {
+            let prefetch_state_class = get_prefetch_state_class()?;
+            let state = prefetch_state_class.call1(py, (&wrapped_func, size))?;
+
+            this.logic = NodeLogic::PrefetchMap {
+                func: wrapped_func,
+                size,
+                state,
+            };
+            this.name = format!("prefetch_map({size})+{name}");
+            this.func_is_sync = func_is_sync;
+            drop(this);
+            return Ok(slf.clone().unbind());
+        }
+
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Map { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
+                asynchronous: this.asynchronous,
+                skip_async_check: this.skip_async_check,
                 func_is_sync,
                 frozen: false,
                 needs_lock: false,
@@ -88,7 +106,7 @@ impl Stream {
             },
         )?;
 
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
 
@@ -177,7 +195,7 @@ impl Stream {
         let node = Py::new(
             py,
             Self {
-                logic: NodeLogic::Starmap { func: wrapped_func },
+                logic: NodeLogic::Map { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
                 asynchronous: self.asynchronous,
@@ -215,19 +233,20 @@ impl Stream {
     ///     >>> `s.emit_batch`([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn batch_map(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
+        let mut this = slf.borrow_mut();
+        if this.compiled {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
+                this.name
             )));
         }
-        let name = extract_stream_name(py, &kwargs, "batch_map", &self.name)?;
+        let name = extract_stream_name(py, &kwargs, "batch_map", &this.name)?;
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -241,14 +260,30 @@ impl Stream {
         };
         let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
 
+        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchBatchMap
+        if let NodeLogic::Prefetch { size } = this.logic {
+            let prefetch_batch_map_state_class = get_prefetch_batch_map_state_class()?;
+            let state = prefetch_batch_map_state_class.call1(py, (&wrapped_func, size))?;
+
+            this.logic = NodeLogic::PrefetchBatchMap {
+                func: wrapped_func,
+                size,
+                state,
+            };
+            this.name = format!("prefetch_batch_map({size})+{name}");
+            this.func_is_sync = func_is_sync;
+            drop(this);
+            return Ok(slf.clone().unbind());
+        }
+
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::BatchMap { func: wrapped_func },
                 downstreams: Vec::new(),
                 name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
+                asynchronous: this.asynchronous,
+                skip_async_check: this.skip_async_check,
                 func_is_sync,
                 frozen: false,
                 needs_lock: false,
@@ -256,7 +291,7 @@ impl Stream {
             },
         )?;
 
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
 
@@ -274,19 +309,20 @@ impl Stream {
     ///     A new Stream emitting only elements that pass the filter.
     #[pyo3(signature = (predicate, *args, **kwargs))]
     pub fn filter(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         predicate: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        if self.compiled {
+        let mut this = slf.borrow_mut();
+        if this.compiled {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "Cannot modify frozen stream '{}'. Call compile() only after building the complete graph.",
-                self.name
+                this.name
             )));
         }
-        let name = extract_stream_name(py, &kwargs, "filter", &self.name)?;
+        let name = extract_stream_name(py, &kwargs, "filter", &this.name)?;
 
         // Check if the original predicate is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -298,20 +334,42 @@ impl Stream {
         } else {
             Some(args)
         };
-        let wrapped_func: Py<PyAny> = builder
+        let wrapped_predicate: Py<PyAny> = builder
             .call1(py, (predicate, args_opt, kwargs))?
             .extract(py)?;
+
+        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchFilter
+        if let NodeLogic::Prefetch { size } = this.logic {
+            let prefetch_filter_state_class = get_prefetch_filter_state_class()?;
+            // Wrap predicate to return (predicate_result, original_value)
+            let wrapper_code = "lambda p: lambda x: (p(x), x)";
+            let builtins = py.import("builtins")?;
+            let eval_fn = builtins.getattr("eval")?;
+            let make_wrapper = eval_fn.call1((wrapper_code,))?;
+            let wrapped_pred = make_wrapper.call1((&wrapped_predicate,))?;
+            let state = prefetch_filter_state_class.call1(py, (&wrapped_pred, size))?;
+
+            this.logic = NodeLogic::PrefetchFilter {
+                predicate: wrapped_pred.unbind(),
+                size,
+                state,
+            };
+            this.name = format!("prefetch_filter({size})+{name}");
+            this.func_is_sync = func_is_sync;
+            drop(this);
+            return Ok(slf.clone().unbind());
+        }
 
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Filter {
-                    predicate: wrapped_func,
+                    predicate: wrapped_predicate,
                 },
                 downstreams: Vec::new(),
                 name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
+                asynchronous: this.asynchronous,
+                skip_async_check: this.skip_async_check,
                 func_is_sync,
                 frozen: false,
                 needs_lock: false,
@@ -319,7 +377,7 @@ impl Stream {
             },
         )?;
 
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
 
@@ -430,6 +488,16 @@ impl Stream {
             }
             NodeLogic::PrefetchFilter { state, .. } => {
                 // Flush the prefetch filter state - wait for all pending items and propagate
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            NodeLogic::PrefetchBatchMap { state, .. } => {
+                // Flush the prefetch batch_map state - wait for all pending items and propagate
                 let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {

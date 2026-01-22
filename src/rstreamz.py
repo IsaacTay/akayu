@@ -153,6 +153,64 @@ def _compose_filters(p1, p2):
         composed_long._chain = all_preds
         return composed_long
 
+def _compose_batch_maps(f, g):
+    """Compose two batch_map functions: batch_map(f).batch_map(g) -> batch_map(composed).
+
+    Each function takes a list and returns a list. The composed function
+    passes the output of f directly to g, avoiding intermediate list allocation.
+    """
+    # Get existing function lists or create new ones
+    f_funcs = getattr(f, '_chain', [f])
+    g_funcs = getattr(g, '_chain', [g])
+    all_funcs = f_funcs + g_funcs
+
+    # Create a flat composed function based on chain length
+    if len(all_funcs) == 2:
+        f1, f2 = all_funcs
+        def composed2(batch):
+            return f2(f1(batch))
+        composed2._chain = all_funcs
+        return composed2
+    elif len(all_funcs) == 3:
+        f1, f2, f3 = all_funcs
+        def composed3(batch):
+            return f3(f2(f1(batch)))
+        composed3._chain = all_funcs
+        return composed3
+    elif len(all_funcs) == 4:
+        f1, f2, f3, f4 = all_funcs
+        def composed4(batch):
+            return f4(f3(f2(f1(batch))))
+        composed4._chain = all_funcs
+        return composed4
+    elif len(all_funcs) == 5:
+        f1, f2, f3, f4, f5 = all_funcs
+        def composed5(batch):
+            return f5(f4(f3(f2(f1(batch)))))
+        composed5._chain = all_funcs
+        return composed5
+    else:
+        # Fallback for longer chains: use reduce-style
+        def composed_long(batch):
+            result = batch
+            for fn in all_funcs:
+                result = fn(result)
+            return result
+        composed_long._chain = all_funcs
+        return composed_long
+
+def _compose_filter_map(predicate, func):
+    """Compose filter predicate and map function into a single function.
+
+    Returns a function that takes (x) and returns either func(x) or a sentinel
+    indicating the item was filtered out.
+    """
+    def filter_map(x):
+        if predicate(x):
+            return (True, func(x))
+        return (False, None)
+    return filter_map
+
 from concurrent.futures import ThreadPoolExecutor
 import contextvars
 import threading
@@ -355,6 +413,90 @@ class _PrefetchFilterState:
 
     def flush(self):
         """Wait for all pending items and return in order (only those that passed filter)."""
+        with self._lock:
+            for seq in sorted(self.pending.keys()):
+                self.ready[seq] = self.pending[seq].result()
+            self.pending.clear()
+            return self._collect_ready()
+
+
+class _PrefetchBatchMapState:
+    """State manager for prefetch batch_map operations.
+
+    Like _PrefetchState but for batch_map. Each item is wrapped in a list before
+    being submitted to the thread pool, and the single result is extracted.
+
+    For update_batch, the entire batch is submitted as one unit.
+    """
+
+    def __init__(self, func, size):
+        import threading
+        self.func = func
+        self.size = size
+        self.executor = _get_global_pool()
+        self.pending = {}    # {seq_num: future}
+        self.next_seq = 0
+        self.next_emit = 0
+        self.ready = {}      # {seq_num: result}
+        self._lock = threading.Lock()
+
+    def _run_single(self, item):
+        """Run func on single item wrapped in list, extract single result."""
+        result = self.func([item])
+        # batch_map returns iterable, extract first element
+        return next(iter(result))
+
+    def update(self, item):
+        """Process a single item and return ready results in order."""
+        with self._lock:
+            seq = self.next_seq
+            self.next_seq += 1
+
+            # Submit single item (wrapped in list internally by _run_single)
+            future = self.executor.submit(self._run_single, item)
+            self.pending[seq] = future
+
+            if len(self.pending) >= self.size:
+                self._drain_one()
+
+            return self._collect_ready()
+
+    def update_batch(self, items):
+        """Process a batch and return ready results in order.
+
+        Each item in the batch is submitted separately to allow prefetching.
+        """
+        with self._lock:
+            # Submit each item separately for prefetching
+            for item in items:
+                seq = self.next_seq
+                self.next_seq += 1
+                future = self.executor.submit(self._run_single, item)
+                self.pending[seq] = future
+
+                if len(self.pending) >= self.size:
+                    self._drain_one()
+
+            return self._collect_ready()
+
+    def _drain_one(self):
+        """Wait for the next expected result to complete."""
+        if self.next_emit in self.pending:
+            result = self.pending[self.next_emit].result()
+            self.ready[self.next_emit] = result
+            del self.pending[self.next_emit]
+
+    def _collect_ready(self):
+        """Collect all consecutive ready results."""
+        results = []
+        while self.next_emit in self.ready:
+            result = self.ready.pop(self.next_emit)
+            results.append(result)
+            self.next_emit += 1
+        return results
+
+    def flush(self):
+        """Wait for all pending items and return in order."""
         with self._lock:
             for seq in sorted(self.pending.keys()):
                 self.ready[seq] = self.pending[seq].result()

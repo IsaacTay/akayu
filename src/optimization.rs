@@ -3,10 +3,7 @@
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::helpers::{
-    get_compose_filters, get_compose_maps, get_prefetch_filter_state_class,
-    get_prefetch_state_class,
-};
+use crate::helpers::{get_compose_batch_maps, get_compose_filters, get_compose_maps};
 use crate::node::NodeLogic;
 use crate::Stream;
 
@@ -151,7 +148,9 @@ impl Stream {
                     let node = node_py.borrow(py);
                     if matches!(
                         node.logic,
-                        NodeLogic::PrefetchMap { .. } | NodeLogic::PrefetchFilter { .. }
+                        NodeLogic::PrefetchMap { .. }
+                            | NodeLogic::PrefetchFilter { .. }
+                            | NodeLogic::PrefetchBatchMap { .. }
                     ) {
                         has_prefetch = true;
                         break;
@@ -290,89 +289,186 @@ impl Stream {
             return;
         }
 
-        // Check if we can fuse Prefetch -> Map into PrefetchMap
-        if let NodeLogic::Prefetch { size } = self.logic
-            && let NodeLogic::Map { ref func } = child.logic
-            && let Ok(prefetch_state_class) = get_prefetch_state_class()
-            && let Ok(state) = prefetch_state_class.call1(py, (func, size))
+        // Note: Prefetch -> Map and Prefetch -> Filter fusion is done eagerly
+        // in map() and filter() when the parent is a Prefetch node.
+
+        // Check if we can fuse BatchMap -> BatchMap
+        if let NodeLogic::BatchMap { func: ref my_func } = self.logic
+            && let NodeLogic::BatchMap {
+                func: ref child_func,
+            } = child.logic
+            && let Ok(compose) = get_compose_batch_maps()
+            && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
             // Clone child's downstreams before modifying self
             let new_downstreams: Vec<Py<Self>> =
                 child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             let child_name = child.name.clone();
             let child_func_is_sync = child.func_is_sync;
-            let child_func = func.clone_ref(py);
             drop(child); // Release borrow before modifying self
 
-            // Replace this node with PrefetchMap
-            self.logic = NodeLogic::PrefetchMap {
-                func: child_func,
-                size,
-                state,
-            };
+            // Update this node's function to the composed one
+            self.logic = NodeLogic::BatchMap { func: composed };
             // Update name to show fusion
-            self.name = format!("prefetch_map({size})+{child_name}");
+            self.name = format!("{}+{}", self.name, child_name);
             // Bypass child: point to child's downstreams
             self.downstreams = new_downstreams;
-            // Inherit func_is_sync
-            self.func_is_sync = child_func_is_sync;
+            // Inherit func_is_sync (both must be sync for composed to be sync)
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
             return;
         }
 
-        // Check if we can fuse Prefetch -> Starmap into PrefetchMap
-        if let NodeLogic::Prefetch { size } = self.logic
-            && let NodeLogic::Starmap { ref func } = child.logic
-            && let Ok(prefetch_state_class) = get_prefetch_state_class()
-            && let Ok(state) = prefetch_state_class.call1(py, (func, size))
+        // Check if we can fuse Filter -> Map into FilterMap
+        // This runs AFTER existing fusions so we're fusing already-optimized chains
+        if let NodeLogic::Filter {
+            predicate: ref my_pred,
+        } = self.logic
+            && let NodeLogic::Map {
+                func: ref child_func,
+            } = child.logic
         {
+            // Clone child's downstreams before modifying self
             let new_downstreams: Vec<Py<Self>> =
                 child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             let child_name = child.name.clone();
             let child_func_is_sync = child.func_is_sync;
-            let child_func = func.clone_ref(py);
-            drop(child);
+            let pred = my_pred.clone_ref(py);
+            let func = child_func.clone_ref(py);
+            drop(child); // Release borrow before modifying self
 
-            self.logic = NodeLogic::PrefetchMap {
-                func: child_func,
-                size,
-                state,
+            // Create FilterMap node
+            self.logic = NodeLogic::FilterMap {
+                predicate: pred,
+                func,
             };
-            self.name = format!("prefetch_starmap({size})+{child_name}");
+            // Update name to show fusion
+            self.name = format!("{}+{}", self.name, child_name);
+            // Bypass child: point to child's downstreams
             self.downstreams = new_downstreams;
-            self.func_is_sync = child_func_is_sync;
+            // Inherit func_is_sync
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
             return;
         }
 
-        // Check if we can fuse Prefetch -> Filter into PrefetchFilter
-        // Note: For filter, we wrap the predicate to return (keep, value) tuples
-        if let NodeLogic::Prefetch { size } = self.logic
-            && let NodeLogic::Filter { ref predicate } = child.logic
-            && let Ok(prefetch_filter_state_class) = get_prefetch_filter_state_class()
+        // Check if we can fuse FilterMap -> Map (extend existing FilterMap)
+        if let NodeLogic::FilterMap {
+            predicate: ref my_pred,
+            func: ref my_func,
+        } = self.logic
+            && let NodeLogic::Map {
+                func: ref child_func,
+            } = child.logic
+            && let Ok(compose) = get_compose_maps()
+            && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
-            // Create a wrapper that returns (predicate_result, original_value)
-            let pred_clone = predicate.clone_ref(py);
-            let wrapper_code = "lambda p: lambda x: (p(x), x)";
-            if let Ok(builtins) = py.import("builtins")
-                && let Ok(eval_fn) = builtins.getattr("eval")
-                && let Ok(make_wrapper) = eval_fn.call1((wrapper_code,))
-                && let Ok(wrapped_pred) = make_wrapper.call1((pred_clone,))
-                && let Ok(state) = prefetch_filter_state_class.call1(py, (&wrapped_pred, size))
-            {
-                let new_downstreams: Vec<Py<Self>> =
-                    child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-                let child_name = child.name.clone();
-                let child_func_is_sync = child.func_is_sync;
-                drop(child);
+            // Clone child's downstreams before modifying self
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            let pred = my_pred.clone_ref(py);
+            drop(child); // Release borrow before modifying self
 
-                self.logic = NodeLogic::PrefetchFilter {
-                    predicate: wrapped_pred.unbind(),
-                    size,
-                    state,
-                };
-                self.name = format!("prefetch_filter({size})+{child_name}");
-                self.downstreams = new_downstreams;
-                self.func_is_sync = child_func_is_sync;
-            }
+            // Update FilterMap with composed map function
+            self.logic = NodeLogic::FilterMap {
+                predicate: pred,
+                func: composed,
+            };
+            // Update name to show fusion
+            self.name = format!("{}+{}", self.name, child_name);
+            // Bypass child: point to child's downstreams
+            self.downstreams = new_downstreams;
+            // Inherit func_is_sync
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            return;
+        }
+
+        // Passthrough elimination: bypass Source nodes (seq() nodes) that only forward
+        // Pattern: any_node -> Source -> downstream => any_node -> downstream
+        // This reduces graph traversal overhead
+        if let NodeLogic::Source = child.logic {
+            // Source nodes just pass through, so bypass them
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            drop(child); // Release borrow before modifying self
+
+            // Bypass the Source node: point directly to its downstreams
+            self.downstreams = new_downstreams;
+            // Note: Don't return here - we may be able to apply more fusions
+            // with the new downstream after eliminating the passthrough
+            return;
+        }
+
+        // Check if we can fuse Map -> Sink into MapSink
+        if let NodeLogic::Map { func: ref map_func } = self.logic
+            && let NodeLogic::Sink {
+                func: ref sink_func,
+            } = child.logic
+        {
+            let map_f = map_func.clone_ref(py);
+            let sink_f = sink_func.clone_ref(py);
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            drop(child);
+
+            self.logic = NodeLogic::MapSink {
+                map_func: map_f,
+                sink_func: sink_f,
+            };
+            self.name = format!("{}+{}", self.name, child_name);
+            self.downstreams = Vec::new(); // Terminal node
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            return;
+        }
+
+        // Check if we can fuse Filter -> Sink into FilterSink
+        if let NodeLogic::Filter {
+            predicate: ref pred,
+        } = self.logic
+            && let NodeLogic::Sink {
+                func: ref sink_func,
+            } = child.logic
+        {
+            let p = pred.clone_ref(py);
+            let sink_f = sink_func.clone_ref(py);
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            drop(child);
+
+            self.logic = NodeLogic::FilterSink {
+                predicate: p,
+                sink_func: sink_f,
+            };
+            self.name = format!("{}+{}", self.name, child_name);
+            self.downstreams = Vec::new(); // Terminal node
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
+            return;
+        }
+
+        // Check if we can fuse FilterMap -> Sink into FilterMapSink
+        if let NodeLogic::FilterMap {
+            predicate: ref pred,
+            func: ref map_func,
+        } = self.logic
+            && let NodeLogic::Sink {
+                func: ref sink_func,
+            } = child.logic
+        {
+            let p = pred.clone_ref(py);
+            let map_f = map_func.clone_ref(py);
+            let sink_f = sink_func.clone_ref(py);
+            let child_name = child.name.clone();
+            let child_func_is_sync = child.func_is_sync;
+            drop(child);
+
+            self.logic = NodeLogic::FilterMapSink {
+                predicate: p,
+                map_func: map_f,
+                sink_func: sink_f,
+            };
+            self.name = format!("{}+{}", self.name, child_name);
+            self.downstreams = Vec::new(); // Terminal node
+            self.func_is_sync = self.func_is_sync && child_func_is_sync;
         }
     }
 }

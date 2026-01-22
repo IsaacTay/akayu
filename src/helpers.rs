@@ -21,9 +21,12 @@ pub(crate) static BUILD_STARMAP_FUNC: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static IS_SYNC_CALLABLE: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static COMPOSE_MAPS: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static COMPOSE_FILTERS: OnceLock<Py<PyAny>> = OnceLock::new();
+pub(crate) static COMPOSE_BATCH_MAPS: OnceLock<Py<PyAny>> = OnceLock::new();
+pub(crate) static COMPOSE_FILTER_MAP: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static PARALLEL_EXECUTE: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static PREFETCH_STATE_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static PREFETCH_FILTER_STATE_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
+pub(crate) static PREFETCH_BATCH_MAP_STATE_CLASS: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static SAFE_UPDATE: OnceLock<Py<PyAny>> = OnceLock::new();
 pub(crate) static SAFE_UPDATE_BATCH: OnceLock<Py<PyAny>> = OnceLock::new();
 
@@ -81,6 +84,18 @@ pub(crate) fn get_compose_filters() -> PyResult<&'static Py<PyAny>> {
     })
 }
 
+pub(crate) fn get_compose_batch_maps() -> PyResult<&'static Py<PyAny>> {
+    COMPOSE_BATCH_MAPS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+pub(crate) fn get_compose_filter_map() -> PyResult<&'static Py<PyAny>> {
+    COMPOSE_FILTER_MAP.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
 pub(crate) fn get_parallel_execute() -> PyResult<&'static Py<PyAny>> {
     PARALLEL_EXECUTE.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
@@ -95,6 +110,12 @@ pub(crate) fn get_prefetch_state_class() -> PyResult<&'static Py<PyAny>> {
 
 pub(crate) fn get_prefetch_filter_state_class() -> PyResult<&'static Py<PyAny>> {
     PREFETCH_FILTER_STATE_CLASS.get().ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
+    })
+}
+
+pub(crate) fn get_prefetch_batch_map_state_class() -> PyResult<&'static Py<PyAny>> {
+    PREFETCH_BATCH_MAP_STATE_CLASS.get().ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("rstreamz not initialized")
     })
 }
@@ -243,9 +264,12 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
     let compose_maps = helpers_module.getattr("_compose_maps")?;
     let compose_filters = helpers_module.getattr("_compose_filters")?;
+    let compose_batch_maps = helpers_module.getattr("_compose_batch_maps")?;
+    let compose_filter_map = helpers_module.getattr("_compose_filter_map")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
     let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
     let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
+    let prefetch_batch_map_state_class = helpers_module.getattr("_PrefetchBatchMapState")?;
     let safe_update = helpers_module.getattr("_safe_update")?;
     let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
 
@@ -257,11 +281,14 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
     let _ = COMPOSE_MAPS.set(compose_maps.unbind());
     let _ = COMPOSE_FILTERS.set(compose_filters.unbind());
+    let _ = COMPOSE_BATCH_MAPS.set(compose_batch_maps.unbind());
+    let _ = COMPOSE_FILTER_MAP.set(compose_filter_map.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
     let _ = SAFE_UPDATE.set(safe_update.unbind());
     let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
     let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
     let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
+    let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;

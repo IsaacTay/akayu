@@ -20,7 +20,7 @@ impl Stream {
             NodeLogic::Source => {
                 output_batch = items;
             }
-            NodeLogic::Map { func } | NodeLogic::Starmap { func } => {
+            NodeLogic::Map { func } => {
                 for x in items {
                     let res = wrap_error(py, func.call1(py, (x,)), &self.name)?;
                     output_batch.push(res);
@@ -169,6 +169,73 @@ impl Stream {
                 }
                 return Ok(None);
             }
+            NodeLogic::PrefetchBatchMap { state, .. } => {
+                // Use update_batch which processes items with prefetching
+                let py_list = PyList::new(py, &items)?;
+                let results = wrap_error(
+                    py,
+                    state.call_method1(py, "update_batch", (py_list,)),
+                    &self.name,
+                )?;
+                let results_list = results.bind(py);
+                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
+                for result in results_list.try_iter()? {
+                    to_propagate.push(result?.into());
+                }
+                for val in to_propagate {
+                    self.propagate(py, val)?;
+                }
+                return Ok(None);
+            }
+            NodeLogic::FilterMap { predicate, func } => {
+                // Fused filter + map: only call func if predicate passes
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        let mapped = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                        output_batch.push(mapped);
+                    }
+                }
+            }
+            NodeLogic::MapSink {
+                map_func,
+                sink_func,
+            } => {
+                // Fused map + sink: call sink(map(x)) directly, no propagation needed
+                for x in items {
+                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                }
+                return Ok(None); // Terminal node
+            }
+            NodeLogic::FilterSink {
+                predicate,
+                sink_func,
+            } => {
+                // Fused filter + sink: only call sink if predicate passes
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
+                    }
+                }
+                return Ok(None); // Terminal node
+            }
+            NodeLogic::FilterMapSink {
+                predicate,
+                map_func,
+                sink_func,
+            } => {
+                // Fused filter + map + sink: if pred(x) then sink(map(x))
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                    }
+                }
+                return Ok(None); // Terminal node
+            }
         }
 
         self.propagate_batch(py, output_batch)
@@ -177,7 +244,7 @@ impl Stream {
     pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func } | NodeLogic::Starmap { func } => {
+            NodeLogic::Map { func } => {
                 Some(wrap_error(py, func.call1(py, (x,)), &self.name)?)
             }
             NodeLogic::Filter { predicate } => {
@@ -319,6 +386,62 @@ impl Stream {
                     self.propagate(py, result?.into())?;
                 }
                 return Ok(None);
+            }
+            NodeLogic::PrefetchBatchMap { state, .. } => {
+                // Get ready results from Python state (handles threading and ordering)
+                // The state wraps single item in list and extracts single result
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                let results_list = results.bind(py);
+                for result in results_list.try_iter()? {
+                    self.propagate(py, result?.into())?;
+                }
+                return Ok(None);
+            }
+            NodeLogic::FilterMap { predicate, func } => {
+                // Fused filter + map: only call func if predicate passes
+                // This skips the map call entirely for filtered items
+                let x_clone = x.clone_ref(py);
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                if res.is_truthy(py)? {
+                    Some(wrap_error(py, func.call1(py, (x,)), &self.name)?)
+                } else {
+                    None
+                }
+            }
+            NodeLogic::MapSink {
+                map_func,
+                sink_func,
+            } => {
+                // Fused map + sink: call sink(map(x)) directly
+                let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                return Ok(None); // Terminal node
+            }
+            NodeLogic::FilterSink {
+                predicate,
+                sink_func,
+            } => {
+                // Fused filter + sink: only call sink if predicate passes
+                let x_clone = x.clone_ref(py);
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                if res.is_truthy(py)? {
+                    wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
+                }
+                return Ok(None); // Terminal node
+            }
+            NodeLogic::FilterMapSink {
+                predicate,
+                map_func,
+                sink_func,
+            } => {
+                // Fused filter + map + sink: if pred(x) then sink(map(x))
+                let x_clone = x.clone_ref(py);
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                if res.is_truthy(py)? {
+                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                }
+                return Ok(None); // Terminal node
             }
         };
         if let Some(val) = result {

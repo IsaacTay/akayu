@@ -140,6 +140,8 @@ uv run ruff check tests   # Lint Python
     - `test_benchmark_split.py`: Split expansion efficiency tests.
     - `test_concurrency_benchmark.py`: Async concurrency performance tests.
     - `test_parallel.py`: Parallel branch execution tests (`par()`, `seq()`).
+    - `test_compile_safety.py`: Verification that graph modification is blocked after compile.
+    - `test_compile_benchmark.py`: Performance comparison of compiled vs uncompiled pipelines.
 - `Cargo.toml`: Rust dependencies and configuration.
 - `pyproject.toml`: Python package configuration.
 - `flake.nix`: Nix environment configuration.
@@ -149,8 +151,9 @@ uv run ruff check tests   # Lint Python
 1.  Make your changes in `src/lib.rs`.
 2.  Run `just build` (or `just build-release` for optimized builds) to rebuild.
 3.  Add or update tests in `tests/`.
-4.  Run `just test-quick` to verify your changes.
-5.  If tests behave unexpectedly, try `just rebuild` to bypass any cached builds.
-6.  Format your code with `just fmt` before submitting a PR.
+4.  Use `.compile()` in your benchmarks to test the performance impact of fusion and other optimizations.
+5.  Run `just test-quick` to verify your changes.
+6.  If tests behave unexpectedly, try `just rebuild` to bypass any cached builds.
+7.  Format your code with `just fmt` before submitting a PR.
 
 Happy Coding!
