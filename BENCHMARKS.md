@@ -85,6 +85,22 @@ For batch operations, rstreamz approaches pure Python performance while providin
 
 ## Optimizations
 
+### Parallel Execution (`par()` + `prefetch()`)
+
+rstreamz provides two mechanisms for parallel execution that work efficiently together:
+
+- **`par()`**: Executes all downstream branches concurrently in a shared thread pool
+- **`prefetch(n)`**: Processes up to `n` items concurrently while preserving output order
+
+**Shared Thread Pool**: Both `par()` and `prefetch()` share a global thread pool (16 workers), eliminating the overhead of creating separate pools. This means combining `par()` with `prefetch()` has minimal additional overhead:
+
+| Configuration | Time (50 items, 10ms IO each) | Ratio |
+|--------------|-------------------------------|-------|
+| `prefetch(4)` alone | ~135ms | 1.0x |
+| `par()` + `prefetch(4)` | ~136ms | ~1.01x |
+
+**Lock Optimization**: When `prefetch()` is used inside `par()` branches, rstreamz only locks at convergence points (like `union`), not the entire branch. This minimizes lock contention while maintaining thread safety.
+
 ### Map/Filter Fusion
 
 On first emit, rstreamz optimizes the stream graph by fusing consecutive operations:
