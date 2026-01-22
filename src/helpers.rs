@@ -182,6 +182,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             func_is_sync: true,
             frozen: false,
             needs_lock: false,
+            compiled: false,
         },
     )?;
     let stream_clone = stream.clone_ref(py);

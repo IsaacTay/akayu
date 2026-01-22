@@ -51,6 +51,8 @@ pub struct Stream {
     pub(crate) frozen: bool,
     /// True if this node needs thread-safe locking (convergence point from parallel branches)
     pub(crate) needs_lock: bool,
+    /// True if compile() was explicitly called (prevents modifications)
+    pub(crate) compiled: bool,
 }
 
 const HELPERS: &str = include_str!("rstreamz.py");
