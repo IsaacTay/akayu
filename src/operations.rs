@@ -666,22 +666,24 @@ impl Stream {
     /// Freeze and optimize the stream graph.
     ///
     /// Triggers topology optimizations (like chain fusion) and prevents
-    /// further modifications to the graph. Call this after building your
-    /// complete pipeline but before emitting data.
+    /// further modifications to the graph. **Once called, the entire graph 
+    /// becomes immutable.**
     ///
     /// This enables optimizations that are unsafe for dynamic topologies:
     /// - Consecutive map operations are fused into a single composed map
     /// - Consecutive filter operations are fused into a single composed filter
     /// - Prefetch nodes are fused with their following map/filter operations
     ///
-    /// After calling compile(), attempting to add new nodes to any part of
-    /// the graph will raise a RuntimeError.
+    /// IMPORTANT: After calling compile(), attempting to add new nodes (via map, 
+    /// filter, sink, etc.) to any part of the graph will raise a RuntimeError.
+    /// Build your complete pipeline before calling this method.
     ///
     /// Returns:
     ///     self (for chaining)
     ///
     /// Raises:
-    ///     RuntimeError: If the graph is already compiled/frozen.
+    ///     RuntimeError: If the graph is already compiled/frozen or if 
+    ///                  modifications are attempted after compilation.
     ///
     /// Example:
     ///     >>> s = Stream()

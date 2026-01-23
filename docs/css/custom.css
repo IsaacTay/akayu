@@ -1,0 +1,10 @@
+/* Hide the 'Copy Page' button provided by the shadcn theme */
+button[onclick*="navigator.clipboard.write"] {
+    display: none !important;
+}
+
+/* Prevent headers from breaking mid-word */
+h1, h2, h3, h4, h5, h6 {
+    word-break: normal !important;
+    overflow-wrap: break-word !important;
+}

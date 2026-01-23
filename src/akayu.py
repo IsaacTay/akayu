@@ -1,6 +1,7 @@
 import asyncio
 import contextvars
 import inspect
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -223,10 +224,11 @@ def _get_global_pool():
 
     Using a shared pool eliminates the overhead of creating separate pools
     for each prefetch() call, making par() + prefetch() combinations efficient.
+    The pool size defaults to the number of CPUs available.
     """
     global _thread_pool
     if _thread_pool is None:
-        _thread_pool = ThreadPoolExecutor(max_workers=16)
+        _thread_pool = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
     return _thread_pool
 
 def _get_node_lock(node):

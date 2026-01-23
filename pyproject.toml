@@ -22,12 +22,26 @@ dev = [
     "streamz>=0.6",
     "psutil>=5.0",
 ]
-
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "akayu.akayu"
 
 [tool.uv]
 # Track Rust source files so uv rebuilds when they change
 # See: https://github.com/PyO3/maturin/issues/2314
 cache-keys = [{ file = "Cargo.toml" }, { file = "src/**/*.rs" }]
+
+[dependency-groups]
+docs = [
+    "mkdocs-shadcn>=0.9.8",
+    "mkdocstrings>=0.26.1",
+    "mkdocstrings-python>=1.11.1",
+    "mdformat>=0.7",
+    "mdformat-gfm>=0.3",
+    "mdformat-frontmatter>=2.0",
+    "mdformat-admon>=2.0",
+]
