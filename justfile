@@ -32,7 +32,7 @@ test-quick: build
 
 # Run benchmarks only
 bench: build-release
-    uv run python -m pytest tests/test_benchmark.py tests/test_ops_benchmark.py tests/test_compile_benchmark.py -v
+    uv run python -m pytest tests/test_benchmark.py tests/test_complex_benchmark.py tests/test_compile_benchmark.py -v
 
 # Run clippy lints
 clippy:
@@ -67,3 +67,28 @@ build-wheels:
     maturin build --release --interpreter python3.12 --out dist
     @echo "Wheels built:"
     @ls -la dist/*.whl
+
+# Sync docs dependencies and build module for mkdocstrings
+sync-docs:
+    uv sync --extra dev --group docs
+    uv run maturin develop --uv
+
+# Serve documentation locally with live-reloading
+docs: sync-docs
+    uv run mkdocs serve -a 0.0.0.0:8002 -w src -w docs --livereload
+
+# Aliases for docs
+docs-dev: docs
+docs-watch: docs
+
+# Build documentation
+docs-build: sync-docs
+    uv run mkdocs build
+
+# Format markdown documentation
+docs-fmt: sync-docs
+    uv run mdformat docs/ README.md
+
+# Check markdown formatting (no changes)
+docs-fmt-check: sync-docs
+    uv run mdformat --check docs/ README.md

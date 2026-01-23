@@ -21,13 +21,13 @@ def test_benchmark_no_compile(benchmark):
          .filter(lambda x: x % 4 == 0)\
          .sink(inc_count)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000  # Half of them match? 
+    assert result == 250_000  # Half of them match? 
     # 0 -> 1 -> 2 (even, not div 4) -> X
     # 1 -> 2 -> 4 (even, div 4) -> KEEP
     # So every other item.
@@ -55,13 +55,13 @@ def test_benchmark_with_compile(benchmark):
         # Explicitly compile to trigger fusion
         s.compile()
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
 
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_batch_map_no_compile(benchmark):
@@ -79,11 +79,11 @@ def test_benchmark_batch_map_no_compile(benchmark):
          .batch_map(lambda batch: [x + 10 for x in batch])\
          .sink(results.append)
 
-        s.emit_batch(list(range(100_000)))
+        s.emit_batch(list(range(500_000)))
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_batch_map_with_compile(benchmark):
@@ -102,11 +102,11 @@ def test_benchmark_batch_map_with_compile(benchmark):
          .sink(results.append)
 
         s.compile()
-        s.emit_batch(list(range(100_000)))
+        s.emit_batch(list(range(500_000)))
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_filter_map_no_compile(benchmark):
@@ -125,12 +125,12 @@ def test_benchmark_filter_map_no_compile(benchmark):
          .map(lambda x: x + 1)\
          .sink(results.append)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 50000  # Every even number passes first filter, all pass second
+    assert result == 250_000  # Every even number passes first filter, all pass second
 
 
 def test_benchmark_filter_map_with_compile(benchmark):
@@ -150,12 +150,12 @@ def test_benchmark_filter_map_with_compile(benchmark):
          .sink(results.append)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_passthrough_no_compile(benchmark):
@@ -175,12 +175,12 @@ def test_benchmark_passthrough_no_compile(benchmark):
          .seq()\
          .sink(results.append)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_passthrough_with_compile(benchmark):
@@ -201,12 +201,12 @@ def test_benchmark_passthrough_with_compile(benchmark):
          .sink(results.append)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_map_sink_no_compile(benchmark):
@@ -226,12 +226,12 @@ def test_benchmark_map_sink_no_compile(benchmark):
          .map(lambda x: x + 1)\
          .sink(inc_count)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_map_sink_with_compile(benchmark):
@@ -252,12 +252,12 @@ def test_benchmark_map_sink_with_compile(benchmark):
          .sink(inc_count)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000
 
 
 def test_benchmark_filter_sink_no_compile(benchmark):
@@ -276,12 +276,12 @@ def test_benchmark_filter_sink_no_compile(benchmark):
         s.filter(lambda x: x % 2 == 0)\
          .sink(inc_count)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_filter_sink_with_compile(benchmark):
@@ -301,12 +301,12 @@ def test_benchmark_filter_sink_with_compile(benchmark):
          .sink(inc_count)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_filter_map_sink_no_compile(benchmark):
@@ -326,12 +326,12 @@ def test_benchmark_filter_map_sink_no_compile(benchmark):
          .map(lambda x: x * 2)\
          .sink(inc_count)
 
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_filter_map_sink_with_compile(benchmark):
@@ -352,12 +352,12 @@ def test_benchmark_filter_map_sink_with_compile(benchmark):
          .sink(inc_count)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 50000
+    assert result == 250_000
 
 
 def test_benchmark_starmap_fusion_with_compile(benchmark):
@@ -376,9 +376,9 @@ def test_benchmark_starmap_fusion_with_compile(benchmark):
          .sink(results.append)
 
         s.compile()
-        for i in range(100_000):
+        for i in range(500_000):
             s.emit(i)
         return len(results)
 
     result = benchmark(run_pipeline)
-    assert result == 100_000
+    assert result == 500_000

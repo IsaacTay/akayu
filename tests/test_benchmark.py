@@ -88,6 +88,34 @@ def test_benchmark_batch_throughput(benchmark):
     assert result == 250000
 
 
+def test_benchmark_throughput_streamz(benchmark):
+    """
+    Benchmarks passing 500,000 items through a simple map pipeline using streamz.
+    """
+    import streamz
+
+    def run_pipeline():
+        s = streamz.Stream()
+        # Create a pipeline: map -> filter -> sink
+        count = 0
+
+        def inc_count(x):
+            nonlocal count
+            count += 1
+
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
+            inc_count
+        )
+
+        for i in range(500000):
+            s.emit(i)
+
+        return count
+
+    result = benchmark(run_pipeline)
+    assert result == 250000
+
+
 def test_benchmark_pure_python(benchmark):
     """
     Benchmark a pure Python for-loop implementing the same logic.

@@ -1,0 +1,55 @@
+site_name: akayu
+site_description: High-performance reactive streams for Python
+repo_url: https://github.com/isaactay/akayu
+
+theme:
+  name: shadcn
+  show_title: true
+  show_stargazers: true
+  pygments_style:
+    light: shadcn-light
+    dark: github-dark
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Features:
+    - Compile Optimizations: features/compile-optimizations.md
+    - Concurrency: features/concurrency.md
+    - Batch Processing: features/batch-processing.md
+  - API Reference: api.md
+  - Benchmarks: benchmarks.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            show_source: false
+            show_bases: false
+            heading_level: 2
+            members_order: source
+            show_root_heading: true
+            show_root_full_path: false
+            allow_inspection: false
+
+extra_javascript:
+  - https://unpkg.com/mermaid@11/dist/mermaid.min.js
+  - js/mermaid-init.js
+
+extra_css:
+  - css/mermaid.css
+  - css/custom.css
+
+markdown_extensions:
+  - admonition
+  - toc:
+  - codehilite:
+      guess_lang: false
+  - fenced_code
+  - pymdownx.inlinehilite
+  - pymdownx.blocks.tab
+  - pymdownx.blocks.details
+  - footnotes
