@@ -1,5 +1,5 @@
 site_name: akayu
-site_url: ""
+site_url: https://isaactay.github.io/akayu/
 site_description: High-performance reactive streams for Python
 repo_url: https://github.com/isaactay/akayu
 
