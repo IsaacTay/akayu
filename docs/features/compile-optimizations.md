@@ -50,13 +50,13 @@ new_node = branch.map(lambda x: x * 2)
 flowchart LR
     subgraph locked [Compiled & Locked Graph]
         direction LR
-        S["Source 🔒"] --> M1["map 🔒"] --> S1["sink 🔒"]
+        S["Source 🔒"]:::source --> M1["map 🔒"]:::process --> S1["sink 🔒"]:::sink
     end
 
-    M1 -.->|❌ RuntimeError| New[New Node]
+    M1 -.->|❌ RuntimeError| New[New Node]:::error
     
-    style locked stroke:#333,stroke-dasharray: 5 5
-    style New stroke:#cc0000
+    classDef error stroke:#dc2626,stroke-width:2px,stroke-dasharray: 5 5
+    style locked stroke:#9ca3af,stroke-dasharray: 5 5,fill:transparent
 ```
 
 This locking mechanism is necessary because many optimizations (like [Map Fusion](#map-fusion)) physically merge nodes and change the underlying propagation logic, making it impossible to safely attach new branches to the original structure.
@@ -68,14 +68,14 @@ Consecutive `map()` operations are fused into a single node with a composed func
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A1[source] --> B1[map f1]
-        B1 --> C1[map f2]
-        C1 --> D1[map f3]
-        D1 --> E1[sink]
+        A1[source]:::source --> B1[map f1]:::process
+        B1 --> C1[map f2]:::process
+        C1 --> D1[map f3]:::process
+        D1 --> E1[sink]:::sink
     end
     subgraph after [After]
-        A2["source 🔒"] --> B2["map(f1 >> f2 >> f3) 🔒"]
-        B2 --> E2["sink 🔒"]
+        A2["source 🔒"]:::source --> B2["map(f1 >> f2 >> f3) 🔒"]:::process
+        B2 --> E2["sink 🔒"]:::sink
     end
     before -.-> after
 ```
@@ -95,13 +95,13 @@ Consecutive `filter()` operations are combined with short-circuit evaluation:
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A1[source] --> B1[filter p1]
-        B1 --> C1[filter p2]
-        C1 --> D1[sink]
+        A1[source]:::source --> B1[filter p1]:::process
+        B1 --> C1[filter p2]:::process
+        C1 --> D1[sink]:::sink
     end
     subgraph after [After]
-        A2["source 🔒"] --> B2["filter(p1 AND p2) 🔒"]
-        B2 --> D2["sink 🔒"]
+        A2["source 🔒"]:::source --> B2["filter(p1 AND p2) 🔒"]:::process
+        B2 --> D2["sink 🔒"]:::sink
     end
     before -.-> after
 ```
@@ -115,13 +115,13 @@ A `filter()` followed by `map()` is fused into a single `FilterMap` node:
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A1[source] --> B1[filter pred]
-        B1 --> C1[map func]
-        C1 --> D1[sink]
+        A1[source]:::source --> B1[filter pred]:::process
+        B1 --> C1[map func]:::process
+        C1 --> D1[sink]:::sink
     end
     subgraph after [After]
-        A2["source 🔒"] --> B2["FilterMap(pred, func) 🔒"]
-        B2 --> D2["sink 🔒"]
+        A2["source 🔒"]:::source --> B2["FilterMap(pred, func) 🔒"]:::process
+        B2 --> D2["sink 🔒"]:::sink
     end
     before -.-> after
 ```
@@ -135,10 +135,10 @@ Operations ending in `sink()` are fused into specialized terminal nodes:
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A1[map func] --> B1[sink callback]
+        A1[map func]:::process --> B1[sink callback]:::sink
     end
     subgraph after [After]
-        C1["MapSink 🔒"]
+        C1["MapSink 🔒"]:::process
     end
     before -.-> after
 ```
@@ -158,11 +158,11 @@ Intermediate `Source` nodes (like those created by `seq()`) that only forward va
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A1[any_node] --> B1[Source]
-        B1 --> C1[downstream]
+        A1[any_node]:::process --> B1[Source]:::source
+        B1 --> C1[downstream]:::process
     end
     subgraph after [After]
-        A2["any_node 🔒"] --> C2["downstream 🔒"]
+        A2["any_node 🔒"]:::process --> C2["downstream 🔒"]:::process
     end
     before -.-> after
 ```
@@ -174,13 +174,13 @@ If all functions in the pipeline are synchronous, akayu can skip checking whethe
 ```mermaid
 flowchart LR
     subgraph before [Before: Per-Item Checks]
-        N1[Map] --"result"--> C1{"is awaitable?"}
-        C1 --"no"--> N2[Filter] --"result"--> C2{"is awaitable?"}
-        C2 --"no"--> N3[Sink]
+        N1[Map]:::process --"result"--> C1{"is awaitable?"}:::warn
+        C1 --"no"--> N2[Filter]:::process --"result"--> C2{"is awaitable?"}:::warn
+        C2 --"no"--> N3[Sink]:::sink
     end
 
     subgraph after [After: Checks Eliminated]
-        M1["Map 🔒"] --"result"--> M2["Filter 🔒"] --"result"--> M3["Sink 🔒"]
+        M1["Map 🔒"]:::process --"result"--> M2["Filter 🔒"]:::process --"result"--> M3["Sink 🔒"]:::sink
     end
 
     before -.-> after
@@ -232,19 +232,19 @@ source.emit_batch(range(200))
 
 ```mermaid
 flowchart TD
-    A[source] --> B["filter x &gt; 0"]
-    B --> C["filter x &lt; 100"]
-    C --> D["filter x%2==0"]
-    D --> E["map x*2"]
-    E --> F["map x+1"]
-    F --> G[sink append]
+    A[source]:::source --> B["filter x &gt; 0"]:::process
+    B --> C["filter x &lt; 100"]:::process
+    C --> D["filter x%2==0"]:::process
+    D --> E["map x*2"]:::process
+    E --> F["map x+1"]:::process
+    F --> G[sink append]:::sink
 ```
 
 **After: 2 nodes**
 
 ```mermaid
 flowchart TD
-    A["source 🔒"] --> B["FilterMapSink 🔒<br/>pred: combined<br/>func: *2, +1<br/>sink: append"]
+    A["source 🔒"]:::source --> B["FilterMapSink 🔒<br/>pred: combined<br/>func: *2, +1<br/>sink: append"]:::process
 ```
 
 ## Checking Compilation Status
@@ -267,13 +267,13 @@ Fusion stops at **split points** where a node has multiple downstreams:
 
 ```mermaid
 flowchart TD
-    A[source] --> B[map f1]
-    B --> C[map f2]
-    B --> D[map f3]
-    C --> E[sink s1]
-    D --> F[sink s2]
+    A[source]:::source --> B[map f1]:::warn
+    B --> C[map f2]:::process
+    B --> D[map f3]:::process
+    C --> E[sink s1]:::sink
+    D --> F[sink s2]:::sink
 
-    style B stroke:#fb4934,stroke-width:3px
+    style B stroke:var(--akayu-warn-stroke),stroke-width:3px
 ```
 
 The red-bordered node is a **split point** - it has multiple downstreams, so `f1` cannot be fused with `f2` or `f3`.
@@ -282,13 +282,11 @@ The red-bordered node is a **split point** - it has multiple downstreams, so `f1
 
 ```mermaid
 flowchart TD
-    A["source 🔒"] --> B["map f1 🔒"]
-    B --> C["MapSink(f2, s1) 🔒"]
-    B --> D["MapSink(f3, s2) 🔒"]
+    A["source 🔒"]:::source --> B["map f1 🔒"]:::warn
+    B --> C["MapSink(f2, s1) 🔒"]:::process
+    B --> D["MapSink(f3, s2) 🔒"]:::process
 
-    style B stroke:#fb4934,stroke-width:3px
-    style C fill:#458588
-    style D fill:#458588
+    style B stroke:var(--akayu-warn-stroke),stroke-width:3px
 ```
 
 Each branch after the split is optimized independently (green nodes are fused), but `f1` stays separate.

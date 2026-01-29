@@ -24,15 +24,15 @@ source.emit(filename)  # a and b execute concurrently
 
 ```mermaid
 flowchart LR
-    S[source] --> P[par]
-    P -- "Branch A" --> A[Map/Filter]
-    P -- "Branch B" --> B[Map/Filter]
-    P -- "Branch C" --> C[Map/Filter]
+    S[source]:::source --> P[par]:::process
+    P -- "Branch A" --> A[Map/Filter]:::process
+    P -- "Branch B" --> B[Map/Filter]:::process
+    P -- "Branch C" --> C[Map/Filter]:::process
 
     subgraph pool [Thread Pool]
-        W1[worker 1]
-        W2[worker 2]
-        W3[worker 3]
+        W1[worker 1]:::process
+        W2[worker 2]:::process
+        W3[worker 3]:::process
     end
 
     A -.-> W1
@@ -73,15 +73,13 @@ source.compile()
 
 ```mermaid
 flowchart TD
-    S[source] --> P[par]
-    P --> DB[save_to_database]
-    P --> N[send_notification]
-    P --> C[update_cache]
-    DB --> L1[log_db]
-    N --> L2[log_notif]
-    C --> L3[log_cache]
-
-    style P fill:#458588
+    S[source]:::source --> P[par]:::process
+    P --> DB[save_to_database]:::process
+    P --> N[send_notification]:::process
+    P --> C[update_cache]:::process
+    DB --> L1[log_db]:::sink
+    N --> L2[log_notif]:::sink
+    C --> L3[log_cache]:::sink
 ```
 
 ### Returning to Sequential
@@ -111,28 +109,28 @@ source.emit_batch([1, 2, 3, 4, 5, 6, 7, 8])
 ```mermaid
 flowchart TD
     subgraph input [Input Queue]
-        I1[1] --> I2[2] --> I3[3] --> I4[4] --> I5["5,6,7,8..."]
+        I1[1]:::source --> I2[2]:::source --> I3[3]:::source --> I4[4]:::source --> I5["5,6,7,8..."]:::source
     end
 
     subgraph flight [In-Flight - capacity=4]
-        F1["[1]"]
-        F2["[2]"]
-        F3["[3]"]
-        F4["[4]"]
+        F1["[1]"]:::process
+        F2["[2]"]:::process
+        F3["[3]"]:::process
+        F4["[4]"]:::process
     end
 
     subgraph pool [Thread Pool]
-        W["workers processing..."]
+        W["workers processing..."]:::process
     end
 
     subgraph reorder [Reorder Buffer]
-        R["emit in sequence order"]
+        R["emit in sequence order"]:::process
     end
 
     input --> flight
     flight --> pool
     pool --> reorder
-    reorder --> O[Output: 1,2,3,4,5...]
+    reorder --> O[Output: 1,2,3,4,5...]:::sink
 ```
 
 1. Each incoming item gets a sequence number
@@ -180,11 +178,11 @@ source.prefetch(4).batch_map(vectorized_func)
 ```mermaid
 flowchart LR
     subgraph before [Before]
-        A[prefetch] --> B[map func]
+        A[prefetch]:::process --> B[map func]:::process
     end
 
     subgraph after [After]
-        C[PrefetchMap]
+        C[PrefetchMap]:::process
     end
 
     before -.->|compile| after
@@ -221,27 +219,24 @@ source.compile()
 
 ```mermaid
 flowchart TD
-    S[source] --> P[par]
+    S[source]:::source --> P[par]:::process
 
-    P --> PF1["prefetch(4)"]
-    P --> PF2["prefetch(4)"]
+    P --> PF1["prefetch(4)"]:::process
+    P --> PF2["prefetch(4)"]:::process
 
-    PF1 --> M1[map API_A]
-    PF2 --> M2[map API_B]
+    PF1 --> M1[map API_A]:::process
+    PF2 --> M2[map API_B]:::process
 
-    M1 --> U[union]
+    M1 --> U[union]:::process
     M2 --> U
 
     subgraph pool [Shared Thread Pool]
-        W["workers"]
+        W["workers"]:::process
     end
 
     P -.-> pool
     PF1 -.-> pool
     PF2 -.-> pool
-
-    style P fill:#458588
-    style pool fill:#3c3836
 ```
 
 ### Thread Safety at Convergence Points
@@ -250,14 +245,14 @@ When `prefetch()` is used inside `par()` branches, akayu automatically applies l
 
 ```mermaid
 flowchart TD
-    S[source] --> P[par]
-    P --> A["prefetch + map"]
-    P --> B["prefetch + map"]
-    A --> U["union 🔒"]
+    S[source]:::source --> P[par]:::process
+    P --> A["prefetch + map"]:::process
+    P --> B["prefetch + map"]:::process
+    A --> U["union 🔒"]:::warn
     B --> U
-    U --> K[sink]
+    U --> K[sink]:::sink
 
-    style U stroke:#fb4934,stroke-width:3px
+    style U stroke:#d97706,stroke-width:3px
 ```
 
 The lock (🔒) ensures thread-safe updates when multiple prefetch workers emit simultaneously.
@@ -308,13 +303,13 @@ print(results)  # All results now available
 ```mermaid
 flowchart LR
     subgraph before ["Before flush()"]
-        F1["In-flight: [a][b][c][d]"]
-        C1["Completed: [1][2][3]"]
+        F1["In-flight: [a][b][c][d]"]:::process
+        C1["Completed: [1][2][3]"]:::sink
     end
 
     subgraph after ["After flush()"]
-        F2["In-flight: (empty)"]
-        C2["Completed: [1][2][3][a][b][c][d]"]
+        F2["In-flight: (empty)"]:::process
+        C2["Completed: [1][2][3][a][b][c][d]"]:::sink
     end
 
     before -->|"flush()"| after
@@ -355,21 +350,17 @@ print(f"Users: {len(users)}, Orders: {len(orders)}")
 
 ```mermaid
 flowchart TD
-    I["[1, 2, 3, 4, 5]<br/>user IDs"] --> S[source]
-    S --> P[par]
+    I["[1, 2, 3, 4, 5]<br/>user IDs"]:::source --> S[source]:::source
+    S --> P[par]:::process
 
-    P --> PF1["prefetch(4)"]
-    P --> PF2["prefetch(4)"]
+    P --> PF1["prefetch(4)"]:::process
+    P --> PF2["prefetch(4)"]:::process
 
-    PF1 --> U["fetch_user"]
-    PF2 --> O["fetch_orders"]
+    PF1 --> U["fetch_user"]:::process
+    PF2 --> O["fetch_orders"]:::process
 
-    U --> US["users[]"]
-    O --> OS["orders[]"]
-
-    style P fill:#458588
-    style US fill:#98971a
-    style OS fill:#98971a
+    U --> US["users[]"]:::sink
+    O --> OS["orders[]"]:::sink
 ```
 
 Both API endpoints are called concurrently for each user ID, with 4 concurrent requests per branch = up to 8 total concurrent I/O operations.

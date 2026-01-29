@@ -636,12 +636,22 @@ impl Stream {
     /// This is the primary way to push data into a source stream.
     /// The value propagates through all downstream nodes.
     ///
+    /// **Restriction**: This method can ONLY be called on a source node.
+    /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
+    ///
     /// Args:
     ///     x: The value to emit.
     ///
     /// Returns:
     ///     A coroutine if async processing is triggered, otherwise None.
     pub fn emit(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.logic, NodeLogic::Source) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Emit called on non-source node '{}'. Data can only be emitted into source nodes.",
+                self.name
+            )));
+        }
+
         // Emit bypasses this node's logic and propagates directly to downstreams
         // (matching streamz behavior)
         self.propagate(py, x)
@@ -652,12 +662,22 @@ impl Stream {
     /// More efficient than calling `emit()` multiple times when processing
     /// many items. Values are processed together through the pipeline.
     ///
+    /// **Restriction**: This method can ONLY be called on a source node.
+    /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
+    ///
     /// Args:
     ///     items: List of values to emit.
     ///
     /// Returns:
     ///     A coroutine if async processing is triggered, otherwise None.
     pub fn emit_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
+        if !matches!(self.logic, NodeLogic::Source) {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Emit called on non-source node '{}'. Data can only be emitted into source nodes.",
+                self.name
+            )));
+        }
+
         // Emit bypasses this node's logic and propagates directly to downstreams
         // (matching streamz behavior)
         self.propagate_batch(py, items)
