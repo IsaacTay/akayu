@@ -1,14 +1,78 @@
 /*
- * Mermaid styling for Gruvbox Dark theme
- *
- * Color Reference (CSS variables for documentation):
- * --gruvbox-blue:    #458588  (parallel nodes, fused nodes)
- * --gruvbox-green:   #98971a  (results, sinks, success)
- * --gruvbox-red:     #fb4934  (split points, warnings, locks)
- * --gruvbox-gray:    #3c3836  (subgraph backgrounds)
- * --gruvbox-text:    #ebdbb2  (text color)
- * --gruvbox-aqua:    #83a598  (arrows, borders)
+ * Mermaid styling with CSS Variables for Light/Dark mode support
  */
+
+:root {
+    /* Light Mode - Muted, professional colors */
+    --akayu-source-fill: #f3f4f6;
+    --akayu-source-stroke: #9ca3af;
+    --akayu-source-color: #1f2937;
+    
+    --akayu-process-fill: #d1fae5; /* Muted Mint */
+    --akayu-process-stroke: #059669;
+    --akayu-process-color: #064e3b;
+
+    --akayu-sink-fill: #dbeafe; /* Muted Blue */
+    --akayu-sink-stroke: #2563eb;
+    --akayu-sink-color: #1e3a8a;
+
+    --akayu-error-fill: #fee2e2; /* Muted Red */
+    --akayu-error-stroke: #dc2626;
+    --akayu-error-color: #7f1d1d;
+    
+    --akayu-warn-fill: #fef3c7; /* Muted Yellow */
+    --akayu-warn-stroke: #d97706;
+    --akayu-warn-color: #78350f;
+    
+    /* Font */
+    --fontFamily: monospace;
+}
+
+[data-theme="dark"], 
+.dark, 
+html.dark, 
+body.dark, 
+[data-md-color-scheme="slate"], 
+[data-color-mode="dark"],
+body[data-mermaid-theme="dark"] {
+    /* Dark Mode - Gruvbox-inspired but deep/muted */
+    --akayu-source-fill: #282828;
+    --akayu-source-stroke: #a89984;
+    --akayu-source-color: #ebdbb2;
+    
+    --akayu-process-fill: #32361a; /* Deep Green tint */
+    --akayu-process-stroke: #689d6a;
+    --akayu-process-color: #ebdbb2;
+
+    --akayu-sink-fill: #076678; /* Deep Blue */
+    --akayu-sink-stroke: #83a598;
+    --akayu-sink-color: #ebdbb2;
+
+    --akayu-error-fill: #3c1f1e; /* Deep Red tint */
+    --akayu-error-stroke: #cc241d;
+    --akayu-error-color: #ebdbb2;
+    
+    --akayu-warn-fill: #322a1b; /* Deep Yellow tint */
+    --akayu-warn-stroke: #d79921;
+    --akayu-warn-color: #ebdbb2;
+}
+
+/* 
+ * Universal Variable Mapping
+ * This ensures that standard Mermaid variables (used by the 'base' theme)
+ * are always resolved against the current scope's values for --akayu-* variables.
+ * Applying to 'body' ensures it catches the overrides from body.dark
+ */
+body {
+    --primaryColor: var(--akayu-process-fill);
+    --primaryTextColor: var(--akayu-process-color);
+    --primaryBorderColor: var(--akayu-process-stroke);
+    --lineColor: var(--akayu-source-stroke);
+    --tertiaryColor: var(--akayu-source-fill);
+    --nodeBorder: var(--akayu-source-stroke);
+    --mainBkg: var(--akayu-process-fill);
+    --nodeTextColor: var(--akayu-process-color);
+}
 
 .mermaid {
     background: transparent;
@@ -16,23 +80,94 @@
     margin: 1em 0;
 }
 
-/* Ensure mermaid SVGs display properly */
 .mermaid svg {
     max-width: 100%;
     height: auto;
 }
 
-/* Prevent overflow on mobile */
 .mermaid-wrapper {
     overflow-x: auto;
 }
 
-/* Style mermaid node text for gruvbox */
 .mermaid .nodeLabel {
     font-family: monospace;
 }
 
 /* Subgraph styling */
 .mermaid .cluster rect {
-    stroke: #665c54 !important;
+    stroke: var(--akayu-source-stroke) !important;
+    fill: transparent !important;
+}
+
+/* 
+ * Node Classes
+ * Usage in mermaid: A[Text]:::source
+ */
+
+/* Source Nodes */
+.source > rect, .source > polygon, .source > circle, .source > path {
+    fill: var(--akayu-source-fill) !important;
+    stroke: var(--akayu-source-stroke) !important;
+    stroke-width: 2px !important;
+}
+.source .nodeLabel {
+    color: var(--akayu-source-color) !important;
+    fill: var(--akayu-source-color) !important;
+}
+
+/* Process/Map/Filter Nodes */
+.process > rect, .process > polygon, .process > circle, .process > path {
+    fill: var(--akayu-process-fill) !important;
+    stroke: var(--akayu-process-stroke) !important;
+    stroke-width: 2px !important;
+}
+.process .nodeLabel {
+    color: var(--akayu-process-color) !important;
+    fill: var(--akayu-process-color) !important;
+}
+
+/* Sink/Result Nodes */
+.sink > rect, .sink > polygon, .sink > circle, .sink > path {
+    fill: var(--akayu-sink-fill) !important;
+    stroke: var(--akayu-sink-stroke) !important;
+    stroke-width: 2px !important;
+}
+.sink .nodeLabel {
+    color: var(--akayu-sink-color) !important;
+    fill: var(--akayu-sink-color) !important;
+}
+
+/* Error/Forbidden Nodes */
+.error > rect, .error > polygon, .error > circle, .error > path {
+    fill: var(--akayu-error-fill) !important;
+    stroke: var(--akayu-error-stroke) !important;
+    stroke-width: 2px !important;
+    stroke-dasharray: 5 5;
+}
+.error .nodeLabel {
+    color: var(--akayu-error-color) !important;
+    fill: var(--akayu-error-color) !important;
+}
+
+/* Warning/Debug Nodes */
+.warn > rect, .warn > polygon, .warn > circle, .warn > path {
+    fill: var(--akayu-warn-fill) !important;
+    stroke: var(--akayu-warn-stroke) !important;
+    stroke-width: 2px !important;
+}
+.warn .nodeLabel {
+    color: var(--akayu-warn-color) !important;
+    fill: var(--akayu-warn-color) !important;
+}
+
+/* Edge Label Styling */
+.edgeLabel {
+    background-color: var(--akayu-source-fill) !important;
+    border-radius: 4px !important;
+    font-family: monospace !important;
+    color: var(--akayu-source-color) !important;
+}
+
+.edgeLabel p {
+  padding: 0.25em 0.5em;
 }

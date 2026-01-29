@@ -1,77 +1,132 @@
-// Mermaid configuration with Gruvbox Dark theme
-//
-// Color Scheme Reference (use in diagrams with style directives):
-// - Primary (parallel/fused nodes): #458588 (blue)
-// - Accent (results/sinks):         #98971a (green)
-// - Warning (split points):         #fb4934 (red) - use as stroke
-// - Subgraph background:            #3c3836 (dark gray)
-// - Convergence (locks):            #fb4934 (red) - use as stroke
-//
-// Example usage in mermaid:
-//   style NodeName fill:#458588
-//   style SplitNode stroke:#fb4934,stroke-width:3px
-
+// Mermaid configuration with theme synchronization
 document.addEventListener('DOMContentLoaded', function() {
     mermaid.initialize({
         startOnLoad: false,
-        theme: 'dark',
+        theme: 'base',
         securityLevel: 'loose',
         flowchart: {
             useMaxWidth: true,
             htmlLabels: true
-        },
-        themeVariables: {
-            // Gruvbox Dark palette
-            primaryColor: '#458588',      // Blue - main nodes
-            primaryTextColor: '#ebdbb2',  // Light text
-            primaryBorderColor: '#83a598',
-            lineColor: '#83a598',         // Aqua - arrows
-            secondaryColor: '#b16286',    // Purple
-            tertiaryColor: '#282828',     // Background
-            background: '#282828',
-            mainBkg: '#3c3836',           // Node background
-            secondBkg: '#504945',
-            border1: '#665c54',
-            border2: '#504945',
-            arrowheadColor: '#83a598',
-            fontFamily: 'monospace',
-            fontSize: '14px',
-            textColor: '#ebdbb2',
-            nodeTextColor: '#ebdbb2'
         }
     });
 
-    // Find mermaid code blocks and convert them for rendering
-    // Handles multiple formats:
-    // 1. <div class="mermaid"> (superfences)
-    // 2. <code class="language-mermaid"> (fenced_code)
-    // 3. <div class="codehilite"><pre><code> with mermaid content (codehilite)
+    // --- Dynamic Theme Sync ---
+    const updateMermaidTheme = () => {
+        const html = document.documentElement;
+        
+        // Shadcn theme stores 'dark' class on document.documentElement
+        const isDark = html.classList.contains('dark');
 
-    // Handle language-mermaid class
-    document.querySelectorAll('code.language-mermaid').forEach(function(codeEl) {
-        var pre = codeEl.parentElement;
-        var div = document.createElement('div');
-        div.className = 'mermaid';
-        div.textContent = codeEl.textContent;
-        pre.parentElement.replaceChild(div, pre);
-    });
+        if (isDark) {
+            document.body.setAttribute('data-mermaid-theme', 'dark');
+            try {
+                // Attempt to re-configure mermaid to force dark theme variables if base theme isn't picking them up
+                mermaid.initialize({ 
+                    theme: 'base',
+                    themeVariables: {
+                        darkMode: true,
+                        primaryColor: '#32361a',
+                        primaryTextColor: '#ebdbb2',
+                        primaryBorderColor: '#689d6a',
+                        lineColor: '#a89984',
+                        background: '#282828'
+                    }
+                });
+            } catch (e) {}
+        } else {
+            document.body.setAttribute('data-mermaid-theme', 'light');
+            try {
+                mermaid.initialize({ 
+                    theme: 'base',
+                    themeVariables: {
+                        darkMode: false,
+                        primaryColor: '#d1fae5',
+                        primaryTextColor: '#064e3b',
+                        primaryBorderColor: '#059669',
+                        lineColor: '#9ca3af',
+                        background: '#ffffff'
+                    }
+                });
+            } catch (e) {}
+        }
+    };
 
-    // Handle codehilite wrapped mermaid blocks
-    // Look for code blocks that start with mermaid keywords
-    var mermaidKeywords = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitGraph|journey)/;
-    document.querySelectorAll('.codehilite pre code, pre code').forEach(function(codeEl) {
-        var content = codeEl.textContent.trim();
-        if (mermaidKeywords.test(content)) {
-            var container = codeEl.closest('.codehilite') || codeEl.parentElement;
+    // Initial check
+    updateMermaidTheme();
+
+    // --- Diagram Preparation ---
+    const prepareDiagrams = () => {
+        // Handle language-mermaid class (fenced code blocks)
+        document.querySelectorAll('code.language-mermaid').forEach(function(codeEl) {
+            // Avoid double-processing
+            if (codeEl.closest('.mermaid')) return;
+
+            var pre = codeEl.parentElement;
             var div = document.createElement('div');
             div.className = 'mermaid';
-            div.textContent = content;
-            container.parentElement.replaceChild(div, container);
-        }
-    });
+            div.setAttribute('data-original-code', codeEl.textContent);
+            div.textContent = codeEl.textContent;
+            pre.parentElement.replaceChild(div, pre);
+        });
 
-    // Render all mermaid diagrams
-    mermaid.run({
-        querySelector: '.mermaid'
+        // Handle codehilite wrapped mermaid blocks
+        var mermaidKeywords = /^(graph|flowchart|sequenceDiagram|classDiagram|stateDiagram|erDiagram|gantt|pie|gitGraph|journey)/;
+        document.querySelectorAll('.codehilite pre code, pre code').forEach(function(codeEl) {
+            // Avoid double-processing
+            if (codeEl.closest('.mermaid')) return;
+
+            var content = codeEl.textContent.trim();
+            if (mermaidKeywords.test(content)) {
+                var container = codeEl.closest('.codehilite') || codeEl.parentElement;
+                var div = document.createElement('div');
+                div.className = 'mermaid';
+                div.setAttribute('data-original-code', content);
+                div.textContent = content;
+                container.parentElement.replaceChild(div, container);
+            }
+        });
+    };
+
+    prepareDiagrams();
+
+    // --- Rendering Logic ---
+    const renderDiagrams = () => {
+        // Reset all diagrams to their source code
+        document.querySelectorAll('.mermaid').forEach(div => {
+            const originalCode = div.getAttribute('data-original-code');
+            if (originalCode) {
+                div.innerHTML = ''; // Clear SVG
+                div.textContent = originalCode; // Restore text
+                div.removeAttribute('data-processed'); // Clear mermaid flag
+            }
+        });
+
+        // Re-run mermaid
+        mermaid.run({
+            querySelector: '.mermaid'
+        });
+    };
+
+    // Initial render
+    renderDiagrams();
+
+    // --- Watcher for Theme Changes ---
+    // Re-render when theme changes to ensure CSS variables are picked up by SVGs
+    new MutationObserver((mutations) => {
+        let shouldRender = false;
+        mutations.forEach(m => {
+            if (m.attributeName === 'class' && m.target === document.documentElement) {
+                shouldRender = true;
+            }
+        });
+        
+        if (shouldRender) {
+            updateMermaidTheme();
+            // Small delay to allow CSS variables to propagate
+            setTimeout(renderDiagrams, 100);
+        }
+    }).observe(document.documentElement, { 
+        attributes: true, 
+        attributeFilter: ['class'] 
     });
 });

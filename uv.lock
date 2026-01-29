@@ -11,9 +11,6 @@ resolution-markers = [
 [[package]]
 name = "akayu"
 source = { editable = "." }
-dependencies = [
-    { name = "mkdocs-shadcn" },
-]
 
 [package.optional-dependencies]
 dev = [
@@ -29,15 +26,6 @@ dev = [
     { name = "pytest-benchmark", version = "5.2.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
     { name = "streamz", version = "0.6.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
     { name = "streamz", version = "0.6.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-]
-docs = [
-    { name = "mkdocs" },
-    { name = "mkdocs-terminal" },
-    { name = "mkdocstrings", version = "0.26.1", source = { registry = "https://pypi.org/simple" }, extra = ["python"], marker = "python_full_version < '3.9'" },
-    { name = "mkdocstrings", version = "0.30.1", source = { registry = "https://pypi.org/simple" }, extra = ["python"], marker = "python_full_version == '3.9.*'" },
-    { name = "mkdocstrings", version = "1.0.1", source = { registry = "https://pypi.org/simple" }, extra = ["python"], marker = "python_full_version >= '3.10'" },
-    { name = "pymdown-extensions", version = "10.15", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "pymdown-extensions", version = "10.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
 ]
 
 [package.dev-dependencies]
@@ -64,18 +52,13 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
-    { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5" },
-    { name = "mkdocs-shadcn", extras = ["docs"] },
-    { name = "mkdocs-terminal", marker = "extra == 'docs'", specifier = ">=4.0" },
-    { name = "mkdocstrings", extras = ["python"], marker = "extra == 'docs'", specifier = ">=0.24" },
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pymdown-extensions", marker = "extra == 'docs'", specifier = ">=10.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "streamz", marker = "extra == 'dev'", specifier = ">=0.6" },
 ]
-provides-extras = ["dev", "docs"]
+provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 docs = [
@@ -950,25 +933,6 @@ wheels = [
 ]
 
 [[package]]
-name = "mkdocs-terminal"
-version = "4.7.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "jinja2" },
-    { name = "markdown", version = "3.7", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "markdown", version = "3.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
-    { name = "markdown", version = "3.10.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
-    { name = "mkdocs" },
-    { name = "pygments" },
-    { name = "pymdown-extensions", version = "10.15", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-    { name = "pymdown-extensions", version = "10.20", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.9'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/95/41/0d4ab5fcee2030f4800f0925ccbc03531d44f89686ad07db83cf2fd77854/mkdocs_terminal-4.7.0.tar.gz", hash = "sha256:9a8abcc560d66974a3fcfac9381167c7a3d52add1c30403b8cf35b3d2b10362e", size = 619993, upload-time = "2024-12-17T05:19:18.725Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/1d/98/062d03109576f3dc5a27bb3a2a74bea9b59aa4ed5d2b9b12f98a15a09fd8/mkdocs_terminal-4.7.0-py3-none-any.whl", hash = "sha256:6a223bcef762728f5bcdba045b4acabc3d119ae9215160693f45be8a09889815", size = 641970, upload-time = "2024-12-17T05:19:17.034Z" },
-]
-
-[[package]]
 name = "mkdocstrings"
 version = "0.26.1"
 source = { registry = "https://pypi.org/simple" }
@@ -993,11 +957,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/23/cc/8ba127aaee5d1e9046b0d33fa5b3d17da95a9d705d44902792e0569257fd/mkdocstrings-0.26.1-py3-none-any.whl", hash = "sha256:29738bfb72b4608e8e55cc50fb8a54f325dc7ebd2014e4e3881a49892d5983cf", size = 29643, upload-time = "2024-09-06T10:26:04.498Z" },
 ]
 
-[package.optional-dependencies]
-python = [
-    { name = "mkdocstrings-python", version = "1.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.9'" },
-]
-
 [[package]]
 name = "mkdocstrings"
 version = "0.30.1"
@@ -1019,11 +978,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/2c/f0dc4e1ee7f618f5bff7e05898d20bf8b6e7fa612038f768bfa295f136a4/mkdocstrings-0.30.1-py3-none-any.whl", hash = "sha256:41bd71f284ca4d44a668816193e4025c950b002252081e387433656ae9a70a82", size = 36704, upload-time = "2025-09-19T10:49:24.805Z" },
 ]
 
-[package.optional-dependencies]
-python = [
-    { name = "mkdocstrings-python", version = "1.18.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.9.*'" },
-]
-
 [[package]]
 name = "mkdocstrings"
 version = "1.0.1"
@@ -1042,11 +996,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bd/ec/680e3bc7c88704d3fb9c658a517ec10f2f2aed3b9340136978675e581688/mkdocstrings-1.0.1.tar.gz", hash = "sha256:caa7d311c85ac0a0674831725ecfdeee4348e3b8a2c91ab193ee319a41dbeb3d", size = 100794, upload-time = "2026-01-19T11:36:24.429Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d0/f9/ecd3e5cf258d63eddc13e354bd090df3aa458b64be50d737d52a8ad9df22/mkdocstrings-1.0.1-py3-none-any.whl", hash = "sha256:10deb908e310e6d427a5b8f69026361dac06b77de860f46043043e26f121db02", size = 35245, upload-time = "2026-01-19T11:36:23.067Z" },
-]
-
-[package.optional-dependencies]
-python = [
-    { name = "mkdocstrings-python", version = "2.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
 ]
 
 [[package]]

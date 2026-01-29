@@ -60,6 +60,23 @@ filtered.sink(results.append)
 
 Push data through the pipeline using `emit()` or `emit_batch()`:
 
+!!! note "Source Nodes Only"
+    Data can only be emitted into **source** nodes (nodes created with `Stream()`). Trying to emit data into derived nodes (like those returned by `.map()` or `.filter()`) is not allowed and will raise a `RuntimeError`.
+
+```mermaid
+flowchart LR
+    User((User))
+    S[Source]:::source
+    M[map]:::error
+    
+    S --> M
+    
+    User -->|emit| S
+    User -.-x|emit| M
+    
+    linkStyle 2 stroke:#dc2626,stroke-width:2px,color:red
+```
+
 ```python
 # Single item
 source.emit(5)
