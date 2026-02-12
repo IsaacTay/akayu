@@ -3,13 +3,13 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::Stream;
 use crate::helpers::{
     check_not_compiled, extract_stream_name, get_async_state_class, get_build_map_func,
     get_build_starmap_func, get_gather, get_is_sync_callable, get_prefetch_batch_map_state_class,
     get_prefetch_filter_state_class, get_prefetch_state_class, wrap_error,
 };
 use crate::node::NodeLogic;
+use crate::Stream;
 
 #[pymethods]
 impl Stream {
@@ -34,6 +34,12 @@ impl Stream {
             needs_lock: false,
             compiled: false,
         }
+    }
+
+    /// Returns True if the stream graph is compiled (frozen).
+    #[getter]
+    pub fn compiled(&self) -> bool {
+        self.compiled
     }
 
     /// Apply a function to each element in the stream.
@@ -686,7 +692,7 @@ impl Stream {
     /// Freeze and optimize the stream graph.
     ///
     /// Triggers topology optimizations (like chain fusion) and prevents
-    /// further modifications to the graph. **Once called, the entire graph 
+    /// further modifications to the graph. **Once called, the entire graph
     /// becomes immutable.**
     ///
     /// This enables optimizations that are unsafe for dynamic topologies:
@@ -694,7 +700,7 @@ impl Stream {
     /// - Consecutive filter operations are fused into a single composed filter
     /// - Prefetch nodes are fused with their following map/filter operations
     ///
-    /// IMPORTANT: After calling compile(), attempting to add new nodes (via map, 
+    /// IMPORTANT: After calling compile(), attempting to add new nodes (via map,
     /// filter, sink, etc.) to any part of the graph will raise a RuntimeError.
     /// Build your complete pipeline before calling this method.
     ///
@@ -702,7 +708,7 @@ impl Stream {
     ///     self (for chaining)
     ///
     /// Raises:
-    ///     RuntimeError: If the graph is already compiled/frozen or if 
+    ///     RuntimeError: If the graph is already compiled/frozen or if
     ///                  modifications are attempted after compilation.
     ///
     /// Example:

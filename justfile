@@ -60,11 +60,11 @@ clean-all: clean
 rebuild: sync
     uv pip install -e . --reinstall-package akayu
 
-# Build wheels for Python 3.12
+# Build wheels for Python 3.13
 build-wheels:
     mkdir -p dist
     rm -f dist/*.whl
-    maturin build --release --interpreter python3.12 --out dist
+    maturin build --release --interpreter python3.13 --out dist
     @echo "Wheels built:"
     @ls -la dist/*.whl
 
@@ -89,6 +89,27 @@ docs-build: sync-docs
 docs-fmt: sync-docs
     uv run mdformat docs/ README.md
 
+# Validate Mermaid diagrams in documentation
+docs-check-mermaid:
+    @echo "Validating Mermaid diagrams..."
+    @python3 scripts/validate_mermaid.py
+
+# Test code examples in documentation
+docs-test-examples: build
+    uv run python -m pytest --codeblocks docs/ README.md --ignore docs/benchmarks.md
+
+# Run all documentation checks
+docs-check: docs-check-mermaid docs-test-examples
+
 # Check markdown formatting (no changes)
 docs-fmt-check: sync-docs
     uv run mdformat --check docs/ README.md
+
+# Run backward compatibility tests (Python 3.8) - NIX ONLY
+test-compat:
+    @./scripts/test_compat.sh
+
+# Run backward compatibility tests (Python 3.8) - Standard (Non-Nix)
+# Usage: just test-compat-std
+test-compat-std:
+    uv run --python 3.8 python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_complex_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_ops_benchmark.py --ignore=tests/test_concurrency_benchmark.py --ignore=tests/test_benchmark_split.py

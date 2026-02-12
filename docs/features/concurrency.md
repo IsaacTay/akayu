@@ -5,7 +5,7 @@ akayu provides two mechanisms for concurrent processing that work efficiently to
 ## `par()` - Parallel Branch Execution
 
 The `par()` method creates a branch point where all downstream branches execute concurrently in a shared thread pool:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 p = source.par()
@@ -58,7 +58,7 @@ When a value reaches a `par()` node:
 - **I/O-bound operations**: When branches wait on disk, network, or database
 - **Independent processing**: When branches don't depend on each other's results
 - **Fan-out patterns**: Processing the same input multiple ways
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 p = source.par()
@@ -85,7 +85,7 @@ flowchart TD
 ### Returning to Sequential
 
 Use `seq()` after merging parallel branches to explicitly mark sequential execution:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 merged = akayu.union(a, b).seq()
 merged.map(sequential_op).sink(print)
@@ -94,7 +94,7 @@ merged.map(sequential_op).sink(print)
 ## `prefetch()` - Ordered Concurrent Processing
 
 The `prefetch(n)` method processes up to `n` items concurrently while **preserving output order**:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 source.prefetch(4).map(slow_operation).sink(results.append)
@@ -163,7 +163,7 @@ Even if item 2 finishes before item 1, it waits in the buffer until item 1 is em
 ### Prefetch with Different Operations
 
 `prefetch()` automatically fuses with the following operation:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 # Prefetch + map = PrefetchMap
 source.prefetch(4).map(func)
@@ -193,7 +193,7 @@ flowchart LR
 - **Slow per-item operations**: API calls, file I/O, image processing
 - **Order-sensitive pipelines**: When downstream logic depends on item order
 - **Rate-limited resources**: Control concurrency with the capacity parameter
-
+<!-- pytest-codeblocks:skip -->
 ```python
 # Process 4 images concurrently, results in original order
 source.prefetch(4).map(process_image).sink(save_result)
@@ -202,7 +202,7 @@ source.prefetch(4).map(process_image).sink(save_result)
 ## Combining `par()` and `prefetch()`
 
 `par()` and `prefetch()` share the same thread pool (scales to CPU count), so combining them has minimal overhead:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 p = source.par()
@@ -256,7 +256,7 @@ flowchart TD
 ```
 
 The lock (🔒) ensures thread-safe updates when multiple prefetch workers emit simultaneously.
-
+<!-- pytest-codeblocks:skip -->
 ```python
 p = source.par()
 a = p.prefetch(4).map(f1)  # Internal threading
@@ -288,7 +288,7 @@ Benchmark showing minimal overhead when combining:
 ## Flush for Prefetch
 
 When using `prefetch()`, call `flush()` to wait for all in-flight items to complete:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 source.prefetch(4).map(slow_op).sink(results.append)

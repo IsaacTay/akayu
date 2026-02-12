@@ -4,6 +4,7 @@
 
 /// tab | pip
 
+<!-- pytest-codeblocks:skip -->
 ```bash
 pip install akayu
 ```
@@ -12,6 +13,7 @@ pip install akayu
 
 /// tab | uv
 
+<!-- pytest-codeblocks:skip -->
 ```bash
 uv add akayu
 ```
@@ -20,6 +22,7 @@ uv add akayu
 
 /// tab | pixi
 
+<!-- pytest-codeblocks:skip -->
 ```bash
 pixi add akayu
 ```
@@ -43,6 +46,8 @@ source = akayu.Stream()
 Chain operations to build your processing pipeline:
 
 ```python
+import akayu
+
 source = akayu.Stream()
 
 # Transform values
@@ -76,7 +81,7 @@ flowchart LR
     
     linkStyle 2 stroke:#dc2626,stroke-width:2px,color:red
 ```
-
+<!-- pytest-codeblocks:cont -->
 ```python
 # Single item
 source.emit(5)
@@ -90,6 +95,10 @@ source.emit_batch([1, 2, 3, 4, 5])
 Call `.compile()` before processing to enable optimizations like operator fusion:
 
 ```python
+import akayu
+
+f1 = f2 = f3 = lambda x: x
+data = []
 source = akayu.Stream()
 source.map(f1).map(f2).map(f3).sink(print)
 

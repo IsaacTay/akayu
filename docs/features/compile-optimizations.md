@@ -10,7 +10,7 @@ When you call `.compile()`, akayu:
 1. **Applies chain fusion** - Combines consecutive operations into single nodes
 1. **Enables async check elimination** - Skips unnecessary awaitable checks for sync-only pipelines
 1. **Marks convergence points** - Identifies nodes that need thread-safe locking for `par()` + `prefetch()` combinations
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 source.map(f1).map(f2).filter(p).sink(print)
@@ -35,7 +35,7 @@ When you call `.compile()` on a source stream:
 - Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on *any* node in that graph will raise a `RuntimeError`.
 
 ### Example of Modifying a Compiled Graph
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 branch = source.map(lambda x: x + 1)
@@ -250,6 +250,8 @@ flowchart TD
 ## Checking Compilation Status
 
 ```python
+import akayu
+
 source = akayu.Stream()
 child = source.map(lambda x: x)
 
@@ -273,10 +275,9 @@ flowchart TD
     C --> E[sink s1]:::sink
     D --> F[sink s2]:::sink
 
-    style B stroke:var(--akayu-warn-stroke),stroke-width:3px
 ```
 
-The red-bordered node is a **split point** - it has multiple downstreams, so `f1` cannot be fused with `f2` or `f3`.
+The orange-bordered node is a **split point** - it has multiple downstreams, so `f1` cannot be fused with `f2` or `f3`.
 
 **After compile():**
 
@@ -286,11 +287,10 @@ flowchart TD
     B --> C["MapSink(f2, s1) 🔒"]:::process
     B --> D["MapSink(f3, s2) 🔒"]:::process
 
-    style B stroke:var(--akayu-warn-stroke),stroke-width:3px
 ```
 
 Each branch after the split is optimized independently (green nodes are fused), but `f1` stays separate.
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 branch = source.map(f1)

@@ -4,6 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "akayu"
+authors = [
+  { name="Isaac Tay", email="pypi.8yfi1@slmail.me" }
+]
+description = "Small fast stream processing library"
 requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Rust",
@@ -17,6 +21,7 @@ dependencies = []
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
+    "pytest-codeblocks>=0.17",
     "pytest-benchmark>=4.0",
     "maturin>=1.10,<2.0",
     "streamz>=0.6",
@@ -36,6 +41,9 @@ module-name = "akayu.akayu"
 cache-keys = [{ file = "Cargo.toml" }, { file = "src/**/*.rs" }]
 
 [dependency-groups]
+dev = [
+    "pytest-codeblocks>=0.17.0",
+]
 docs = [
     "mkdocs-shadcn>=0.9.8",
     "mkdocstrings>=0.26.1",

@@ -12,18 +12,23 @@ use crate::node::NodeLogic;
 
 #[pymethods]
 impl Stream {
+    // Complexity is inherent to dispatching across 20+ NodeLogic variants;
+    // each arm is simple and independent.
+    #[allow(clippy::cognitive_complexity)]
     pub fn update_batch(
         &mut self,
         py: Python,
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Option<Py<PyAny>>> {
-        // skip_async_check is pre-computed in self.skip_async_check
         let mut output_batch = Vec::with_capacity(items.len());
 
         match &mut self.logic {
-            NodeLogic::Source => {
+            // -- Passthrough --
+            NodeLogic::Source | NodeLogic::Prefetch { .. } => {
                 output_batch = items;
             }
+
+            // -- Core transforms --
             NodeLogic::Map { func } => {
                 for x in items {
                     let res = wrap_error(py, func.call1(py, (x,)), &self.name)?;
@@ -41,21 +46,21 @@ impl Stream {
             NodeLogic::Flatten => {
                 for x in items {
                     let x_bound = x.bind(py);
-                    let iter = x_bound.try_iter()?;
-                    for item_res in iter {
+                    for item_res in x_bound.try_iter()? {
                         output_batch.push(item_res?.into());
                     }
                 }
             }
-            NodeLogic::Collect { buffer } => {
-                buffer.extend(items);
-                return Ok(None);
-            }
-            NodeLogic::Sink { func } => {
-                for x in items {
-                    wrap_error(py, func.call1(py, (x,)), &self.name)?;
+            NodeLogic::BatchMap { func } => {
+                let py_list = PyList::new(py, &items)?;
+                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
+                let result_list = result.bind(py);
+                for item in result_list.try_iter()? {
+                    output_batch.push(item?.into());
                 }
             }
+
+            // -- Stateful --
             NodeLogic::Accumulate {
                 func,
                 state,
@@ -65,17 +70,21 @@ impl Stream {
                     let result =
                         wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
                     if *returns_state {
-                        // func returns (new_state, emit_value)
                         let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
                         *state = tuple.0;
                         output_batch.push(tuple.1);
                     } else {
-                        // func returns single value that is both state and emit value
                         *state = result.clone_ref(py);
                         output_batch.push(result);
                     }
                 }
             }
+            NodeLogic::Collect { buffer } => {
+                buffer.extend(items);
+                return Ok(None);
+            }
+
+            // -- Multi-stream --
             NodeLogic::Tag { index } => {
                 let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
                 for x in items {
@@ -93,7 +102,6 @@ impl Stream {
                     if idx < state.len() {
                         state[idx] = Some(val);
                     }
-                    // Check if we should emit: all values present AND (emit_on empty OR idx in emit_on)
                     let should_emit = state.iter().all(std::option::Option::is_some)
                         && (emit_on_indices.is_empty() || emit_on_indices.contains(&idx));
                     if should_emit {
@@ -125,20 +133,64 @@ impl Stream {
                     output_batch.push(tuple_out.into());
                 }
             }
-            NodeLogic::BatchMap { func } => {
-                // Convert Vec<Py<PyAny>> to Python list
-                let py_list = PyList::new(py, &items)?;
-                // Call function once with entire batch
-                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
-                // Convert result back to Vec
-                let result_list = result.bind(py);
-                for item in result_list.try_iter()? {
-                    output_batch.push(item?.into());
+
+            // -- Fused transforms --
+            NodeLogic::FilterMap { predicate, func } => {
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        let mapped = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                        output_batch.push(mapped);
+                    }
                 }
             }
+
+            // -- Terminals (no propagation) --
+            NodeLogic::Sink { func } => {
+                for x in items {
+                    wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                }
+                return Ok(None);
+            }
+            NodeLogic::MapSink {
+                map_func,
+                sink_func,
+            } => {
+                for x in items {
+                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                }
+                return Ok(None);
+            }
+            NodeLogic::FilterSink {
+                predicate,
+                sink_func,
+            } => {
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
+                    }
+                }
+                return Ok(None);
+            }
+            NodeLogic::FilterMapSink {
+                predicate,
+                map_func,
+                sink_func,
+            } => {
+                for x in items {
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    if res.is_truthy(py)? {
+                        let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
+                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                    }
+                }
+                return Ok(None);
+            }
+
+            // -- Concurrent (self-propagating) --
             NodeLogic::Parallel => {
-                // Parallel node processes batch items sequentially through parallel propagation
-                // Each item is propagated to all downstreams in parallel
                 let mut futures = Vec::new();
                 for x in items {
                     if let Some(f) = self.propagate_parallel(py, x)? {
@@ -152,12 +204,7 @@ impl Stream {
                 }
                 return Ok(None);
             }
-            NodeLogic::Prefetch { .. } => {
-                // Prefetch without a following Map just passes through
-                output_batch = items;
-            }
             NodeLogic::PrefetchMap { state, .. } | NodeLogic::PrefetchFilter { state, .. } => {
-                // Get ready results from Python state, collect them first
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
                 for x in items {
                     let results =
@@ -167,14 +214,12 @@ impl Stream {
                         to_propagate.push(result?.into());
                     }
                 }
-                // Propagate after releasing the borrow on self.logic
                 for val in to_propagate {
                     self.propagate(py, val)?;
                 }
                 return Ok(None);
             }
             NodeLogic::PrefetchBatchMap { state, .. } => {
-                // Use update_batch which processes items with prefetching
                 let py_list = PyList::new(py, &items)?;
                 let results = wrap_error(
                     py,
@@ -191,57 +236,7 @@ impl Stream {
                 }
                 return Ok(None);
             }
-            NodeLogic::FilterMap { predicate, func } => {
-                // Fused filter + map: only call func if predicate passes
-                for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
-                    if res.is_truthy(py)? {
-                        let mapped = wrap_error(py, func.call1(py, (x,)), &self.name)?;
-                        output_batch.push(mapped);
-                    }
-                }
-            }
-            NodeLogic::MapSink {
-                map_func,
-                sink_func,
-            } => {
-                // Fused map + sink: call sink(map(x)) directly, no propagation needed
-                for x in items {
-                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
-                }
-                return Ok(None); // Terminal node
-            }
-            NodeLogic::FilterSink {
-                predicate,
-                sink_func,
-            } => {
-                // Fused filter + sink: only call sink if predicate passes
-                for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
-                    if res.is_truthy(py)? {
-                        wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
-                    }
-                }
-                return Ok(None); // Terminal node
-            }
-            NodeLogic::FilterMapSink {
-                predicate,
-                map_func,
-                sink_func,
-            } => {
-                // Fused filter + map + sink: if pred(x) then sink(map(x))
-                for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
-                    if res.is_truthy(py)? {
-                        let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
-                    }
-                }
-                return Ok(None); // Terminal node
-            }
             NodeLogic::AsyncMap { func, state } => {
-                // Async map: call func to get coroutine, submit to async state
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
                 for x in items {
                     let coro = wrap_error(py, func.call1(py, (x,)), &self.name)?;
@@ -252,7 +247,6 @@ impl Stream {
                         to_propagate.push(result?.into());
                     }
                 }
-                // Propagate after releasing the borrow on self.logic
                 for val in to_propagate {
                     self.propagate(py, val)?;
                 }
