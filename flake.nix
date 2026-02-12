@@ -28,6 +28,7 @@
             # Development tools
             ruff
             just
+            mermaid-cli
 
             # Build dependencies
             pkg-config

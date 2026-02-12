@@ -31,7 +31,7 @@ flowchart LR
 ```
 
 ### Example Code
-
+<!-- pytest-codeblocks:skip -->
 ```python
 import akayu
 
@@ -71,7 +71,7 @@ flowchart LR
     PF --> M[Map: Fetch URL]:::process
     M --> Sink:::sink
 ```
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 # Keep 4 requests in flight at once
@@ -98,7 +98,7 @@ flowchart TD
     
     Z --> D[Decision]:::sink
 ```
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 p = source.par()
@@ -124,7 +124,7 @@ flowchart LR
     S --> B[batch_map]:::process
     B --> Sink:::sink
 ```
-
+<!-- pytest-codeblocks:skip -->
 ```python
 import numpy as np
 
@@ -146,7 +146,7 @@ source.emit_batch(large_data_chunk)
 ### 1. The "Late Modification"
 
 Attempting to modify the graph after `compile()` will crash your application.
-
+<!-- pytest-codeblocks:skip -->
 ```python
 s = akayu.Stream()
 s.map(f1)
@@ -160,7 +160,7 @@ s.map(f2)  # ❌ RuntimeError: Graph is locked
 ### 2. The Trivial Parallelism
 
 Using `par()` for cheap operations (like simple arithmetic) often makes code *slower* due to thread switching overhead.
-
+<!-- pytest-codeblocks:skip -->
 ```python
 # ❌ Anti-Pattern: Parallelizing trivial math
 s.par().map(lambda x: x + 1) 

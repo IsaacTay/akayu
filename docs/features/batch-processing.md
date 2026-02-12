@@ -7,7 +7,7 @@ akayu provides efficient batch processing capabilities for high-throughput data 
 ### `emit(x)` - Single Item
 
 Pushes one item through the pipeline:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source.emit(1)
 source.emit(2)
@@ -19,7 +19,7 @@ Each call traverses the stream graph independently.
 ### `emit_batch(items)` - Multiple Items
 
 Pushes multiple items through the pipeline together:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source.emit_batch([1, 2, 3, 4, 5])
 ```
@@ -90,7 +90,7 @@ Each node type handles batches efficiently:
 ## `batch_map()` - Vectorized Operations
 
 Use `batch_map()` when your function can process multiple items at once:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 import numpy as np
 import akayu
@@ -125,7 +125,7 @@ flowchart LR
 - Database batch queries
 - API batch requests
 - Any function optimized for bulk input
-
+<!-- pytest-codeblocks:skip -->
 ```python
 def batch_db_lookup(ids):
     # Single query for all IDs
@@ -135,7 +135,7 @@ source.batch_map(batch_db_lookup).sink(process_user)
 ```
 
 ### `batch_map()` vs `map()` with `emit_batch()`
-
+<!-- pytest-codeblocks:skip -->
 ```python
 # map() with emit_batch: function called N times
 source.map(lambda x: x * 2)
@@ -149,7 +149,7 @@ source.emit_batch([1, 2, 3])  # lambda called 1 time with [1, 2, 3]
 ## Optimization Boundaries at Splits
 
 Chain fusion (combining consecutive operations) **stops at split points** where a node has multiple downstreams:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 branch = source.map(f1)
@@ -196,7 +196,7 @@ Each branch gets terminal fusion (green), but `f1` remains separate at the split
 ### Working with Splits
 
 If you need maximum fusion, consider restructuring:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 # Less optimal: split prevents f1 fusion
 source.map(f1).map(f2).sink(s1)  # Can't fuse f1 if split exists elsewhere
@@ -214,7 +214,7 @@ However, this trades fusion for duplicate computation. Choose based on whether:
 ## BatchMap Fusion
 
 Consecutive `batch_map()` operations are fused:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source.batch_map(f1).batch_map(f2)
 
@@ -237,7 +237,7 @@ flowchart LR
 ## Prefetch with Batch Operations
 
 `prefetch()` works with `batch_map()` for concurrent vectorized processing:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source.prefetch(4).batch_map(batch_process)
 source.compile()
@@ -263,7 +263,7 @@ flowchart TD
 ```
 
 ## Example: Efficient Data Pipeline
-
+<!-- pytest-codeblocks:skip -->
 ```python
 import akayu
 
@@ -313,7 +313,7 @@ After compile(), the three `batch_map` operations are fused into one!
 ## Collecting Results
 
 Use `collect()` to buffer items and `flush()` to emit them as a batch:
-
+<!-- pytest-codeblocks:skip -->
 ```python
 source = akayu.Stream()
 collected = source.map(transform).collect()

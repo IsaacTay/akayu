@@ -106,7 +106,7 @@ impl Stream {
         }
 
         // Phase 3: Warn about par() nodes without splits (useless overhead)
-        self.warn_useless_par(py, &all_nodes);
+        Self::warn_useless_par(py, &all_nodes);
 
         // Phase 4: Mark prefetch nodes inside par branches as needing locks
         self.mark_prefetch_in_par(py, &all_nodes);
@@ -158,7 +158,7 @@ impl Stream {
     /// Warn about par() nodes that don't have multiple downstream branches.
     /// A par() without splits is useless overhead - it adds thread pool dispatch
     /// without any parallelism benefit.
-    fn warn_useless_par(&self, py: Python, all_nodes: &[Py<Self>]) {
+    fn warn_useless_par(py: Python, all_nodes: &[Py<Self>]) {
         for node_py in all_nodes {
             let node = node_py.borrow(py);
             if matches!(node.logic, NodeLogic::Parallel) && node.downstreams.len() <= 1 {
@@ -172,7 +172,7 @@ impl Stream {
                 // Emit a Python UserWarning
                 let warn_type = py.get_type::<pyo3::exceptions::PyUserWarning>();
                 let c_msg = std::ffi::CString::new(msg).unwrap();
-                let _ = PyErr::warn(py, &warn_type.as_any(), &c_msg, 1);
+                let _ = PyErr::warn(py, warn_type.as_any(), &c_msg, 1);
             }
         }
     }
@@ -414,7 +414,7 @@ impl Stream {
         // Passthrough elimination: bypass Source nodes (seq() nodes) that only forward
         // Pattern: any_node -> Source -> downstream => any_node -> downstream
         // This reduces graph traversal overhead
-        if let NodeLogic::Source = child.logic {
+        if matches!(child.logic, NodeLogic::Source) {
             let new_downstreams: Vec<Py<Self>> =
                 child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             drop(child);

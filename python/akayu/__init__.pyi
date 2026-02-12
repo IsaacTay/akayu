@@ -1,6 +1,6 @@
 """High-performance reactive streams for Python."""
 
-from typing import Any, Callable, Coroutine, Iterable, Optional, TypeVar
+from typing import Any, Callable, Coroutine, Iterable, Optional, TypeVar, List, Union
 
 T = TypeVar("T")
 U = TypeVar("U")
@@ -34,9 +34,7 @@ class Stream:
         """
         ...
 
-    def map(
-        self, func: Callable[..., T], *args: Any, **kwargs: Any
-    ) -> "Stream":
+    def map(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> "Stream":
         """Apply a function to each element in the stream.
 
         Args:
@@ -68,9 +66,7 @@ class Stream:
         """
         ...
 
-    def starmap(
-        self, func: Callable[..., T], *args: Any, **kwargs: Any
-    ) -> "Stream":
+    def starmap(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> "Stream":
         """Apply a function to each element, unpacking the element as arguments.
 
         Similar to map, but each element is unpacked with *element before
@@ -87,7 +83,7 @@ class Stream:
         ...
 
     def batch_map(
-        self, func: Callable[[list[Any]], Iterable[T]], *args: Any, **kwargs: Any
+        self, func: Callable[[List[Any]], Iterable[T]], *args: Any, **kwargs: Any
     ) -> "Stream":
         """Apply a batch-aware function to process entire batches at once.
 
@@ -151,9 +147,7 @@ class Stream:
         """
         ...
 
-    def sink(
-        self, func: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> "Stream":
+    def sink(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> "Stream":
         """Apply a function to each element for side effects.
 
         Similar to map, but the return value of func is discarded.
@@ -221,7 +215,7 @@ class Stream:
         """
         ...
 
-    def emit_batch(self, items: list[Any]) -> Optional[Coroutine[Any, Any, Any]]:
+    def emit_batch(self, items: List[Any]) -> Optional[Coroutine[Any, Any, Any]]:
         """Emit multiple values into the stream as a batch.
 
         More efficient than calling `emit()` multiple times when processing
@@ -335,7 +329,9 @@ class Stream:
         ...
 
     def combine_latest(
-        self, *others: "Stream", emit_on: Optional["Stream | list[Stream]"] = None
+        self,
+        *others: "Stream",
+        emit_on: Optional[Union["Stream", List["Stream"]]] = None,
     ) -> "Stream":
         """Combine the latest values from multiple streams.
 
@@ -366,7 +362,6 @@ class Stream:
             A new Stream emitting zipped tuples.
         """
         ...
-
 
 def union(*streams: Stream) -> Stream:
     """Merge multiple streams into one.
@@ -407,9 +402,8 @@ def union(*streams: Stream) -> Stream:
     """
     ...
 
-
 def combine_latest(
-    *streams: Stream, emit_on: Optional[Stream | list[Stream]] = None
+    *streams: Stream, emit_on: Optional[Union[Stream, List[Stream]]] = None
 ) -> Stream:
     """Combine the latest values from multiple streams.
 
@@ -457,7 +451,6 @@ def combine_latest(
     """
     ...
 
-
 def zip(*streams: Stream) -> Stream:
     """Zip multiple streams together.
 
@@ -495,7 +488,6 @@ def zip(*streams: Stream) -> Stream:
     """
     ...
 
-
 def to_text_file(
     stream: Stream,
     filename: str,
@@ -516,7 +508,6 @@ def to_text_file(
         A new Stream (for chaining).
     """
     ...
-
 
 def from_text_file(filename: str, encoding: str = "utf-8") -> Stream:
     """Create a stream that reads lines from a text file.
