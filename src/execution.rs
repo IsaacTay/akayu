@@ -31,13 +31,13 @@ impl Stream {
             // -- Core transforms --
             NodeLogic::Map { func } => {
                 for x in items {
-                    let res = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                    let res = wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?;
                     output_batch.push(res);
                 }
             }
             NodeLogic::Filter { predicate } => {
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
                         output_batch.push(x);
                     }
@@ -53,7 +53,7 @@ impl Stream {
             }
             NodeLogic::BatchMap { func } => {
                 let py_list = PyList::new(py, &items)?;
-                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
+                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name, &self.source_location)?;
                 let result_list = result.bind(py);
                 for item in result_list.try_iter()? {
                     output_batch.push(item?.into());
@@ -68,7 +68,7 @@ impl Stream {
             } => {
                 for x in items {
                     let result =
-                        wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
+                        wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name, &self.source_location)?;
                     if *returns_state {
                         let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
                         *state = tuple.0;
@@ -135,11 +135,15 @@ impl Stream {
             }
 
             // -- Fused transforms --
-            NodeLogic::FilterMap { predicate, func } => {
+            NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
-                        let mapped = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                        let func_result = func.call1(py, (x,));
+                        if let Err(ref e) = func_result {
+                            offset_chain_index(py, e, *pred_segment_count);
+                        }
+                        let mapped = wrap_error(py, func_result, &self.name, &self.source_location)?;
                         output_batch.push(mapped);
                     }
                 }
@@ -148,7 +152,7 @@ impl Stream {
             // -- Terminals (no propagation) --
             NodeLogic::Sink { func } => {
                 for x in items {
-                    wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                    wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?;
                 }
                 return Ok(None);
             }
@@ -157,8 +161,8 @@ impl Stream {
                 sink_func,
             } => {
                 for x in items {
-                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name, &self.source_location)?;
+                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
                 }
                 return Ok(None);
             }
@@ -167,9 +171,9 @@ impl Stream {
                 sink_func,
             } => {
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
-                        wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
+                        wrap_error(py, sink_func.call1(py, (x,)), &self.name, &self.source_location)?;
                     }
                 }
                 return Ok(None);
@@ -178,12 +182,17 @@ impl Stream {
                 predicate,
                 map_func,
                 sink_func,
+                pred_segment_count,
             } => {
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name)?;
+                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
-                        let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                        let map_result = map_func.call1(py, (x,));
+                        if let Err(ref e) = map_result {
+                            offset_chain_index(py, e, *pred_segment_count);
+                        }
+                        let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
+                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
                     }
                 }
                 return Ok(None);
@@ -208,7 +217,7 @@ impl Stream {
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
                 for x in items {
                     let results =
-                        wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                        wrap_error(py, state.call_method1(py, "update", (x,)), &self.name, &self.source_location)?;
                     let results_list = results.bind(py);
                     for result in results_list.try_iter()? {
                         to_propagate.push(result?.into());
@@ -225,6 +234,7 @@ impl Stream {
                     py,
                     state.call_method1(py, "update_batch", (py_list,)),
                     &self.name,
+                    &self.source_location,
                 )?;
                 let results_list = results.bind(py);
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
@@ -239,9 +249,9 @@ impl Stream {
             NodeLogic::AsyncMap { func, state } => {
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
                 for x in items {
-                    let coro = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                    let coro = wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?;
                     let results =
-                        wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name)?;
+                        wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name, &self.source_location)?;
                     let results_list = results.bind(py);
                     for result in results_list.try_iter()? {
                         to_propagate.push(result?.into());
@@ -260,10 +270,10 @@ impl Stream {
     pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func } => Some(wrap_error(py, func.call1(py, (x,)), &self.name)?),
+            NodeLogic::Map { func } => Some(wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?),
             NodeLogic::Filter { predicate } => {
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
                 if !self.skip_async_check {
                     let is_awaitable_fn = get_is_awaitable()?;
                     let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
@@ -293,7 +303,7 @@ impl Stream {
                 return Ok(None);
             }
             NodeLogic::Sink { func } => {
-                wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?;
                 None
             }
             NodeLogic::Accumulate {
@@ -301,7 +311,7 @@ impl Stream {
                 state,
                 returns_state,
             } => {
-                let result = wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name)?;
+                let result = wrap_error(py, func.call1(py, (state.clone_ref(py), x)), &self.name, &self.source_location)?;
                 if *returns_state {
                     // func returns (new_state, emit_value)
                     let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
@@ -364,7 +374,7 @@ impl Stream {
             NodeLogic::BatchMap { func } => {
                 // Wrap single item in list, call func, extract single result
                 let py_list = PyList::new(py, &[x])?;
-                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name)?;
+                let result = wrap_error(py, func.call1(py, (py_list,)), &self.name, &self.source_location)?;
                 let result_list = result.bind(py);
                 let mut iter = result_list.try_iter()?;
                 match iter.next() {
@@ -383,7 +393,7 @@ impl Stream {
             }
             NodeLogic::PrefetchMap { state, .. } => {
                 // Get ready results from Python state (handles threading and ordering)
-                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name, &self.source_location)?;
                 // Propagate each ready result to downstreams (done in Rust for thread safety)
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
@@ -393,7 +403,7 @@ impl Stream {
             }
             NodeLogic::PrefetchFilter { state, .. } => {
                 // Get ready results from Python state (handles threading, ordering, and filtering)
-                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name, &self.source_location)?;
                 // Propagate each ready result to downstreams (done in Rust for thread safety)
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
@@ -404,20 +414,24 @@ impl Stream {
             NodeLogic::PrefetchBatchMap { state, .. } => {
                 // Get ready results from Python state (handles threading and ordering)
                 // The state wraps single item in list and extracts single result
-                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name)?;
+                let results = wrap_error(py, state.call_method1(py, "update", (x,)), &self.name, &self.source_location)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
                     self.propagate(py, result?.into())?;
                 }
                 return Ok(None);
             }
-            NodeLogic::FilterMap { predicate, func } => {
+            NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
                 // Fused filter + map: only call func if predicate passes
                 // This skips the map call entirely for filtered items
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
-                    Some(wrap_error(py, func.call1(py, (x,)), &self.name)?)
+                    let func_result = func.call1(py, (x,));
+                    if let Err(ref e) = func_result {
+                        offset_chain_index(py, e, *pred_segment_count);
+                    }
+                    Some(wrap_error(py, func_result, &self.name, &self.source_location)?)
                 } else {
                     None
                 }
@@ -427,8 +441,8 @@ impl Stream {
                 sink_func,
             } => {
                 // Fused map + sink: call sink(map(x)) directly
-                let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name, &self.source_location)?;
+                wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
                 return Ok(None); // Terminal node
             }
             NodeLogic::FilterSink {
@@ -437,9 +451,9 @@ impl Stream {
             } => {
                 // Fused filter + sink: only call sink if predicate passes
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
-                    wrap_error(py, sink_func.call1(py, (x,)), &self.name)?;
+                    wrap_error(py, sink_func.call1(py, (x,)), &self.name, &self.source_location)?;
                 }
                 return Ok(None); // Terminal node
             }
@@ -447,22 +461,27 @@ impl Stream {
                 predicate,
                 map_func,
                 sink_func,
+                pred_segment_count,
             } => {
                 // Fused filter + map + sink: if pred(x) then sink(map(x))
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name)?;
+                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
-                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name)?;
-                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name)?;
+                    let map_result = map_func.call1(py, (x,));
+                    if let Err(ref e) = map_result {
+                        offset_chain_index(py, e, *pred_segment_count);
+                    }
+                    let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
+                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
                 }
                 return Ok(None); // Terminal node
             }
             NodeLogic::AsyncMap { func, state } => {
                 // Call func(x) to get coroutine
-                let coro = wrap_error(py, func.call1(py, (x,)), &self.name)?;
+                let coro = wrap_error(py, func.call1(py, (x,)), &self.name, &self.source_location)?;
                 // Submit to async state
                 let results =
-                    wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name)?;
+                    wrap_error(py, state.call_method1(py, "submit", (coro,)), &self.name, &self.source_location)?;
                 // Propagate ready results
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
@@ -475,6 +494,22 @@ impl Stream {
             return self.propagate(py, val);
         }
         Ok(None)
+    }
+}
+
+/// Adjust `_akayu_chain_index` on a Python exception by adding an offset.
+///
+/// Composed map/filter functions set `_akayu_chain_index` relative to their own chain,
+/// but when embedded in a cross-type fusion (e.g. FilterMap), the index needs to be
+/// shifted by the number of preceding segments (e.g. the predicate segments).
+fn offset_chain_index(py: Python, err: &PyErr, offset: usize) {
+    if offset == 0 {
+        return;
+    }
+    if let Ok(idx_attr) = err.value(py).getattr("_akayu_chain_index") {
+        if let Ok(idx) = idx_attr.extract::<usize>() {
+            let _ = err.value(py).setattr("_akayu_chain_index", idx + offset);
+        }
     }
 }
 

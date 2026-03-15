@@ -3,10 +3,12 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
+use crate::error::StreamError;
 use crate::helpers::{
-    check_not_compiled, extract_stream_name, get_async_state_class, get_build_map_func,
-    get_build_starmap_func, get_gather, get_is_sync_callable, get_prefetch_batch_map_state_class,
-    get_prefetch_filter_state_class, get_prefetch_state_class, wrap_error,
+    capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
+    get_build_map_func, get_build_starmap_func, get_func_name, get_gather, get_is_sync_callable,
+    get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
+    wrap_error,
 };
 use crate::node::NodeLogic;
 use crate::Stream;
@@ -21,8 +23,9 @@ impl Stream {
     ///         If None or True, async coroutines are automatically awaited.
     #[new]
     #[pyo3(signature = (name=None, asynchronous=None))]
-    pub fn new(name: Option<String>, asynchronous: Option<bool>) -> Self {
+    pub fn new(py: Python, name: Option<String>, asynchronous: Option<bool>) -> Self {
         let skip_async_check = asynchronous == Some(false);
+        let source_location = capture_source_location(py);
         Self {
             logic: NodeLogic::Source,
             downstreams: Vec::new(),
@@ -33,6 +36,7 @@ impl Stream {
             frozen: false,
             needs_lock: false,
             compiled: false,
+            source_location,
         }
     }
 
@@ -62,7 +66,9 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
-        let name = extract_stream_name(py, &kwargs, "map", &this.name)?;
+        let func_name = get_func_name(py, &func);
+        let name = extract_stream_name(py, &kwargs, "map", func_name.as_deref())?;
+        let source_location = capture_source_location(py);
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -87,6 +93,8 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_map({size})+{name}");
+            this.source_location =
+                format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -112,6 +120,7 @@ impl Stream {
                     frozen: false,
                     needs_lock: false,
                     compiled: false,
+                    source_location,
                 },
             )?;
 
@@ -131,6 +140,7 @@ impl Stream {
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -153,22 +163,22 @@ impl Stream {
     pub fn prefetch(&mut self, py: Python, n: usize) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
         if n == 0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "prefetch size must be at least 1",
-            ));
+            return Err(StreamError::InvalidPrefetchSize.into());
         }
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Prefetch { size: n },
                 downstreams: Vec::new(),
-                name: format!("{}.prefetch({})", self.name, n),
+                name: format!("prefetch({})", n),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true,
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
         self.downstreams.push(node.clone_ref(py));
@@ -196,7 +206,9 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
-        let name = extract_stream_name(py, &kwargs, "starmap", &self.name)?;
+        let func_name = get_func_name(py, &func);
+        let name = extract_stream_name(py, &kwargs, "starmap", func_name.as_deref())?;
+        let source_location = capture_source_location(py);
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -222,6 +234,7 @@ impl Stream {
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -259,7 +272,9 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
-        let name = extract_stream_name(py, &kwargs, "batch_map", &this.name)?;
+        let func_name = get_func_name(py, &func);
+        let name = extract_stream_name(py, &kwargs, "batch_map", func_name.as_deref())?;
+        let source_location = capture_source_location(py);
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -284,6 +299,8 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
+            this.source_location =
+                format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -301,6 +318,7 @@ impl Stream {
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -330,7 +348,9 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
-        let name = extract_stream_name(py, &kwargs, "filter", &this.name)?;
+        let func_name = get_func_name(py, &predicate);
+        let name = extract_stream_name(py, &kwargs, "filter", func_name.as_deref())?;
+        let source_location = capture_source_location(py);
 
         // Check if the original predicate is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -363,6 +383,8 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_filter({size})+{name}");
+            this.source_location =
+                format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -382,6 +404,7 @@ impl Stream {
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -398,18 +421,20 @@ impl Stream {
     ///     A new Stream emitting the flattened elements.
     pub fn flatten(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Flatten,
                 downstreams: Vec::new(),
-                name: format!("{}.flatten", self.name),
+                name: "flatten".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -426,18 +451,20 @@ impl Stream {
     ///     A new Stream that emits collected tuples on flush.
     pub fn collect(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Collect { buffer: Vec::new() },
                 downstreams: Vec::new(),
-                name: format!("{}.collect", self.name),
+                name: "collect".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -476,7 +503,7 @@ impl Stream {
             }
             NodeLogic::PrefetchMap { state, .. } => {
                 // Flush the prefetch state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
@@ -486,7 +513,7 @@ impl Stream {
             }
             NodeLogic::PrefetchFilter { state, .. } => {
                 // Flush the prefetch filter state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
@@ -496,7 +523,7 @@ impl Stream {
             }
             NodeLogic::PrefetchBatchMap { state, .. } => {
                 // Flush the prefetch batch_map state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
@@ -506,7 +533,7 @@ impl Stream {
             }
             NodeLogic::AsyncMap { state, .. } => {
                 // Flush the async state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name)?;
+                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
                 let results_list = results.bind(py);
                 for result in results_list.try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
@@ -554,7 +581,9 @@ impl Stream {
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
-        let name = extract_stream_name(py, &kwargs, "sink", &self.name)?;
+        let func_name = get_func_name(py, &func);
+        let name = extract_stream_name(py, &kwargs, "sink", func_name.as_deref())?;
+        let source_location = capture_source_location(py);
 
         // Check if the original function is sync (before wrapping/moving)
         let is_sync_callable = get_is_sync_callable()?;
@@ -580,6 +609,7 @@ impl Stream {
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -610,9 +640,16 @@ impl Stream {
         returns_state: bool,
     ) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
+        let func_name = get_func_name(py, &func);
+        let source_location = capture_source_location(py);
         // Check if the accumulator function is sync
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+
+        let name = match func_name {
+            Some(ref n) => format!("accumulate({n})"),
+            None => "accumulate".to_string(),
+        };
 
         let node = Py::new(
             py,
@@ -623,13 +660,14 @@ impl Stream {
                     returns_state,
                 },
                 downstreams: Vec::new(),
-                name: format!("{}.accumulate", self.name),
+                name,
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync,
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -652,10 +690,7 @@ impl Stream {
     ///     A coroutine if async processing is triggered, otherwise None.
     pub fn emit(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Emit called on non-source node '{}'. Data can only be emitted into source nodes.",
-                self.name
-            )));
+            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
 
         // Emit bypasses this node's logic and propagates directly to downstreams
@@ -678,10 +713,7 @@ impl Stream {
     ///     A coroutine if async processing is triggered, otherwise None.
     pub fn emit_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Emit called on non-source node '{}'. Data can only be emitted into source nodes.",
-                self.name
-            )));
+            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
 
         // Emit bypasses this node's logic and propagates directly to downstreams
@@ -719,10 +751,7 @@ impl Stream {
     pub fn compile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         if this.compiled {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-                "Stream '{}' is already compiled",
-                this.name
-            )));
+            return Err(StreamError::AlreadyCompiled(this.name.clone()).into());
         }
 
         // Run full optimization (including chain fusion)

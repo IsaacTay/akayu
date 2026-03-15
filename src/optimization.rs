@@ -11,6 +11,7 @@ use crate::node::NodeLogic;
 struct FusionChildData {
     downstreams: Vec<Py<Stream>>,
     name: String,
+    source_location: String,
     func_is_sync: bool,
 }
 
@@ -20,6 +21,7 @@ impl FusionChildData {
         Self {
             downstreams: child.downstreams.iter().map(|d| d.clone_ref(py)).collect(),
             name: child.name.clone(),
+            source_location: child.source_location.clone(),
             func_is_sync: child.func_is_sync,
         }
     }
@@ -30,6 +32,8 @@ impl Stream {
     fn apply_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
         self.logic = new_logic;
         self.name = format!("{}+{}", self.name, child_data.name);
+        self.source_location =
+            format!("{}, {}", self.source_location, child_data.source_location);
         self.downstreams = child_data.downstreams;
         self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
     }
@@ -38,6 +42,8 @@ impl Stream {
     fn apply_terminal_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
         self.logic = new_logic;
         self.name = format!("{}+{}", self.name, child_data.name);
+        self.source_location =
+            format!("{}, {}", self.source_location, child_data.source_location);
         self.downstreams = Vec::new();
         self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
     }
@@ -296,23 +302,48 @@ impl Stream {
         }
     }
 
-    /// Recursively fuse linear chains of Map or Filter nodes.
+    /// Fuse linear chains using a multi-phase approach.
+    ///
+    /// Phase 1: Same-type chain reduction (Map+Map, Filter+Filter, BatchMap+BatchMap,
+    ///          Source passthrough). Repeats until stable so chains fully collapse.
+    /// Phase 2: Non-terminal cross-type fusion (Filter+Map→FilterMap, FilterMap+Map).
+    ///          Single bottom-up pass after same-type chains are resolved.
+    /// Phase 3: Terminal cross-type fusion (Map+Sink→MapSink, Filter+Sink→FilterSink,
+    ///          FilterMap+Sink→FilterMapSink). Single bottom-up pass after cross-type
+    ///          pairs are resolved.
+    ///
+    /// This ordering ensures map chains fully collapse before sinks absorb them,
+    /// and FilterMapSink is reachable (filter+map fuses before map+sink can).
     pub(crate) fn fuse_linear_chains(&mut self, py: Python) {
-        // Process each downstream
+        loop {
+            if !self.fuse_same_type_pass(py) {
+                break;
+            }
+        }
+        self.fuse_cross_type_nonterminal(py);
+        self.fuse_cross_type_terminal(py);
+    }
+
+    /// Single bottom-up pass: fuse same-type chains and eliminate Source passthroughs.
+    /// Returns true if any fusion occurred (caller should loop until false).
+    fn fuse_same_type_pass(&mut self, py: Python) -> bool {
+        let mut changed = false;
+
         for downstream in &self.downstreams {
             let mut child = downstream.borrow_mut(py);
-            child.fuse_linear_chains(py);
+            if child.fuse_same_type_pass(py) {
+                changed = true;
+            }
         }
 
-        // Try to fuse this node with its single downstream if applicable
         if self.downstreams.len() != 1 {
-            return;
+            return changed;
         }
 
         let child_py = &self.downstreams[0];
         let child = child_py.borrow_mut(py);
 
-        // Check if we can fuse Map -> Map
+        // Map + Map
         if let NodeLogic::Map { func: ref my_func } = self.logic
             && let NodeLogic::Map {
                 func: ref child_func,
@@ -323,10 +354,10 @@ impl Stream {
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
             self.apply_fusion(NodeLogic::Map { func: composed }, child_data);
-            return;
+            return true;
         }
 
-        // Check if we can fuse Filter -> Filter
+        // Filter + Filter
         if let NodeLogic::Filter {
             predicate: ref my_pred,
         } = self.logic
@@ -344,13 +375,10 @@ impl Stream {
                 },
                 child_data,
             );
-            return;
+            return true;
         }
 
-        // Note: Prefetch -> Map and Prefetch -> Filter fusion is done eagerly
-        // in map() and filter() when the parent is a Prefetch node.
-
-        // Check if we can fuse BatchMap -> BatchMap
+        // BatchMap + BatchMap
         if let NodeLogic::BatchMap { func: ref my_func } = self.logic
             && let NodeLogic::BatchMap {
                 func: ref child_func,
@@ -361,11 +389,37 @@ impl Stream {
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
             self.apply_fusion(NodeLogic::BatchMap { func: composed }, child_data);
+            return true;
+        }
+
+        // Source passthrough elimination
+        if matches!(child.logic, NodeLogic::Source) {
+            let new_downstreams: Vec<Py<Self>> =
+                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            drop(child);
+            self.downstreams = new_downstreams;
+            return true;
+        }
+
+        changed
+    }
+
+    /// Single bottom-up pass: fuse non-terminal cross-type pairs.
+    /// Filter+Map → FilterMap, FilterMap+Map → FilterMap (extending).
+    fn fuse_cross_type_nonterminal(&mut self, py: Python) {
+        for downstream in &self.downstreams {
+            let mut child = downstream.borrow_mut(py);
+            child.fuse_cross_type_nonterminal(py);
+        }
+
+        if self.downstreams.len() != 1 {
             return;
         }
 
-        // Check if we can fuse Filter -> Map into FilterMap
-        // This runs AFTER existing fusions so we're fusing already-optimized chains
+        let child_py = &self.downstreams[0];
+        let child = child_py.borrow_mut(py);
+
+        // Filter + Map → FilterMap
         if let NodeLogic::Filter {
             predicate: ref my_pred,
         } = self.logic
@@ -375,22 +429,25 @@ impl Stream {
         {
             let pred = my_pred.clone_ref(py);
             let func = child_func.clone_ref(py);
+            let psc = self.name.split('+').count();
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
             self.apply_fusion(
                 NodeLogic::FilterMap {
                     predicate: pred,
                     func,
+                    pred_segment_count: psc,
                 },
                 child_data,
             );
             return;
         }
 
-        // Check if we can fuse FilterMap -> Map (extend existing FilterMap)
+        // FilterMap + Map → FilterMap (extend the map part)
         if let NodeLogic::FilterMap {
             predicate: ref my_pred,
             func: ref my_func,
+            pred_segment_count,
         } = self.logic
             && let NodeLogic::Map {
                 func: ref child_func,
@@ -399,30 +456,36 @@ impl Stream {
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
             let pred = my_pred.clone_ref(py);
+            let psc = pred_segment_count;
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
             self.apply_fusion(
                 NodeLogic::FilterMap {
                     predicate: pred,
                     func: composed,
+                    pred_segment_count: psc,
                 },
                 child_data,
             );
+        }
+    }
+
+    /// Single bottom-up pass: fuse terminal cross-type pairs (into sinks).
+    /// Map+Sink → MapSink, Filter+Sink → FilterSink, FilterMap+Sink → FilterMapSink.
+    fn fuse_cross_type_terminal(&mut self, py: Python) {
+        for downstream in &self.downstreams {
+            let mut child = downstream.borrow_mut(py);
+            child.fuse_cross_type_terminal(py);
+        }
+
+        if self.downstreams.len() != 1 {
             return;
         }
 
-        // Passthrough elimination: bypass Source nodes (seq() nodes) that only forward
-        // Pattern: any_node -> Source -> downstream => any_node -> downstream
-        // This reduces graph traversal overhead
-        if matches!(child.logic, NodeLogic::Source) {
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            drop(child);
-            self.downstreams = new_downstreams;
-            return;
-        }
+        let child_py = &self.downstreams[0];
+        let child = child_py.borrow_mut(py);
 
-        // Check if we can fuse Map -> Sink into MapSink
+        // Map + Sink → MapSink
         if let NodeLogic::Map { func: ref map_func } = self.logic
             && let NodeLogic::Sink {
                 func: ref sink_func,
@@ -442,7 +505,7 @@ impl Stream {
             return;
         }
 
-        // Check if we can fuse Filter -> Sink into FilterSink
+        // Filter + Sink → FilterSink
         if let NodeLogic::Filter {
             predicate: ref pred,
         } = self.logic
@@ -464,10 +527,11 @@ impl Stream {
             return;
         }
 
-        // Check if we can fuse FilterMap -> Sink into FilterMapSink
+        // FilterMap + Sink → FilterMapSink
         if let NodeLogic::FilterMap {
             predicate: ref pred,
             func: ref map_func,
+            pred_segment_count,
         } = self.logic
             && let NodeLogic::Sink {
                 func: ref sink_func,
@@ -476,6 +540,7 @@ impl Stream {
             let p = pred.clone_ref(py);
             let map_f = map_func.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
+            let psc = pred_segment_count;
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
             self.apply_terminal_fusion(
@@ -483,6 +548,7 @@ impl Stream {
                     predicate: p,
                     map_func: map_f,
                     sink_func: sink_f,
+                    pred_segment_count: psc,
                 },
                 child_data,
             );

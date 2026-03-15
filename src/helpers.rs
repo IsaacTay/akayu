@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
 
+use crate::error::StreamError;
 use crate::{NodeLogic, Stream};
 
 /// Defines a static Python helper reference and its getter function.
@@ -17,9 +18,9 @@ macro_rules! define_py_helper {
         pub(crate) static $static_name: OnceLock<Py<PyAny>> = OnceLock::new();
 
         pub(crate) fn $getter_name() -> PyResult<&'static Py<PyAny>> {
-            $static_name.get().ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("akayu not initialized")
-            })
+            $static_name
+                .get()
+                .ok_or_else(|| StreamError::NotInitialized.into())
         }
     };
 }
@@ -46,12 +47,13 @@ define_py_helper!(
 define_py_helper!(SAFE_UPDATE, get_safe_update);
 define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
 define_py_helper!(ASYNC_STATE_CLASS, get_async_state_class);
+define_py_helper!(CALLER_LOCATION, get_caller_location);
 
 pub(crate) fn extract_stream_name(
     py: Python,
     kwargs: &Option<Py<PyDict>>,
     default_suffix: &str,
-    parent_name: &str,
+    func_name: Option<&str>,
 ) -> PyResult<String> {
     if let Some(k) = kwargs {
         let k_bound = k.bind(py);
@@ -61,25 +63,109 @@ pub(crate) fn extract_stream_name(
             return Ok(name);
         }
     }
-    Ok(format!("{parent_name}.{default_suffix}"))
+    match func_name {
+        Some(name) => Ok(format!("{default_suffix}({name})")),
+        None => Ok(default_suffix.to_string()),
+    }
 }
 
-pub(crate) fn wrap_error<T>(py: Python, res: PyResult<T>, node_name: &str) -> PyResult<T> {
+/// Extract a human-readable name from a Python callable.
+///
+/// Handles: named functions, lambdas (`<lambda>`), builtins (`print`),
+/// methods, and `functools.partial` (extracts the wrapped function's name).
+pub(crate) fn get_func_name(py: Python, func: &Py<PyAny>) -> Option<String> {
+    let bound = func.bind(py);
+    // Try __name__ first (cleanest for most functions)
+    if let Ok(name) = bound.getattr("__name__") {
+        if let Ok(s) = name.extract::<String>() {
+            return Some(s);
+        }
+    }
+    // Fallback: functools.partial — extract from .func attribute
+    if let Ok(inner) = bound.getattr("func") {
+        if let Ok(name) = inner.getattr("__name__") {
+            if let Ok(s) = name.extract::<String>() {
+                return Some(s);
+            }
+        }
+    }
+    // Fallback to __qualname__ (works for some edge cases)
+    if let Ok(name) = bound.getattr("__qualname__") {
+        if let Ok(s) = name.extract::<String>() {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Capture the caller's source location (file:line) from Python.
+pub(crate) fn capture_source_location(py: Python) -> String {
+    let Ok(helper) = get_caller_location() else {
+        return "<unknown>".to_string();
+    };
+    helper
+        .call0(py)
+        .and_then(|r| r.extract::<String>(py))
+        .unwrap_or_else(|_| "<unknown>".to_string())
+}
+
+pub(crate) fn wrap_error<T>(
+    py: Python,
+    res: PyResult<T>,
+    node_name: &str,
+    source_location: &str,
+) -> PyResult<T> {
     res.map_err(|e| {
-        let ctx_msg = format!("Stream operation failed at node '{node_name}'");
+        let ctx_msg = if node_name.contains('+') {
+            narrow_fused_error(py, &e, node_name, source_location)
+        } else {
+            format!("Stream operation failed at node '{node_name}' (defined at {source_location})")
+        };
         let new_err = pyo3::exceptions::PyRuntimeError::new_err(ctx_msg);
         new_err.set_cause(py, Some(e));
         new_err
     })
 }
 
+/// For fused nodes, use the `_akayu_chain_index` attribute set by composed
+/// functions to identify exactly which function in the chain failed.
+/// Returns a narrowed error message on success, or the full fused message as fallback.
+fn narrow_fused_error(
+    py: Python,
+    err: &PyErr,
+    node_name: &str,
+    source_location: &str,
+) -> String {
+    let full_msg =
+        format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
+
+    // Check for _akayu_chain_index on the exception
+    let Ok(idx_attr) = err.value(py).getattr("_akayu_chain_index") else {
+        return full_msg;
+    };
+    let Ok(idx) = idx_attr.extract::<usize>() else {
+        return full_msg;
+    };
+
+    let name_segments: Vec<&str> = node_name.split('+').collect();
+    let loc_segments: Vec<&str> = source_location.split(", ").collect();
+
+    if let Some(segment) = name_segments.get(idx) {
+        let loc = loc_segments.get(idx).unwrap_or(&source_location);
+        format!(
+            "Stream operation failed in {segment} \
+             [fused node: {node_name}] (defined at {loc})"
+        )
+    } else {
+        full_msg
+    }
+}
+
 /// Check that a stream has not been compiled/frozen.
 /// Returns an error if the stream is frozen (compiled).
 pub(crate) fn check_not_compiled(compiled: bool, name: &str) -> PyResult<()> {
     if compiled {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
-            "Cannot modify frozen stream '{name}'. Call compile() only after building the complete graph."
-        )));
+        return Err(StreamError::FrozenStream(name.to_string()).into());
     }
     Ok(())
 }
@@ -118,6 +204,7 @@ pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
 #[pyfunction]
 #[pyo3(signature = (path, interval=None))]
 pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<Py<Stream>> {
+    let source_location = capture_source_location(py);
     let stream = Py::new(
         py,
         Stream {
@@ -130,6 +217,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             frozen: false,
             needs_lock: false,
             compiled: false,
+            source_location,
         },
     )?;
     let stream_clone = stream.clone_ref(py);
@@ -217,6 +305,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
     let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
     let _ = ASYNC_STATE_CLASS.set(async_state_class.unbind());
+
+    let caller_location = helpers_module.getattr("_get_caller_location")?;
+    let _ = CALLER_LOCATION.set(caller_location.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;

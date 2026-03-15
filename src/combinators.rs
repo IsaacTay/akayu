@@ -4,7 +4,8 @@ use pyo3::prelude::*;
 use std::collections::VecDeque;
 
 use crate::Stream;
-use crate::helpers::check_not_compiled;
+use crate::error::StreamError;
+use crate::helpers::{capture_source_location, check_not_compiled};
 use crate::node::NodeLogic;
 
 // Stream methods for combinators
@@ -35,18 +36,20 @@ impl Stream {
     #[pyo3(name = "par")]
     pub fn par(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Parallel,
                 downstreams: Vec::new(),
-                name: format!("{}.par", self.name),
+                name: "par".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -77,18 +80,20 @@ impl Stream {
     ///     >>> merged.map(f2).sink(...)
     pub fn seq(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Source,
                 downstreams: Vec::new(),
-                name: format!("{}.seq", self.name),
+                name: "seq".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -115,18 +120,20 @@ impl Stream {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
+        let source_location = capture_source_location(py);
         let node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Source,
                 downstreams: Vec::new(),
-                name: format!("{}.union", self.name),
+                name: "union".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location,
             },
         )?;
 
@@ -170,6 +177,7 @@ impl Stream {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
+        let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
 
         // Helper to find stream index. Returns Some(0) if stream is self (can't borrow),
@@ -222,26 +230,27 @@ impl Stream {
                     emit_on_indices,
                 },
                 downstreams: Vec::new(),
-                name: format!("{}.combine_latest", self.name),
+                name: "combine_latest".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location: source_location.clone(),
             },
         )?;
 
-        self.add_tag_node(py, 0, &node)?;
+        self.add_tag_node(py, 0, &node, &source_location)?;
         for (i, other) in others.iter().enumerate() {
             // Use try_borrow_mut to handle case where other is self (already borrowed)
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node)?;
+                    other_ref.add_tag_node(py, i + 1, &node, &source_location)?;
                 }
                 Err(_) => {
                     // Already borrowed - means it's self, use self directly
-                    self.add_tag_node(py, i + 1, &node)?;
+                    self.add_tag_node(py, i + 1, &node, &source_location)?;
                 }
             }
         }
@@ -268,6 +277,7 @@ impl Stream {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
+        let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
         let node = Py::new(
             py,
@@ -276,26 +286,27 @@ impl Stream {
                     buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
                 },
                 downstreams: Vec::new(),
-                name: format!("{}.zip", self.name),
+                name: "zip".to_string(),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // No user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location: source_location.clone(),
             },
         )?;
 
-        self.add_tag_node(py, 0, &node)?;
+        self.add_tag_node(py, 0, &node, &source_location)?;
         for (i, other) in others.iter().enumerate() {
             // Use try_borrow_mut to handle case where other is self (already borrowed)
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node)?;
+                    other_ref.add_tag_node(py, i + 1, &node, &source_location)?;
                 }
                 Err(_) => {
                     // Already borrowed - means it's self, use self directly
-                    self.add_tag_node(py, i + 1, &node)?;
+                    self.add_tag_node(py, i + 1, &node, &source_location)?;
                 }
             }
         }
@@ -311,19 +322,21 @@ impl Stream {
         py: Python,
         index: usize,
         target: &Py<Self>,
+        source_location: &str,
     ) -> PyResult<()> {
         let tag_node = Py::new(
             py,
             Self {
                 logic: NodeLogic::Tag { index },
                 downstreams: vec![target.clone_ref(py)],
-                name: format!("{}.tag({})", self.name, index),
+                name: format!("tag({})", index),
                 asynchronous: self.asynchronous,
                 skip_async_check: self.skip_async_check,
                 func_is_sync: true, // Tag has no user function
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
+                source_location: source_location.to_string(),
             },
         )?;
         self.downstreams.push(tag_node);
@@ -352,9 +365,7 @@ impl Stream {
 #[pyo3(signature = (*streams))]
 pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "union requires at least one stream",
-        ));
+        return Err(StreamError::UnionEmpty.into());
     }
 
     // Check if any of the streams are frozen
@@ -363,6 +374,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
 
+    let source_location = capture_source_location(py);
     let node = Py::new(
         py,
         Stream {
@@ -375,6 +387,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             frozen: false,
             needs_lock: false,
             compiled: false,
+            source_location,
         },
     )?;
 
@@ -413,9 +426,7 @@ pub fn combine_latest(
     emit_on: Option<Py<PyAny>>,
 ) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "combine_latest requires at least one stream",
-        ));
+        return Err(StreamError::CombineLatestEmpty.into());
     }
 
     // Check if any of the streams are frozen
@@ -423,6 +434,8 @@ pub fn combine_latest(
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
+
+    let source_location = capture_source_location(py);
 
     // Resolve emit_on to indices within the streams vector
     let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
@@ -474,12 +487,13 @@ pub fn combine_latest(
             frozen: false,
             needs_lock: false,
             compiled: false,
+            source_location: source_location.clone(),
         },
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
         let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node)?;
+        stream_ref.add_tag_node(py, i, &node, &source_location)?;
     }
 
     Ok(node)
@@ -500,9 +514,7 @@ pub fn combine_latest(
 #[pyo3(signature = (*streams))]
 pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.len() < 2 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "zip requires at least two streams",
-        ));
+        return Err(StreamError::ZipTooFew.into());
     }
 
     // Check if any of the streams are frozen
@@ -511,6 +523,7 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
     }
 
+    let source_location = capture_source_location(py);
     let total_sources = streams.len();
     let node = Py::new(
         py,
@@ -526,12 +539,13 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             frozen: false,
             needs_lock: false,
             compiled: false,
+            source_location: source_location.clone(),
         },
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
         let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node)?;
+        stream_ref.add_tag_node(py, i, &node, &source_location)?;
     }
 
     Ok(node)
