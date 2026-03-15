@@ -4,6 +4,7 @@ use pyo3::prelude::*;
 use std::collections::VecDeque;
 
 /// Defines the type of operation a stream node performs.
+#[derive(strum::Display)]
 pub enum NodeLogic {
     Source,
     Map {
@@ -72,6 +73,10 @@ pub enum NodeLogic {
     FilterMap {
         predicate: Py<PyAny>,
         func: Py<PyAny>,
+        /// Number of predicate segments in the fused node name, used to offset
+        /// `_akayu_chain_index` from composed map functions so narrowing points
+        /// to the correct segment.
+        pred_segment_count: usize,
     },
     /// Fused map + sink: sink(func(x))
     /// Eliminates propagation overhead for terminal map->sink chains
@@ -91,6 +96,10 @@ pub enum NodeLogic {
         predicate: Py<PyAny>,
         map_func: Py<PyAny>,
         sink_func: Py<PyAny>,
+        /// Number of predicate segments in the fused node name, used to offset
+        /// `_akayu_chain_index` from composed map functions so narrowing points
+        /// to the correct segment.
+        pred_segment_count: usize,
     },
     /// Async map: non-blocking emit with buffered results for async functions
     /// When asynchronous=True is set on a map, coroutines are submitted to a background

@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 
 // Module declarations
 mod combinators;
+mod error;
 mod execution;
 mod helpers;
 mod node;
@@ -56,6 +57,8 @@ pub struct Stream {
     pub(crate) needs_lock: bool,
     /// True if compile() was explicitly called (prevents modifications)
     pub(crate) compiled: bool,
+    /// Source location where this node was created (e.g., "pipeline.py:42")
+    pub(crate) source_location: String,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

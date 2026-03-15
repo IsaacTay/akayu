@@ -1,5 +1,12 @@
+import functools
+
 import pytest
 import akayu
+
+
+# ---------------------------------------------------------------------------
+# wrap_error: node name + cause chaining
+# ---------------------------------------------------------------------------
 
 
 def test_error_propagation():
@@ -50,3 +57,775 @@ def test_error_in_filter():
     with pytest.raises(RuntimeError) as exc:
         s.emit(1)
     assert "bad_filter" in str(exc.value)
+
+
+def test_error_in_sink():
+    """Test error propagation from a sink function."""
+    s = akayu.Stream()
+
+    def bad_sink(x):
+        raise TypeError("sink exploded")
+
+    s.sink(bad_sink, stream_name="boom_sink")
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    assert "boom_sink" in str(exc.value)
+    assert isinstance(exc.value.__cause__, TypeError)
+    assert "sink exploded" in str(exc.value.__cause__)
+
+
+def test_error_in_accumulate():
+    """Test error propagation from an accumulate function."""
+    s = akayu.Stream()
+
+    def bad_acc(state, x):
+        raise ValueError("acc failed")
+
+    s.accumulate(bad_acc, start=0).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    assert "accumulate" in str(exc.value)
+    assert isinstance(exc.value.__cause__, ValueError)
+
+
+def test_error_in_batch_map():
+    """Test error propagation from a batch_map function."""
+    s = akayu.Stream(asynchronous=False)
+
+    def bad_batch(items):
+        raise RuntimeError("batch kaboom")
+
+    s.batch_map(bad_batch, stream_name="bad_batch").sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit_batch([1, 2])
+    assert "bad_batch" in str(exc.value)
+    assert isinstance(exc.value.__cause__, RuntimeError)
+    assert "batch kaboom" in str(exc.value.__cause__)
+
+
+# ---------------------------------------------------------------------------
+# Source location appears in error messages
+# ---------------------------------------------------------------------------
+
+
+def test_error_includes_source_location():
+    """wrap_error messages include 'defined at <file>:<line>'."""
+    s = akayu.Stream()
+
+    def kaboom(x):
+        raise ValueError("boom")
+
+    s.map(kaboom, stream_name="loc_node").sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "defined at" in msg
+    # The location should reference this test file
+    assert "test_errors.py" in msg
+
+
+# ---------------------------------------------------------------------------
+# Auto-generated node names include function name
+# ---------------------------------------------------------------------------
+
+
+def test_auto_node_name_from_function():
+    """When no stream_name is given, the node name includes the function name."""
+    s = akayu.Stream()
+
+    def my_transform(x):
+        raise ValueError("fail")
+
+    # No explicit stream_name — node should be auto-named "map(my_transform)"
+    s.map(my_transform).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    assert "my_transform" in str(exc.value)
+
+
+def test_auto_node_name_lambda():
+    """Lambda functions get '<lambda>' in the auto-generated node name."""
+    s = akayu.Stream()
+    s.map(lambda x: 1 / 0).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    assert "<lambda>" in str(exc.value)
+
+
+def test_auto_node_name_partial():
+    """functools.partial extracts the wrapped function's name."""
+    s = akayu.Stream()
+
+    def multiply(x, factor):
+        return x * factor
+
+    p = functools.partial(multiply, factor=0)
+
+    # Force an error downstream so we can inspect the node name
+    def explode(x):
+        raise ValueError("boom")
+
+    s.map(p).map(explode).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    # The first map node should have "multiply" in its name via partial extraction
+    # but the error comes from the second map — verify partial didn't break naming
+    assert "explode" in str(exc.value)
+
+
+def test_auto_node_name_partial_itself_fails():
+    """functools.partial that raises — node name includes the wrapped function name."""
+    s = akayu.Stream()
+
+    def bad_func(x, extra):
+        raise ValueError("partial fail")
+
+    p = functools.partial(bad_func, extra=42)
+    s.map(p).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    # get_func_name extracts "bad_func" from the partial's .func.__name__
+    assert "bad_func" in str(exc.value)
+
+
+def test_auto_node_name_builtin():
+    """Builtin functions (e.g. str) get their name in the node."""
+    s = akayu.Stream()
+    # str() won't fail, so chain with a failing sink
+    def fail_sink(x):
+        raise ValueError("sink fail")
+
+    m = s.map(str)
+    m.sink(fail_sink)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    # The error comes from the sink node, which should show "fail_sink"
+    assert "fail_sink" in str(exc.value)
+
+
+def test_auto_node_name_callable_class():
+    """Callable instances without __name__ fall back to the bare operation name."""
+    s = akayu.Stream()
+
+    class MyCallable:
+        def __call__(self, x):
+            raise ValueError("callable fail")
+
+    s.map(MyCallable()).sink(lambda x: None)
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Instances don't have __name__/__qualname__, so node name is just "map"
+    assert "node 'map'" in msg
+    assert isinstance(exc.value.__cause__, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# StreamError::EmitOnNonSource
+# ---------------------------------------------------------------------------
+
+
+def test_emit_on_non_source():
+    """emit() on a derived (non-source) node raises RuntimeError."""
+    s = akayu.Stream()
+    derived = s.map(lambda x: x)
+
+    with pytest.raises(RuntimeError, match="non-source node"):
+        derived.emit(1)
+
+
+def test_emit_batch_on_non_source():
+    """emit_batch() on a derived (non-source) node raises RuntimeError."""
+    s = akayu.Stream()
+    derived = s.map(lambda x: x)
+
+    with pytest.raises(RuntimeError, match="non-source node"):
+        derived.emit_batch([1, 2])
+
+
+# ---------------------------------------------------------------------------
+# StreamError::FrozenStream — modify after compile()
+# ---------------------------------------------------------------------------
+
+
+def test_frozen_stream_map():
+    """Adding a map after compile() raises RuntimeError."""
+    s = akayu.Stream()
+    s.sink(lambda x: None)
+    s.compile()
+
+    with pytest.raises(RuntimeError, match="frozen stream"):
+        s.map(lambda x: x)
+
+
+def test_frozen_stream_filter():
+    """Adding a filter after compile() raises RuntimeError."""
+    s = akayu.Stream()
+    s.sink(lambda x: None)
+    s.compile()
+
+    with pytest.raises(RuntimeError, match="frozen stream"):
+        s.filter(lambda x: True)
+
+
+def test_frozen_stream_sink():
+    """Adding a sink after compile() raises RuntimeError."""
+    s = akayu.Stream()
+    s.sink(lambda x: None)
+    s.compile()
+
+    with pytest.raises(RuntimeError, match="frozen stream"):
+        s.sink(lambda x: None)
+
+
+# ---------------------------------------------------------------------------
+# StreamError::AlreadyCompiled — double compile()
+# ---------------------------------------------------------------------------
+
+
+def test_already_compiled():
+    """Calling compile() twice raises RuntimeError."""
+    s = akayu.Stream()
+    s.sink(lambda x: None)
+    s.compile()
+
+    with pytest.raises(RuntimeError, match="already compiled"):
+        s.compile()
+
+
+# ---------------------------------------------------------------------------
+# StreamError::InvalidPrefetchSize
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_prefetch_size():
+    """prefetch(0) raises ValueError."""
+    s = akayu.Stream()
+
+    with pytest.raises(ValueError, match="prefetch size must be at least 1"):
+        s.prefetch(0)
+
+
+# ---------------------------------------------------------------------------
+# StreamError::UnionEmpty
+# ---------------------------------------------------------------------------
+
+
+def test_union_empty():
+    """akayu.union() with no streams raises ValueError."""
+    with pytest.raises(ValueError, match="at least one stream"):
+        akayu.union()
+
+
+# ---------------------------------------------------------------------------
+# StreamError::CombineLatestEmpty
+# ---------------------------------------------------------------------------
+
+
+def test_combine_latest_empty():
+    """akayu.combine_latest() with no streams raises ValueError."""
+    with pytest.raises(ValueError, match="at least one stream"):
+        akayu.combine_latest()
+
+
+# ---------------------------------------------------------------------------
+# StreamError::ZipTooFew
+# ---------------------------------------------------------------------------
+
+
+def test_zip_too_few():
+    """akayu.zip() with fewer than two streams raises ValueError."""
+    s = akayu.Stream()
+    with pytest.raises(ValueError, match="at least two streams"):
+        akayu.zip(s)
+
+
+# ---------------------------------------------------------------------------
+# Fused node errors (compile() fuses chains — errors show combined names)
+# ---------------------------------------------------------------------------
+
+
+def test_fused_map_map_error():
+    """After compile(), fused map+map shows both names in error."""
+    s = akayu.Stream()
+
+    def step_one(x):
+        return x + 1
+
+    def step_two(x):
+        raise ValueError("step two failed")
+
+    # No sink — so map+map fuses instead of map+sink
+    s.map(step_one).map(step_two)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Fused name is "map(step_one)+map(step_two)"
+    assert "step_one" in msg
+    assert "step_two" in msg
+
+
+def test_fused_map_map_source_location():
+    """Fused node error narrows source location to the specific failing function."""
+    s = akayu.Stream()
+
+    def first(x):
+        return x
+
+    def second(x):
+        raise ValueError("fail")
+
+    # No sink — ensures map+map fusion happens
+    s.map(first).map(second)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "defined at" in msg
+    # Narrowed to the specific failing function's location
+    assert "test_errors.py" in msg
+    # Shows which function failed and the full fused node context
+    assert "in map(second)" in msg
+    assert "fused node:" in msg
+
+
+def test_fused_filter_map_error():
+    """After compile(), fused filter+map (FilterMap) shows combined names."""
+    s = akayu.Stream()
+
+    def keep_all(x):
+        return True
+
+    def bad_transform(x):
+        raise ValueError("transform fail")
+
+    # No sink — so filter+map fuses into FilterMap instead of map+sink
+    s.filter(keep_all).map(bad_transform)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "keep_all" in msg
+    assert "bad_transform" in msg
+
+
+def test_fused_filter_map_predicate_error():
+    """FilterMap: error in the predicate part shows the fused node name."""
+    s = akayu.Stream()
+
+    def bad_pred(x):
+        raise ValueError("pred fail")
+
+    def good_map(x):
+        return x
+
+    # No sink — filter+map fuses into FilterMap
+    s.filter(bad_pred).map(good_map)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "bad_pred" in msg
+    assert "good_map" in msg
+
+
+def test_fused_map_sink_error():
+    """After compile(), fused map+sink (MapSink) shows combined names."""
+    s = akayu.Stream()
+
+    def transform(x):
+        return x * 2
+
+    def bad_sink(x):
+        raise ValueError("sink fail")
+
+    s.map(transform).sink(bad_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "transform" in msg
+    assert "bad_sink" in msg
+
+
+def test_fused_map_sink_map_error():
+    """MapSink: error in the map part shows the fused node name."""
+    s = akayu.Stream()
+
+    def bad_transform(x):
+        raise ValueError("map fail")
+
+    def good_sink(x):
+        pass
+
+    s.map(bad_transform).sink(good_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "bad_transform" in msg
+    assert "good_sink" in msg
+
+
+def test_fused_filter_sink_error():
+    """After compile(), fused filter+sink (FilterSink) shows combined names."""
+    s = akayu.Stream()
+
+    def keep_all(x):
+        return True
+
+    def bad_sink(x):
+        raise ValueError("sink fail")
+
+    s.filter(keep_all).sink(bad_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "keep_all" in msg
+    assert "bad_sink" in msg
+
+
+def test_fused_filter_sink_predicate_error():
+    """FilterSink: error in the predicate part shows the fused node name."""
+    s = akayu.Stream()
+
+    def bad_pred(x):
+        raise ValueError("pred fail")
+
+    def good_sink(x):
+        pass
+
+    s.filter(bad_pred).sink(good_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "bad_pred" in msg
+    assert "good_sink" in msg
+
+
+def test_fused_long_map_chain():
+    """A chain of many maps fuses into one node; error narrows to failing func."""
+    s = akayu.Stream()
+
+    def add_one(x):
+        return x + 1
+
+    def double(x):
+        return x * 2
+
+    def negate(x):
+        return -x
+
+    def to_str(x):
+        return str(x)
+
+    def explode(x):
+        raise ValueError("chain end")
+
+    # 5 maps, no sink — all should fuse into one Map node
+    s.map(add_one).map(double).map(negate).map(to_str).map(explode)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Narrowed to the specific failing function
+    assert "in map(explode)" in msg
+    # Full fused context still visible
+    assert "fused node:" in msg
+    for name in ("add_one", "double", "negate", "to_str", "explode"):
+        assert name in msg, f"expected '{name}' in fused error: {msg}"
+
+
+def test_fused_long_map_chain_with_sink():
+    """Long map chain + sink: error narrows to the mid-chain failing function."""
+    s = akayu.Stream()
+
+    def step_a(x):
+        return x + 1
+
+    def step_b(x):
+        return x * 2
+
+    def step_c(x):
+        raise ValueError("mid-chain fail")
+
+    def step_d(x):
+        return x
+
+    def my_sink(x):
+        pass
+
+    # Two-phase fusion: all maps collapse first, then fuse with sink
+    # Result: single MapSink(step_a+step_b+step_c+step_d+my_sink)
+    s.map(step_a).map(step_b).map(step_c).map(step_d).sink(my_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Narrowed to step_c (the function that raises)
+    assert "in map(step_c)" in msg
+    assert "fused node:" in msg
+    # Full context preserved
+    for name in ("step_a", "step_b", "step_c", "step_d", "my_sink"):
+        assert name in msg, f"expected '{name}' in fused error: {msg}"
+
+
+def test_fused_filter_map_sink():
+    """filter -> map -> sink fully collapses into FilterMapSink."""
+    s = akayu.Stream()
+
+    def keep_all(x):
+        return True
+
+    def transform(x):
+        return x * 2
+
+    def bad_sink(x):
+        raise ValueError("sink fail")
+
+    s.filter(keep_all).map(transform).sink(bad_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "keep_all" in msg
+    assert "transform" in msg
+    assert "bad_sink" in msg
+
+
+def test_fused_filter_map_chain_sink():
+    """filter -> map -> map -> sink collapses to FilterMapSink."""
+    s = akayu.Stream()
+
+    def is_even(x):
+        return x % 2 == 0
+
+    def double(x):
+        return x * 2
+
+    def add_one(x):
+        return x + 1
+
+    def bad_sink(x):
+        raise ValueError("end")
+
+    s.filter(is_even).map(double).map(add_one).sink(bad_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(2)
+    msg = str(exc.value)
+    for name in ("is_even", "double", "add_one", "bad_sink"):
+        assert name in msg, f"expected '{name}' in fused error: {msg}"
+
+
+# ---------------------------------------------------------------------------
+# Fused error narrowing edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_narrowing_duplicate_names():
+    """With _akayu_chain_index, duplicate names are narrowed correctly by index."""
+    s = akayu.Stream()
+
+    def process(x):
+        return x + 1
+
+    process1 = process
+
+    def process(x):
+        raise ValueError("second")
+
+    process2 = process
+
+    s.map(process1).map(process2)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Index-based narrowing works even with duplicate names
+    assert "in map(process)" in msg
+    assert "fused node:" in msg
+    assert "map(process)+map(process)" in msg
+
+
+def test_narrowing_multiple_lambdas():
+    """With _akayu_chain_index, multiple lambdas are narrowed correctly by index."""
+    s = akayu.Stream()
+    s.map(lambda x: x + 1).map(lambda x: 1 / 0)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Index-based narrowing works even with identical lambda names
+    assert "in map(<lambda>)" in msg
+    assert "fused node:" in msg
+    assert "map(<lambda>)+map(<lambda>)" in msg
+
+
+def test_narrowing_nested_call():
+    """When the user func calls a helper that raises, narrowing finds the user func."""
+    s = akayu.Stream()
+
+    def helper():
+        raise ValueError("inner fail")
+
+    def outer(x):
+        helper()
+        return x
+
+    s.map(lambda x: x).map(outer)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # _akayu_chain_index identifies the composed function that threw
+    assert "in map(outer)" in msg
+    assert "fused node:" in msg
+
+
+def test_narrowing_with_extra_args():
+    """Cross-type fusion (MapSink) without composed chains shows full node name."""
+    s = akayu.Stream()
+
+    def add_n(x, n):
+        raise ValueError("wrapped fail")
+
+    s.map(add_n, 5).sink(lambda x: None)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # MapSink is a cross-type fusion — no _akayu_chain_index tagging
+    # Falls back to full fused node message
+    assert "map(add_n)" in msg
+    assert "sink(<lambda>)" in msg
+
+
+def test_narrowing_filtermap_to_correct_map():
+    """FilterMap with composed maps narrows to the correct map, not the predicate."""
+    s = akayu.Stream()
+
+    def keep_all(x):
+        return True
+
+    def step_a(x):
+        return x + 1
+
+    def step_b(x):
+        raise ValueError("step_b failed")
+
+    s.filter(keep_all).map(step_a).map(step_b)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Must narrow to step_b (index 1 in map chain), not keep_all (index 0 overall)
+    assert "in map(step_b)" in msg
+    assert "fused node:" in msg
+
+
+def test_narrowing_filtermap_composed_filters_and_maps():
+    """Composed filters + composed maps: both sides narrow correctly."""
+    s = akayu.Stream()
+
+    def pred_ok(x):
+        return True
+
+    def pred_also_ok(x):
+        return True
+
+    def map_a(x):
+        return x + 1
+
+    def map_b(x):
+        raise ValueError("map_b failed")
+
+    s.filter(pred_ok).filter(pred_also_ok).map(map_a).map(map_b)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Offset of 2 (two filter segments) + map chain index 1 = segment 3 = map(map_b)
+    assert "in map(map_b)" in msg
+    assert "fused node:" in msg
+
+
+def test_narrowing_filtermap_predicate_still_works():
+    """Composed filters in FilterMap still narrow to the correct predicate."""
+    s = akayu.Stream()
+
+    def pred_ok(x):
+        return True
+
+    def pred_bad(x):
+        raise ValueError("pred failed")
+
+    def transform(x):
+        return x * 2
+
+    s.filter(pred_ok).filter(pred_bad).map(transform)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    # Predicate chain index 1 → segment 1 = filter(pred_bad) — no offset needed
+    assert "in filter(pred_bad)" in msg
+    assert "fused node:" in msg
+
+
+def test_narrowing_filtermapsink_to_correct_map():
+    """FilterMapSink with composed maps narrows to the correct map."""
+    s = akayu.Stream()
+
+    def keep_all(x):
+        return True
+
+    def step_a(x):
+        return x + 1
+
+    def step_b(x):
+        raise ValueError("step_b failed")
+
+    def my_sink(x):
+        pass
+
+    s.filter(keep_all).map(step_a).map(step_b).sink(my_sink)
+    s.compile()
+
+    with pytest.raises(RuntimeError) as exc:
+        s.emit(1)
+    msg = str(exc.value)
+    assert "in map(step_b)" in msg
+    assert "fused node:" in msg
