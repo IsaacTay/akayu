@@ -8,7 +8,7 @@ use crate::helpers::{
     capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
     get_build_map_func, get_build_starmap_func, get_func_name, get_gather, get_is_sync_callable,
     get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
-    wrap_error,
+    get_profiler_class, wrap_error,
 };
 use crate::node::NodeLogic;
 use crate::Stream;
@@ -693,9 +693,20 @@ impl Stream {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
 
+        // Track wall time if profiling
+        let profiling = crate::profiling::is_profiling();
+        if profiling {
+            crate::profiling::begin_emit();
+        }
+
         // Emit bypasses this node's logic and propagates directly to downstreams
         // (matching streamz behavior)
-        self.propagate(py, x)
+        let result = self.propagate(py, x);
+
+        if profiling {
+            crate::profiling::end_emit();
+        }
+        result
     }
 
     /// Emit multiple values into the stream as a batch.
@@ -716,9 +727,20 @@ impl Stream {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
 
+        // Track wall time if profiling
+        let profiling = crate::profiling::is_profiling();
+        if profiling {
+            crate::profiling::begin_emit();
+        }
+
         // Emit bypasses this node's logic and propagates directly to downstreams
         // (matching streamz behavior)
-        self.propagate_batch(py, items)
+        let result = self.propagate_batch(py, items);
+
+        if profiling {
+            crate::profiling::end_emit();
+        }
+        result
     }
 
     /// Freeze and optimize the stream graph.
@@ -762,5 +784,88 @@ impl Stream {
 
         drop(this);
         Ok(slf.clone().unbind())
+    }
+
+    /// Start collecting profiling data for subsequent emit() calls.
+    ///
+    /// Call `stop_profiling()` to end the session and retrieve the report.
+    /// Profiling adds minimal overhead (~80ns per node per item).
+    ///
+    /// Raises:
+    ///     RuntimeError: If called on a non-source node or if profiling is already active.
+    pub fn start_profiling(&self) -> PyResult<()> {
+        if !matches!(self.logic, NodeLogic::Source) {
+            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+        }
+        crate::profiling::start_session()
+    }
+
+    /// Stop profiling and return the collected report.
+    ///
+    /// Returns:
+    ///     A `ProfileReport` with per-node timing and item flow data.
+    pub fn stop_profiling(&self, py: Python) -> PyResult<Py<crate::profiling::ProfileReport>> {
+        let (data, wall_time, emit_count) = crate::profiling::stop_session();
+        crate::profiling::build_report(py, self, data, wall_time, emit_count)
+    }
+
+    /// Return a `Profiler` context manager for this source.
+    ///
+    /// Usage:
+    ///     >>> with source.profile() as p:
+    ///     ...     source.emit(42)
+    ///     >>> print(p.report)
+    pub fn profile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyAny>> {
+        {
+            let this = slf.borrow();
+            if !matches!(this.logic, NodeLogic::Source) {
+                return Err(StreamError::EmitOnNonSource(this.name.clone()).into());
+            }
+        }
+        let profiler_class = get_profiler_class()?;
+        profiler_class.call1(py, (slf,))
+    }
+
+    /// Emit a single value and return a profiling report.
+    ///
+    /// Convenience method combining start_profiling + emit + stop_profiling.
+    ///
+    /// Args:
+    ///     x: The value to emit.
+    ///
+    /// Returns:
+    ///     A `ProfileReport` for this single emit.
+    pub fn emit_profiled(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Py<crate::profiling::ProfileReport>> {
+        if !matches!(self.logic, NodeLogic::Source) {
+            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+        }
+        crate::profiling::start_session()?;
+        crate::profiling::begin_emit();
+        let result = self.propagate(py, x);
+        crate::profiling::end_emit();
+        let (data, wall_time, emit_count) = crate::profiling::stop_session();
+        // Propagate error after stopping profiling
+        result?;
+        crate::profiling::build_report(py, self, data, wall_time, emit_count)
+    }
+
+    /// Emit a batch of values and return a profiling report.
+    ///
+    /// Args:
+    ///     items: List of values to emit.
+    ///
+    /// Returns:
+    ///     A `ProfileReport` for this batch emit.
+    pub fn emit_batch_profiled(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Py<crate::profiling::ProfileReport>> {
+        if !matches!(self.logic, NodeLogic::Source) {
+            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+        }
+        crate::profiling::start_session()?;
+        crate::profiling::begin_emit();
+        let result = self.propagate_batch(py, items);
+        crate::profiling::end_emit();
+        let (data, wall_time, emit_count) = crate::profiling::stop_session();
+        result?;
+        crate::profiling::build_report(py, self, data, wall_time, emit_count)
     }
 }

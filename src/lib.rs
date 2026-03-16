@@ -21,6 +21,7 @@ mod helpers;
 mod node;
 mod operations;
 mod optimization;
+mod profiling;
 
 // Re-exports
 pub use combinators::{combine_latest, union, zip};
@@ -66,6 +67,7 @@ const HELPERS: &str = include_str!("akayu.py");
 #[pymodule]
 fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
+    m.add_class::<profiling::ProfileReport>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(from_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(union, m)?)?;

@@ -514,6 +514,28 @@ def _safe_update_batch(node, items):
     with lock:
         return node.update_batch(items)
 
+class _Profiler:
+    """Context manager for profiling a pipeline.
+
+    Usage:
+        with source.profile() as p:
+            source.emit(42)
+        print(p.report)
+    """
+
+    def __init__(self, source):
+        self._source = source
+        self.report = None
+
+    def __enter__(self):
+        self._source.start_profiling()
+        return self
+
+    def __exit__(self, *exc):
+        self.report = self._source.stop_profiling()
+        return False
+
+
 class _PrefetchState:
     """State manager for prefetch map operations.
 

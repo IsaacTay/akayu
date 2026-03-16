@@ -48,6 +48,7 @@ define_py_helper!(SAFE_UPDATE, get_safe_update);
 define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
 define_py_helper!(ASYNC_STATE_CLASS, get_async_state_class);
 define_py_helper!(CALLER_LOCATION, get_caller_location);
+define_py_helper!(PROFILER_CLASS, get_profiler_class);
 
 pub(crate) fn extract_stream_name(
     py: Python,
@@ -420,6 +421,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let caller_location = helpers_module.getattr("_get_caller_location")?;
     let _ = CALLER_LOCATION.set(caller_location.unbind());
+
+    let profiler_class = helpers_module.getattr("_Profiler")?;
+    let _ = PROFILER_CLASS.set(profiler_class.unbind());
 
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
