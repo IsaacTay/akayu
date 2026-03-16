@@ -136,12 +136,17 @@ impl Stream {
 
             // -- Fused transforms --
             NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
+                let last_idx = self.name.matches('+').count();
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
+                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
+                    if let Err(ref e) = pred_result {
+                        tag_chain_index(py, e, 0, 0);
+                    }
+                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
                         let func_result = func.call1(py, (x,));
                         if let Err(ref e) = func_result {
-                            offset_chain_index(py, e, *pred_segment_count);
+                            tag_chain_index(py, e, *pred_segment_count, last_idx);
                         }
                         let mapped = wrap_error(py, func_result, &self.name, &self.source_location)?;
                         output_batch.push(mapped);
@@ -160,9 +165,18 @@ impl Stream {
                 map_func,
                 sink_func,
             } => {
+                let last_idx = self.name.matches('+').count();
                 for x in items {
-                    let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name, &self.source_location)?;
-                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
+                    let map_result = map_func.call1(py, (x,));
+                    if let Err(ref e) = map_result {
+                        tag_chain_index(py, e, 0, 0);
+                    }
+                    let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
+                    let sink_result = sink_func.call1(py, (mapped,));
+                    if let Err(ref e) = sink_result {
+                        tag_chain_index(py, e, 0, last_idx);
+                    }
+                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
                 }
                 return Ok(None);
             }
@@ -170,10 +184,19 @@ impl Stream {
                 predicate,
                 sink_func,
             } => {
+                let last_idx = self.name.matches('+').count();
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
+                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
+                    if let Err(ref e) = pred_result {
+                        tag_chain_index(py, e, 0, 0);
+                    }
+                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
-                        wrap_error(py, sink_func.call1(py, (x,)), &self.name, &self.source_location)?;
+                        let sink_result = sink_func.call1(py, (x,));
+                        if let Err(ref e) = sink_result {
+                            tag_chain_index(py, e, 0, last_idx);
+                        }
+                        wrap_error(py, sink_result, &self.name, &self.source_location)?;
                     }
                 }
                 return Ok(None);
@@ -184,15 +207,24 @@ impl Stream {
                 sink_func,
                 pred_segment_count,
             } => {
+                let last_idx = self.name.matches('+').count();
                 for x in items {
-                    let res = wrap_error(py, predicate.call1(py, (x.clone_ref(py),)), &self.name, &self.source_location)?;
+                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
+                    if let Err(ref e) = pred_result {
+                        tag_chain_index(py, e, 0, 0);
+                    }
+                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                     if res.is_truthy(py)? {
                         let map_result = map_func.call1(py, (x,));
                         if let Err(ref e) = map_result {
-                            offset_chain_index(py, e, *pred_segment_count);
+                            tag_chain_index(py, e, *pred_segment_count, *pred_segment_count);
                         }
                         let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                        wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
+                        let sink_result = sink_func.call1(py, (mapped,));
+                        if let Err(ref e) = sink_result {
+                            tag_chain_index(py, e, 0, last_idx);
+                        }
+                        wrap_error(py, sink_result, &self.name, &self.source_location)?;
                     }
                 }
                 return Ok(None);
@@ -423,13 +455,17 @@ impl Stream {
             }
             NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
                 // Fused filter + map: only call func if predicate passes
-                // This skips the map call entirely for filtered items
+                let last_idx = self.name.matches('+').count();
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
+                let pred_result = predicate.call1(py, (x_clone,));
+                if let Err(ref e) = pred_result {
+                    tag_chain_index(py, e, 0, 0);
+                }
+                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
                     let func_result = func.call1(py, (x,));
                     if let Err(ref e) = func_result {
-                        offset_chain_index(py, e, *pred_segment_count);
+                        tag_chain_index(py, e, *pred_segment_count, last_idx);
                     }
                     Some(wrap_error(py, func_result, &self.name, &self.source_location)?)
                 } else {
@@ -441,8 +477,17 @@ impl Stream {
                 sink_func,
             } => {
                 // Fused map + sink: call sink(map(x)) directly
-                let mapped = wrap_error(py, map_func.call1(py, (x,)), &self.name, &self.source_location)?;
-                wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
+                let last_idx = self.name.matches('+').count();
+                let map_result = map_func.call1(py, (x,));
+                if let Err(ref e) = map_result {
+                    tag_chain_index(py, e, 0, 0);
+                }
+                let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
+                let sink_result = sink_func.call1(py, (mapped,));
+                if let Err(ref e) = sink_result {
+                    tag_chain_index(py, e, 0, last_idx);
+                }
+                wrap_error(py, sink_result, &self.name, &self.source_location)?;
                 return Ok(None); // Terminal node
             }
             NodeLogic::FilterSink {
@@ -450,10 +495,19 @@ impl Stream {
                 sink_func,
             } => {
                 // Fused filter + sink: only call sink if predicate passes
+                let last_idx = self.name.matches('+').count();
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
+                let pred_result = predicate.call1(py, (x_clone,));
+                if let Err(ref e) = pred_result {
+                    tag_chain_index(py, e, 0, 0);
+                }
+                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
-                    wrap_error(py, sink_func.call1(py, (x,)), &self.name, &self.source_location)?;
+                    let sink_result = sink_func.call1(py, (x,));
+                    if let Err(ref e) = sink_result {
+                        tag_chain_index(py, e, 0, last_idx);
+                    }
+                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
                 }
                 return Ok(None); // Terminal node
             }
@@ -464,15 +518,24 @@ impl Stream {
                 pred_segment_count,
             } => {
                 // Fused filter + map + sink: if pred(x) then sink(map(x))
+                let last_idx = self.name.matches('+').count();
                 let x_clone = x.clone_ref(py);
-                let res = wrap_error(py, predicate.call1(py, (x_clone,)), &self.name, &self.source_location)?;
+                let pred_result = predicate.call1(py, (x_clone,));
+                if let Err(ref e) = pred_result {
+                    tag_chain_index(py, e, 0, 0);
+                }
+                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
                 if res.is_truthy(py)? {
                     let map_result = map_func.call1(py, (x,));
                     if let Err(ref e) = map_result {
-                        offset_chain_index(py, e, *pred_segment_count);
+                        tag_chain_index(py, e, *pred_segment_count, *pred_segment_count);
                     }
                     let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                    wrap_error(py, sink_func.call1(py, (mapped,)), &self.name, &self.source_location)?;
+                    let sink_result = sink_func.call1(py, (mapped,));
+                    if let Err(ref e) = sink_result {
+                        tag_chain_index(py, e, 0, last_idx);
+                    }
+                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
                 }
                 return Ok(None); // Terminal node
             }
@@ -497,20 +560,22 @@ impl Stream {
     }
 }
 
-/// Adjust `_akayu_chain_index` on a Python exception by adding an offset.
+/// Tag `_akayu_chain_index` on a Python exception for error narrowing.
 ///
-/// Composed map/filter functions set `_akayu_chain_index` relative to their own chain,
-/// but when embedded in a cross-type fusion (e.g. FilterMap), the index needs to be
-/// shifted by the number of preceding segments (e.g. the predicate segments).
-fn offset_chain_index(py: Python, err: &PyErr, offset: usize) {
-    if offset == 0 {
-        return;
-    }
+/// If the exception already has `_akayu_chain_index` (set by a composed function),
+/// offset it by `offset` to account for preceding segments in the fused node name.
+/// If not (non-composed function), set it to `default` so narrowing can still pinpoint
+/// the exact function.
+fn tag_chain_index(py: Python, err: &PyErr, offset: usize, default: usize) {
     if let Ok(idx_attr) = err.value(py).getattr("_akayu_chain_index") {
         if let Ok(idx) = idx_attr.extract::<usize>() {
-            let _ = err.value(py).setattr("_akayu_chain_index", idx + offset);
+            if offset > 0 {
+                let _ = err.value(py).setattr("_akayu_chain_index", idx + offset);
+            }
+            return;
         }
     }
+    let _ = err.value(py).setattr("_akayu_chain_index", default);
 }
 
 // Propagation methods (non-pymethods)

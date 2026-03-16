@@ -119,7 +119,15 @@ pub(crate) fn wrap_error<T>(
         let ctx_msg = if node_name.contains('+') {
             narrow_fused_error(py, &e, node_name, source_location)
         } else {
-            format!("Stream operation failed at node '{node_name}' (defined at {source_location})")
+            let mut msg = format!(
+                "Stream operation failed at node '{node_name}' (defined at {source_location})"
+            );
+            // Try to show source line with ^^^^ pointer
+            if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
+                msg.push('\n');
+                msg.push_str(&pointer);
+            }
+            msg
         };
         let new_err = pyo3::exceptions::PyRuntimeError::new_err(ctx_msg);
         new_err.set_cause(py, Some(e));
@@ -127,38 +135,142 @@ pub(crate) fn wrap_error<T>(
     })
 }
 
-/// For fused nodes, use the `_akayu_chain_index` attribute set by composed
-/// functions to identify exactly which function in the chain failed.
-/// Returns a narrowed error message on success, or the full fused message as fallback.
+/// Format a fused-node error with a per-segment listing and source pointer.
+///
+/// If `_akayu_chain_index` is set on the exception, the failing segment is
+/// marked with `>` and `<-- error`, and the source line is shown with `^^^^`
+/// under the specific call.
 fn narrow_fused_error(
     py: Python,
     err: &PyErr,
     node_name: &str,
     source_location: &str,
 ) -> String {
-    let full_msg =
-        format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
-
-    // Check for _akayu_chain_index on the exception
-    let Ok(idx_attr) = err.value(py).getattr("_akayu_chain_index") else {
-        return full_msg;
-    };
-    let Ok(idx) = idx_attr.extract::<usize>() else {
-        return full_msg;
-    };
-
     let name_segments: Vec<&str> = node_name.split('+').collect();
     let loc_segments: Vec<&str> = source_location.split(", ").collect();
 
-    if let Some(segment) = name_segments.get(idx) {
-        let loc = loc_segments.get(idx).unwrap_or(&source_location);
-        format!(
-            "Stream operation failed in {segment} \
-             [fused node: {node_name}] (defined at {loc})"
-        )
-    } else {
-        full_msg
+    let failing_idx = err
+        .value(py)
+        .getattr("_akayu_chain_index")
+        .ok()
+        .and_then(|attr| attr.extract::<usize>().ok())
+        .filter(|&idx| idx < name_segments.len());
+
+    let max_width = name_segments.iter().map(|s| s.len()).max().unwrap_or(0);
+
+    let mut msg = String::from("Stream operation failed in fused node:\n");
+    for (i, segment) in name_segments.iter().enumerate() {
+        let loc = loc_segments.get(i).copied().unwrap_or("<unknown>");
+        if Some(i) == failing_idx {
+            msg.push_str(&format!(
+                "  > {segment:<width$}  {loc}  <-- error\n",
+                width = max_width
+            ));
+        } else {
+            msg.push_str(&format!(
+                "    {segment:<width$}  {loc}\n",
+                width = max_width
+            ));
+        }
     }
+
+    // Show source line with ^^^^ for the failing segment
+    if let Some(idx) = failing_idx {
+        if let Some(&loc) = loc_segments.get(idx) {
+            // Count same-location, same-method segments before this one
+            // (".filter(" and ".map(" are different needles on the source line)
+            let method = name_segments[idx].split('(').next().unwrap_or("");
+            let occurrence = name_segments[..idx]
+                .iter()
+                .zip(loc_segments.iter())
+                .filter(|(seg, l)| {
+                    **l == loc && seg.split('(').next().unwrap_or("") == method
+                })
+                .count();
+            if let Some(pointer) = source_pointer(py, loc, name_segments[idx], occurrence) {
+                msg.push_str(&pointer);
+                msg.push('\n');
+            }
+        }
+    }
+
+    // Remove trailing newline
+    if msg.ends_with('\n') {
+        msg.pop();
+    }
+    msg
+}
+
+/// Read a source line using Python's linecache module.
+fn read_source_line(py: Python, location: &str) -> Option<String> {
+    let colon_pos = location.rfind(':')?;
+    let filename = &location[..colon_pos];
+    let lineno: usize = location[colon_pos + 1..].parse().ok()?;
+
+    let linecache = py.import("linecache").ok()?;
+    let line = linecache.call_method1("getline", (filename, lineno)).ok()?;
+    let line_str: String = line.extract().ok()?;
+    let trimmed = line_str.trim_end();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Find the byte span of a method call on a source line.
+///
+/// `segment` is like `"map(func_name)"` — we search for `.map(` on the line.
+/// `occurrence` is 0-indexed for disambiguating duplicate calls on the same line.
+/// Returns `(start, end)` byte positions.
+fn find_call_span(line: &str, segment: &str, occurrence: usize) -> Option<(usize, usize)> {
+    let method = segment.split('(').next()?;
+
+    // Search for ".method(" on the line
+    let needle = format!(".{method}(");
+    let mut count = 0;
+    let mut search_from = 0;
+
+    loop {
+        let rel_pos = line[search_from..].find(&needle)?;
+        let abs_pos = search_from + rel_pos;
+
+        if count == occurrence {
+            let paren_start = abs_pos + needle.len();
+            let mut depth = 1;
+            for (i, ch) in line[paren_start..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some((abs_pos, paren_start + i + 1));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return Some((abs_pos, line.len()));
+        }
+
+        count += 1;
+        search_from = abs_pos + needle.len();
+    }
+}
+
+/// Build a source-line pointer string like:
+/// ```text
+///   10 | s.map(append, 1).map(append, 2)
+///                         ^^^^^^^^^^^^^^
+/// ```
+fn source_pointer(py: Python, location: &str, segment: &str, occurrence: usize) -> Option<String> {
+    let source_line = read_source_line(py, location)?;
+    let (start, end) = find_call_span(&source_line, segment, occurrence)?;
+    let lineno = location.rsplit(':').next().unwrap_or("?");
+    let prefix = format!("  {lineno} | ");
+    let pointer_pad = " ".repeat(prefix.len() + start);
+    let pointer = "^".repeat(end - start);
+    Some(format!("{prefix}{source_line}\n{pointer_pad}{pointer}"))
 }
 
 /// Check that a stream has not been compiled/frozen.
