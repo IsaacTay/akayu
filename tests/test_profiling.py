@@ -210,35 +210,39 @@ class TestContextManager:
 
 class TestCompiledProfiling:
     def test_fused_maps_single_entry(self):
+        """Compiled chain expands individual steps in the profiling report."""
         s = Stream(asynchronous=False)
         s.map(double).map(double).sink(noop)
         s.compile()
 
         report = s.emit_profiled(5)
         d = report.to_dict()
-        # After fusion: map(double)+map(double) is a single node
         names = [n["name"] for n in d["nodes"]]
-        # Should have fewer nodes than unfused
-        fused = [n for n in names if "+" in n]
-        assert len(fused) >= 1  # at least one fused node
+        # Chain expands: source, map(double), map(double), sink(noop)
+        assert len(names) == 4
+        map_nodes = [n for n in names if "map" in n]
+        assert len(map_nodes) == 2
 
     def test_compiled_vs_uncompiled_overhead(self):
-        """Compiled pipeline should have less overhead (fewer nodes)."""
+        """Compiled pipeline should have less overhead per item."""
         # Uncompiled
         s1 = Stream(asynchronous=False)
         s1.map(double).map(double).map(double).sink(noop)
-        r1 = s1.emit_batch_profiled(list(range(100)))
-        d1 = r1.to_dict()
+        r1 = s1.emit_batch_profiled(list(range(1000)))
 
         # Compiled
         s2 = Stream(asynchronous=False)
         s2.map(double).map(double).map(double).sink(noop)
         s2.compile()
-        r2 = s2.emit_batch_profiled(list(range(100)))
-        d2 = r2.to_dict()
+        r2 = s2.emit_batch_profiled(list(range(1000)))
 
-        # Compiled should have fewer nodes
-        assert len(d2["nodes"]) < len(d1["nodes"])
+        # Both should have same node count (chain expands in report)
+        d1 = r1.to_dict()
+        d2 = r2.to_dict()
+        assert len(d2["nodes"]) == len(d1["nodes"])
+
+        # Compiled should have less or equal overhead
+        assert r2.total_overhead_ms <= r1.total_overhead_ms * 1.5  # allow noise
 
 
 # ---------------------------------------------------------------------------

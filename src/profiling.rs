@@ -12,6 +12,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::Stream;
+use crate::node::NodeLogic;
 
 // ---------------------------------------------------------------------------
 // Per-node profile data (accumulated in thread-local during execution)
@@ -235,6 +236,44 @@ pub fn build_report(
             if let Some(pidx) = parent_idx {
                 edges.push((pidx, existing_idx));
                 nodes[pidx].children.push(existing_idx);
+            }
+            continue;
+        }
+
+        // Chain nodes: expand individual steps into the report
+        if let NodeLogic::Chain { ref steps } = child.logic {
+            // Mark the chain head as visited (use first step's index)
+            let first_step_idx = nodes.len();
+            ptr_to_idx.insert(child_ptr, first_step_idx);
+
+            let mut prev_idx = parent_idx;
+            for step in steps {
+                let step_profile = data.get(&step.node_id);
+                let step_node = ReportNode {
+                    name: step.name.clone(),
+                    source_location: step.source_location.clone(),
+                    func_time_ns: step_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
+                    items_in: step_profile.map_or(0, |p| p.items_in),
+                    items_out: step_profile.map_or(0, |p| p.items_out),
+                    is_terminal: false,
+                    children: Vec::new(),
+                };
+                let step_idx = nodes.len();
+                nodes.push(step_node);
+                if let Some(pidx) = prev_idx {
+                    edges.push((pidx, step_idx));
+                    nodes[pidx].children.push(step_idx);
+                }
+                prev_idx = Some(step_idx);
+            }
+            // Last step: set terminal flag and enqueue chain head's downstreams
+            if let Some(last_idx) = prev_idx {
+                if child.downstreams.is_empty() {
+                    nodes[last_idx].is_terminal = true;
+                }
+                for downstream in &child.downstreams {
+                    queue.push((downstream.clone_ref(py), Some(last_idx)));
+                }
             }
             continue;
         }

@@ -19,6 +19,466 @@ fn prof_start(profiling: bool) -> Option<Instant> {
     if profiling { Some(Instant::now()) } else { None }
 }
 
+/// Result of processing a single item through a chainable NodeLogic variant.
+pub(crate) enum StepResult {
+    /// Transformed value — pass downstream
+    Value(Py<PyAny>),
+    /// Item was filtered out — stop propagation
+    Filtered,
+    /// Terminal node (Sink) consumed the value
+    Terminal,
+    /// Flatten produced a batch — switch to batch propagation
+    Batch(Vec<Py<PyAny>>),
+}
+
+/// Result of processing a batch through a chainable NodeLogic variant.
+pub(crate) enum BatchStepResult {
+    /// Output items to propagate downstream
+    Items(Vec<Py<PyAny>>),
+    /// Terminal node (Sink) consumed all items
+    Terminal,
+}
+
+/// Process a single item through a chainable NodeLogic variant.
+///
+/// Handles: Map, Filter (simple path), Sink, Accumulate, Flatten, BatchMap.
+/// Profiling is recorded internally per variant.
+///
+/// Note: returns PyResult because it calls Python functions
+/// (vectorcall1, is_truthy, etc.) which can raise exceptions.
+#[allow(clippy::cognitive_complexity)]
+pub(crate) fn apply_logic(
+    py: Python,
+    logic: &mut NodeLogic,
+    builtin_op: &Option<BuiltinOp>,
+    name: &str,
+    source_location: &str,
+    node_id: usize,
+    x: Py<PyAny>,
+    profiling: bool,
+) -> PyResult<StepResult> {
+    match logic {
+        NodeLogic::Map { func } => {
+            let t = prof_start(profiling);
+            let result = match builtin_op {
+                Some(BuiltinOp::Len) => {
+                    let len = x.bind(py).len()?;
+                    len.into_pyobject(py)?.into_any().unbind()
+                }
+                Some(BuiltinOp::Str) => x.bind(py).str()?.into_any().unbind(),
+                Some(BuiltinOp::Int) => unsafe {
+                    let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
+                    if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                    Py::from_owned_ptr(py, ptr)
+                },
+                Some(BuiltinOp::Float) => unsafe {
+                    let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
+                    if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                    Py::from_owned_ptr(py, ptr)
+                },
+                Some(BuiltinOp::Bool) => {
+                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                    if r == -1 { return Err(PyErr::fetch(py)); }
+                    PyBool::new(py, r != 0).to_owned().into_any().unbind()
+                }
+                Some(BuiltinOp::Not) => {
+                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                    if r == -1 { return Err(PyErr::fetch(py)); }
+                    PyBool::new(py, r == 0).to_owned().into_any().unbind()
+                }
+                Some(BuiltinOp::Truth) => {
+                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                    if r == -1 { return Err(PyErr::fetch(py)); }
+                    PyBool::new(py, r != 0).to_owned().into_any().unbind()
+                }
+                Some(BuiltinOp::ItemGetter(key)) => {
+                    x.bind(py).get_item(key)?.unbind()
+                }
+                Some(BuiltinOp::AttrGetter(attr_name)) => {
+                    x.bind(py).getattr(attr_name)?.unbind()
+                }
+                _ => {
+                    let res = vectorcall1(py, func, &x);
+                    wrap_error(py, res, name, source_location)?
+                }
+            };
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+            if profiling {
+                profiling::record_node(node_id, ft, 1, 1, name, source_location);
+            }
+            Ok(StepResult::Value(result))
+        }
+
+        NodeLogic::Filter { predicate } => {
+            let (passes, ft) = match builtin_op {
+                Some(BuiltinOp::IsInstance(type_obj)) => {
+                    let t = prof_start(profiling);
+                    let passes = x.bind(py).is_instance(type_obj.bind(py))?;
+                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+                    (passes, ft)
+                }
+                Some(BuiltinOp::Is(sentinel)) => {
+                    let t = prof_start(profiling);
+                    let passes = x.is(sentinel);
+                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+                    (passes, ft)
+                }
+                Some(BuiltinOp::IsNot(sentinel)) => {
+                    let t = prof_start(profiling);
+                    let passes = !x.is(sentinel);
+                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+                    (passes, ft)
+                }
+                _ => {
+                    let t = prof_start(profiling);
+                    let res = vectorcall1(py, predicate, &x);
+                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+                    let res = wrap_error(py, res, name, source_location)?;
+                    let passes = res.is_truthy(py)?;
+                    (passes, ft)
+                }
+            };
+            if profiling {
+                profiling::record_node(node_id, ft, 1, u64::from(passes), name, source_location);
+            }
+            if passes { Ok(StepResult::Value(x)) } else { Ok(StepResult::Filtered) }
+        }
+
+        NodeLogic::Sink { func } => {
+            let t = prof_start(profiling);
+            match builtin_op {
+                Some(BuiltinOp::Print) => {
+                    let print_fn = crate::helpers::get_builtin_print()?;
+                    print_fn.call1(py, (&x,))?;
+                }
+                _ => {
+                    let res = vectorcall1(py, func, &x);
+                    wrap_error(py, res, name, source_location)?;
+                }
+            }
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+            if profiling {
+                profiling::record_node(node_id, ft, 1, 0, name, source_location);
+            }
+            Ok(StepResult::Terminal)
+        }
+
+        NodeLogic::Accumulate { func, state, returns_state } => {
+            let t = prof_start(profiling);
+            let result = func.call1(py, (state.clone_ref(py), x));
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+            let result = wrap_error(py, result, name, source_location)?;
+            let output = if *returns_state {
+                let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
+                *state = tuple.0;
+                tuple.1
+            } else {
+                *state = result.clone_ref(py);
+                result
+            };
+            if profiling {
+                profiling::record_node(node_id, ft, 1, 1, name, source_location);
+            }
+            Ok(StepResult::Value(output))
+        }
+
+        NodeLogic::Flatten => {
+            let x_bound = x.bind(py);
+            let iter = x_bound.try_iter()?;
+            let mut batch = Vec::new();
+            for item_res in iter {
+                batch.push(item_res?.into());
+            }
+            if profiling {
+                profiling::record_node(node_id, Duration::ZERO, 1, batch.len() as u64, name, source_location);
+            }
+            Ok(StepResult::Batch(batch))
+        }
+
+        NodeLogic::BatchMap { func } => {
+            let py_list = PyList::new(py, &[x])?;
+            let t = prof_start(profiling);
+            let result = func.call1(py, (py_list,));
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+            let result = wrap_error(py, result, name, source_location)?;
+            let result_list = result.bind(py);
+            let mut iter = result_list.try_iter()?;
+            match iter.next() {
+                Some(item) => {
+                    if profiling {
+                        profiling::record_node(node_id, ft, 1, 1, name, source_location);
+                    }
+                    Ok(StepResult::Value(item?.into()))
+                }
+                None => {
+                    if profiling {
+                        profiling::record_node(node_id, ft, 1, 0, name, source_location);
+                    }
+                    Ok(StepResult::Filtered)
+                }
+            }
+        }
+
+        NodeLogic::Chain { steps } => {
+            let mut val = x;
+            let mut i = 0;
+            while i < steps.len() {
+                let step = &mut steps[i];
+                match apply_logic(py, &mut step.logic, &step.builtin_op, &step.name,
+                                  &step.source_location, step.node_id, val, profiling)? {
+                    StepResult::Value(v) => { val = v; i += 1; }
+                    StepResult::Filtered => return Ok(StepResult::Filtered),
+                    StepResult::Terminal => return Ok(StepResult::Terminal),
+                    StepResult::Batch(items) => {
+                        // Flatten mid-chain: switch remaining steps to batch mode
+                        let mut batch = items;
+                        for j in (i + 1)..steps.len() {
+                            let s = &mut steps[j];
+                            match apply_logic_batch(py, &mut s.logic, &s.builtin_op,
+                                                    &s.name, &s.source_location, s.node_id,
+                                                    batch, profiling)? {
+                                BatchStepResult::Items(out) => batch = out,
+                                BatchStepResult::Terminal => return Ok(StepResult::Terminal),
+                            }
+                        }
+                        return Ok(StepResult::Batch(batch));
+                    }
+                }
+            }
+            Ok(StepResult::Value(val))
+        }
+
+        NodeLogic::ChainMember => unreachable!("ChainMember should never be executed directly"),
+
+        _ => unreachable!("apply_logic called with non-chainable variant"),
+    }
+}
+
+/// Process a batch of items through a chainable NodeLogic variant.
+///
+/// Handles: Map, Filter, Sink, Accumulate, Flatten, BatchMap.
+/// Profiling is recorded internally per variant.
+#[allow(clippy::cognitive_complexity)]
+pub(crate) fn apply_logic_batch(
+    py: Python,
+    logic: &mut NodeLogic,
+    builtin_op: &Option<BuiltinOp>,
+    name: &str,
+    source_location: &str,
+    node_id: usize,
+    items: Vec<Py<PyAny>>,
+    profiling: bool,
+) -> PyResult<BatchStepResult> {
+    let items_in = items.len() as u64;
+
+    match logic {
+        NodeLogic::Map { func } => {
+            let t = prof_start(profiling);
+            let mut output = Vec::with_capacity(items.len());
+            match builtin_op {
+                Some(BuiltinOp::Len) => {
+                    for x in items {
+                        let len = x.bind(py).len()?;
+                        output.push(len.into_pyobject(py)?.into_any().unbind());
+                    }
+                }
+                Some(BuiltinOp::Str) => {
+                    for x in items {
+                        output.push(x.bind(py).str()?.into_any().unbind());
+                    }
+                }
+                Some(BuiltinOp::Int) => {
+                    for x in items {
+                        let result: Py<PyAny> = unsafe {
+                            let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
+                            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                            Py::from_owned_ptr(py, ptr)
+                        };
+                        output.push(result);
+                    }
+                }
+                Some(BuiltinOp::Float) => {
+                    for x in items {
+                        let result: Py<PyAny> = unsafe {
+                            let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
+                            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                            Py::from_owned_ptr(py, ptr)
+                        };
+                        output.push(result);
+                    }
+                }
+                Some(BuiltinOp::Bool) => {
+                    for x in items {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        output.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
+                    }
+                }
+                Some(BuiltinOp::Not) => {
+                    for x in items {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        output.push(PyBool::new(py, r == 0).to_owned().into_any().unbind());
+                    }
+                }
+                Some(BuiltinOp::Truth) => {
+                    for x in items {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        output.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
+                    }
+                }
+                Some(BuiltinOp::ItemGetter(key)) => {
+                    for x in items {
+                        let result = x.bind(py).get_item(key)?;
+                        output.push(result.unbind());
+                    }
+                }
+                Some(BuiltinOp::AttrGetter(attr_name)) => {
+                    for x in items {
+                        let result = x.bind(py).getattr(attr_name)?;
+                        output.push(result.unbind());
+                    }
+                }
+                _ => {
+                    for x in items {
+                        let res = vectorcall1(py, func, &x);
+                        let res = wrap_error(py, res, name, source_location)?;
+                        output.push(res);
+                    }
+                }
+            }
+            if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output.len() as u64, name, source_location); }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::Filter { predicate } => {
+            let t = prof_start(profiling);
+            let mut output = Vec::with_capacity(items.len());
+            match builtin_op {
+                Some(BuiltinOp::IsInstance(type_obj)) => {
+                    let type_bound = type_obj.bind(py);
+                    for x in items {
+                        if x.bind(py).is_instance(type_bound)? {
+                            output.push(x);
+                        }
+                    }
+                }
+                Some(BuiltinOp::Is(sentinel)) => {
+                    for x in items {
+                        if x.is(sentinel) {
+                            output.push(x);
+                        }
+                    }
+                }
+                Some(BuiltinOp::IsNot(sentinel)) => {
+                    for x in items {
+                        if !x.is(sentinel) {
+                            output.push(x);
+                        }
+                    }
+                }
+                _ => {
+                    for x in items {
+                        let res = vectorcall1(py, predicate, &x);
+                        let res = wrap_error(py, res, name, source_location)?;
+                        if res.is_truthy(py)? {
+                            output.push(x);
+                        }
+                    }
+                }
+            }
+            if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output.len() as u64, name, source_location); }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::Flatten => {
+            let mut output = Vec::new();
+            for x in items {
+                let x_bound = x.bind(py);
+                for item_res in x_bound.try_iter()? {
+                    output.push(item_res?.into());
+                }
+            }
+            if profiling { profiling::record_node(node_id, Duration::ZERO, items_in, output.len() as u64, name, source_location); }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::BatchMap { func } => {
+            let py_list = PyList::new(py, &items)?;
+            let t = prof_start(profiling);
+            let result = func.call1(py, (py_list,));
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+            let result = wrap_error(py, result, name, source_location)?;
+            let result_list = result.bind(py);
+            let mut output = Vec::new();
+            for item in result_list.try_iter()? {
+                output.push(item?.into());
+            }
+            if profiling { profiling::record_node(node_id, ft, items_in, output.len() as u64, name, source_location); }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::Accumulate { func, state, returns_state } => {
+            let t = prof_start(profiling);
+            let mut output = Vec::with_capacity(items.len());
+            for x in items {
+                let result = func.call1(py, (state.clone_ref(py), x));
+                let result = wrap_error(py, result, name, source_location)?;
+                if *returns_state {
+                    let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
+                    *state = tuple.0;
+                    output.push(tuple.1);
+                } else {
+                    *state = result.clone_ref(py);
+                    output.push(result);
+                }
+            }
+            if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output.len() as u64, name, source_location); }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::Sink { func } => {
+            let t = prof_start(profiling);
+            match builtin_op {
+                Some(BuiltinOp::Print) => {
+                    let print_fn = crate::helpers::get_builtin_print()?;
+                    for x in items {
+                        print_fn.call1(py, (&x,))?;
+                    }
+                }
+                _ => {
+                    for x in items {
+                        let res = vectorcall1(py, func, &x);
+                        wrap_error(py, res, name, source_location)?;
+                    }
+                }
+            }
+            if let Some(t) = t {
+                profiling::record_node(node_id, t.elapsed(), items_in, 0, name, source_location);
+            }
+            Ok(BatchStepResult::Terminal)
+        }
+
+        NodeLogic::Chain { steps } => {
+            let mut batch = items;
+            for step in steps.iter_mut() {
+                match apply_logic_batch(py, &mut step.logic, &step.builtin_op,
+                                        &step.name, &step.source_location, step.node_id,
+                                        batch, profiling)? {
+                    BatchStepResult::Items(out) => batch = out,
+                    BatchStepResult::Terminal => return Ok(BatchStepResult::Terminal),
+                }
+            }
+            Ok(BatchStepResult::Items(batch))
+        }
+
+        NodeLogic::ChainMember => unreachable!("ChainMember should never be executed directly"),
+
+        _ => unreachable!("apply_logic_batch called with non-chainable variant"),
+    }
+}
+
 #[pymethods]
 impl Stream {
     // Complexity is inherent to dispatching across 20+ NodeLogic variants;
@@ -31,8 +491,22 @@ impl Stream {
     ) -> PyResult<Option<Py<PyAny>>> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active { std::ptr::from_ref(&*self) as usize } else { 0 };
-        let items_in = items.len() as u64;
 
+        // Chainable variants: delegate to apply_logic_batch
+        if matches!(&self.logic,
+            NodeLogic::Map { .. } | NodeLogic::Filter { .. } | NodeLogic::Sink { .. }
+            | NodeLogic::Accumulate { .. } | NodeLogic::Flatten | NodeLogic::BatchMap { .. }
+            | NodeLogic::Chain { .. }
+        ) {
+            match apply_logic_batch(py, &mut self.logic, &self.builtin_op, &self.name,
+                                    &self.source_location, node_id, items, profiling_active)? {
+                BatchStepResult::Items(output) => return self.propagate_batch(py, output),
+                BatchStepResult::Terminal => return Ok(None),
+            }
+        }
+
+        // Non-chainable variants
+        let items_in = items.len() as u64;
         let mut output_batch = Vec::with_capacity(items.len());
 
         match &mut self.logic {
@@ -42,164 +516,6 @@ impl Stream {
                 if profiling_active { profiling::record_node(node_id, Duration::ZERO, items_in, items_in, &self.name, &self.source_location); }
             }
 
-            // -- Core transforms --
-            NodeLogic::Map { func } => {
-                let t = prof_start(profiling_active);
-                match &self.builtin_op {
-                    Some(BuiltinOp::Len) => {
-                        for x in items {
-                            let len = x.bind(py).len()?;
-                            output_batch.push(len.into_pyobject(py)?.into_any().unbind());
-                        }
-                    }
-                    Some(BuiltinOp::Str) => {
-                        for x in items {
-                            output_batch.push(x.bind(py).str()?.into_any().unbind());
-                        }
-                    }
-                    Some(BuiltinOp::Int) => {
-                        for x in items {
-                            let result: Py<PyAny> = unsafe {
-                                let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
-                                if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                                Py::from_owned_ptr(py, ptr)
-                            };
-                            output_batch.push(result);
-                        }
-                    }
-                    Some(BuiltinOp::Float) => {
-                        for x in items {
-                            let result: Py<PyAny> = unsafe {
-                                let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
-                                if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                                Py::from_owned_ptr(py, ptr)
-                            };
-                            output_batch.push(result);
-                        }
-                    }
-                    Some(BuiltinOp::Bool) => {
-                        for x in items {
-                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                            if r == -1 { return Err(PyErr::fetch(py)); }
-                            output_batch.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
-                        }
-                    }
-                    Some(BuiltinOp::Not) => {
-                        for x in items {
-                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                            if r == -1 { return Err(PyErr::fetch(py)); }
-                            output_batch.push(PyBool::new(py, r == 0).to_owned().into_any().unbind());
-                        }
-                    }
-                    Some(BuiltinOp::Truth) => {
-                        for x in items {
-                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                            if r == -1 { return Err(PyErr::fetch(py)); }
-                            output_batch.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
-                        }
-                    }
-                    Some(BuiltinOp::ItemGetter(key)) => {
-                        for x in items {
-                            let result = x.bind(py).get_item(key)?;
-                            output_batch.push(result.unbind());
-                        }
-                    }
-                    Some(BuiltinOp::AttrGetter(name)) => {
-                        for x in items {
-                            let result = x.bind(py).getattr(name)?;
-                            output_batch.push(result.unbind());
-                        }
-                    }
-                    _ => {
-                        for x in items {
-                            let res = vectorcall1(py, func, &x);
-                            let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                            output_batch.push(res);
-                        }
-                    }
-                }
-                if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
-            NodeLogic::Filter { predicate } => {
-                let t = prof_start(profiling_active);
-                match &self.builtin_op {
-                    Some(BuiltinOp::IsInstance(type_obj)) => {
-                        let type_bound = type_obj.bind(py);
-                        for x in items {
-                            if x.bind(py).is_instance(type_bound)? {
-                                output_batch.push(x);
-                            }
-                        }
-                    }
-                    Some(BuiltinOp::Is(sentinel)) => {
-                        for x in items {
-                            if x.is(sentinel) {
-                                output_batch.push(x);
-                            }
-                        }
-                    }
-                    Some(BuiltinOp::IsNot(sentinel)) => {
-                        for x in items {
-                            if !x.is(sentinel) {
-                                output_batch.push(x);
-                            }
-                        }
-                    }
-                    _ => {
-                        for x in items {
-                            let res = vectorcall1(py, predicate, &x);
-                            let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                            if res.is_truthy(py)? {
-                                output_batch.push(x);
-                            }
-                        }
-                    }
-                }
-                if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
-            NodeLogic::Flatten => {
-                for x in items {
-                    let x_bound = x.bind(py);
-                    for item_res in x_bound.try_iter()? {
-                        output_batch.push(item_res?.into());
-                    }
-                }
-                if profiling_active { profiling::record_node(node_id, Duration::ZERO, items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
-            NodeLogic::BatchMap { func } => {
-                let py_list = PyList::new(py, &items)?;
-                let t = prof_start(profiling_active);
-                let result = func.call1(py, (py_list,));
-                let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
-                let result = wrap_error(py, result, &self.name, &self.source_location)?;
-                let result_list = result.bind(py);
-                for item in result_list.try_iter()? {
-                    output_batch.push(item?.into());
-                }
-                if profiling_active { profiling::record_node(node_id, ft, items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
-
-            // -- Stateful --
-            NodeLogic::Accumulate {
-                func,
-                state,
-                returns_state,
-            } => {
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let result = func.call1(py, (state.clone_ref(py), x));
-                    let result = wrap_error(py, result, &self.name, &self.source_location)?;
-                    if *returns_state {
-                        let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
-                        *state = tuple.0;
-                        output_batch.push(tuple.1);
-                    } else {
-                        *state = result.clone_ref(py);
-                        output_batch.push(result);
-                    }
-                }
-                if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
             NodeLogic::Collect { buffer } => {
                 if profiling_active {
                     profiling::record_node(node_id, Duration::ZERO, items_in, 0, &self.name, &self.source_location);
@@ -261,28 +577,6 @@ impl Stream {
                 if profiling_active { profiling::record_node(node_id, Duration::ZERO, items_in, output_batch.len() as u64, &self.name, &self.source_location); }
             }
 
-            // -- Terminals (no propagation) --
-            NodeLogic::Sink { func } => {
-                let t = prof_start(profiling_active);
-                match &self.builtin_op {
-                    Some(BuiltinOp::Print) => {
-                        let print_fn = crate::helpers::get_builtin_print()?;
-                        for x in items {
-                            print_fn.call1(py, (&x,))?;
-                        }
-                    }
-                    _ => {
-                        for x in items {
-                            let res = vectorcall1(py, func, &x);
-                            wrap_error(py, res, &self.name, &self.source_location)?;
-                        }
-                    }
-                }
-                if let Some(t) = t {
-                    profiling::record_node(node_id, t.elapsed(), items_in, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
             // -- Concurrent (self-propagating) --
             NodeLogic::Parallel => {
                 let mut futures = Vec::new();
@@ -363,6 +657,9 @@ impl Stream {
                 }
                 return Ok(None);
             }
+
+            // Chainable variants handled above
+            _ => unreachable!("chainable variant should have been handled by apply_logic_batch"),
         }
 
         self.propagate_batch(py, output_batch)
@@ -372,155 +669,60 @@ impl Stream {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active { std::ptr::from_ref(&*self) as usize } else { 0 };
 
-        // For single-item path, we track func_time locally and record once.
+        // Chainable variants: delegate to apply_logic
+        // (except Filter when async check is needed — that stays here)
+        let is_chainable = matches!(&self.logic,
+            NodeLogic::Map { .. } | NodeLogic::Sink { .. }
+            | NodeLogic::Accumulate { .. } | NodeLogic::Flatten | NodeLogic::BatchMap { .. }
+            | NodeLogic::Chain { .. }
+        );
+        let is_chainable_filter = matches!(&self.logic, NodeLogic::Filter { .. })
+            && (self.skip_async_check || self.builtin_op.is_some());
+
+        if is_chainable || is_chainable_filter {
+            match apply_logic(py, &mut self.logic, &self.builtin_op, &self.name,
+                              &self.source_location, node_id, x, profiling_active)? {
+                StepResult::Value(v) => return self.propagate(py, v),
+                StepResult::Filtered => return Ok(None),
+                StepResult::Terminal => return Ok(None),
+                StepResult::Batch(items) => return self.propagate_batch(py, items),
+            }
+        }
+
+        // Non-chainable variants + Filter with async check
         let mut ft = Duration::ZERO;
 
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-            NodeLogic::Map { func } => {
-                let t = prof_start(profiling_active);
-                let result = match &self.builtin_op {
-                    Some(BuiltinOp::Len) => {
-                        let len = x.bind(py).len()?;
-                        len.into_pyobject(py)?.into_any().unbind()
-                    }
-                    Some(BuiltinOp::Str) => x.bind(py).str()?.into_any().unbind(),
-                    Some(BuiltinOp::Int) => unsafe {
-                        let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
-                        if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                        Py::from_owned_ptr(py, ptr)
-                    },
-                    Some(BuiltinOp::Float) => unsafe {
-                        let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
-                        if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                        Py::from_owned_ptr(py, ptr)
-                    },
-                    Some(BuiltinOp::Bool) => {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        PyBool::new(py, r != 0).to_owned().into_any().unbind()
-                    }
-                    Some(BuiltinOp::Not) => {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        PyBool::new(py, r == 0).to_owned().into_any().unbind()
-                    }
-                    Some(BuiltinOp::Truth) => {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        PyBool::new(py, r != 0).to_owned().into_any().unbind()
-                    }
-                    Some(BuiltinOp::ItemGetter(key)) => {
-                        x.bind(py).get_item(key)?.unbind()
-                    }
-                    Some(BuiltinOp::AttrGetter(name)) => {
-                        x.bind(py).getattr(name)?.unbind()
-                    }
-                    _ => {
-                        let res = vectorcall1(py, func, &x);
-                        wrap_error(py, res, &self.name, &self.source_location)?
-                    }
-                };
-                if let Some(t) = t { ft = t.elapsed(); }
-                Some(result)
-            }
+
+            // Filter: async-check path (generic predicate, !skip_async_check)
             NodeLogic::Filter { predicate } => {
-                match &self.builtin_op {
-                    Some(BuiltinOp::IsInstance(type_obj)) => {
-                        let t = prof_start(profiling_active);
-                        let passes = x.bind(py).is_instance(type_obj.bind(py))?;
-                        if let Some(t) = t { ft = t.elapsed(); }
-                        if passes { Some(x) } else { None }
-                    }
-                    Some(BuiltinOp::Is(sentinel)) => {
-                        let t = prof_start(profiling_active);
-                        let passes = x.is(sentinel);
-                        if let Some(t) = t { ft = t.elapsed(); }
-                        if passes { Some(x) } else { None }
-                    }
-                    Some(BuiltinOp::IsNot(sentinel)) => {
-                        let t = prof_start(profiling_active);
-                        let passes = !x.is(sentinel);
-                        if let Some(t) = t { ft = t.elapsed(); }
-                        if passes { Some(x) } else { None }
-                    }
-                    _ => {
-                        let t = prof_start(profiling_active);
-                        let res = vectorcall1(py, predicate, &x);
-                        if let Some(t) = t { ft = t.elapsed(); }
-                        let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                        if !self.skip_async_check {
-                            let is_awaitable_fn = get_is_awaitable()?;
-                            let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
-                            if is_awaitable {
-                                let filter_async = get_filter_async()?;
-                                let downstreams_list: Vec<Py<Self>> =
-                                    self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
-                                let dl = PyList::new(py, downstreams_list)?;
-                                let coro = filter_async.call1(py, (res, x, dl))?;
-                                return Ok(Some(coro));
-                            }
-                        }
-                        let passes = res.is_truthy(py)?;
-                        if passes { Some(x) } else { None }
-                    }
+                // This path only runs when !skip_async_check && builtin_op.is_none()
+                // (builtin ops and skip_async_check cases handled above via apply_logic)
+                let t = prof_start(profiling_active);
+                let res = vectorcall1(py, predicate, &x);
+                if let Some(t) = t { ft = t.elapsed(); }
+                let res = wrap_error(py, res, &self.name, &self.source_location)?;
+                let is_awaitable_fn = get_is_awaitable()?;
+                let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
+                if is_awaitable {
+                    let filter_async = get_filter_async()?;
+                    let downstreams_list: Vec<Py<Self>> =
+                        self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
+                    let dl = PyList::new(py, downstreams_list)?;
+                    let coro = filter_async.call1(py, (res, x, dl))?;
+                    return Ok(Some(coro));
                 }
+                let passes = res.is_truthy(py)?;
+                if passes { Some(x) } else { None }
             }
-            NodeLogic::Flatten => {
-                let x_bound = x.bind(py);
-                let iter = x_bound.try_iter()?;
-                let mut batch = Vec::new();
-                for item_res in iter {
-                    let item = item_res?;
-                    batch.push(item.into());
-                }
-                if profiling_active {
-                    profiling::record_node(node_id, Duration::ZERO, 1, batch.len() as u64, &self.name, &self.source_location);
-                }
-                return self.propagate_batch(py, batch);
-            }
+
             NodeLogic::Collect { buffer } => {
                 if profiling_active {
                     profiling::record_node(node_id, Duration::ZERO, 1, 0, &self.name, &self.source_location);
                 }
                 buffer.push(x);
                 return Ok(None);
-            }
-            NodeLogic::Sink { func } => {
-                let t = prof_start(profiling_active);
-                match &self.builtin_op {
-                    Some(BuiltinOp::Print) => {
-                        let print_fn = crate::helpers::get_builtin_print()?;
-                        print_fn.call1(py, (&x,))?;
-                    }
-                    _ => {
-                        let res = vectorcall1(py, func, &x);
-                        wrap_error(py, res, &self.name, &self.source_location)?;
-                    }
-                }
-                if let Some(t) = t { ft = t.elapsed(); }
-                if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-            NodeLogic::Accumulate {
-                func,
-                state,
-                returns_state,
-            } => {
-                let t = prof_start(profiling_active);
-                let result = func.call1(py, (state.clone_ref(py), x));
-                if let Some(t) = t { ft = t.elapsed(); }
-                let result = wrap_error(py, result, &self.name, &self.source_location)?;
-                if *returns_state {
-                    let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
-                    *state = tuple.0;
-                    Some(tuple.1)
-                } else {
-                    *state = result.clone_ref(py);
-                    Some(result)
-                }
             }
             NodeLogic::Tag { index } => {
                 let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
@@ -567,19 +769,6 @@ impl Stream {
                     Some(tuple_out.into())
                 } else {
                     None
-                }
-            }
-            NodeLogic::BatchMap { func } => {
-                let py_list = PyList::new(py, &[x])?;
-                let t = prof_start(profiling_active);
-                let result = func.call1(py, (py_list,));
-                if let Some(t) = t { ft = t.elapsed(); }
-                let result = wrap_error(py, result, &self.name, &self.source_location)?;
-                let result_list = result.bind(py);
-                let mut iter = result_list.try_iter()?;
-                match iter.next() {
-                    Some(item) => Some(item?.into()),
-                    None => return Ok(None),
                 }
             }
             NodeLogic::Parallel => {
@@ -657,6 +846,9 @@ impl Stream {
                 }
                 return Ok(None);
             }
+
+            // Chainable variants handled above
+            _ => unreachable!("chainable variant should have been handled by apply_logic"),
         };
 
         // Record for nodes that fall through (non-early-return, non-terminal)

@@ -136,7 +136,7 @@ def test_benchmark_filter_map_no_compile(benchmark):
 def test_benchmark_filter_map_with_compile(benchmark):
     """
     Benchmark filter→map chain WITH compile.
-    FilterMap fusion should skip map calls for filtered items.
+    Maps fuse, async check elimination enabled.
     """
     def run_pipeline():
         s = akayu.Stream(asynchronous=False)
@@ -287,7 +287,7 @@ def test_benchmark_filter_sink_no_compile(benchmark):
 def test_benchmark_filter_sink_with_compile(benchmark):
     """
     Benchmark filter→sink chain WITH compile.
-    FilterSink fusion combines filter and sink into one operation.
+    Async check elimination enabled.
     """
     def run_pipeline():
         s = akayu.Stream(asynchronous=False)
@@ -337,7 +337,7 @@ def test_benchmark_filter_map_sink_no_compile(benchmark):
 def test_benchmark_filter_map_sink_with_compile(benchmark):
     """
     Benchmark filter→map→sink chain WITH compile.
-    FilterMapSink fusion combines all three into one operation.
+    Maps fuse, async check elimination enabled.
     """
     def run_pipeline():
         s = akayu.Stream(asynchronous=False)

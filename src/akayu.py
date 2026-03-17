@@ -62,15 +62,20 @@ def _build_map_func(func, args, kwargs):
         if args:
             def wrapper(x):
                 return func(x, *args, **kwargs)
+            wrapper._akayu_inner = func
+            wrapper._akayu_args = args
             return wrapper
         else:
             def wrapper(x):
                 return func(x, **kwargs)
+            wrapper._akayu_inner = func
             return wrapper
     else:
         # only args
         def wrapper(x):
             return func(x, *args)
+        wrapper._akayu_inner = func
+        wrapper._akayu_args = args
         return wrapper
 
 def _build_starmap_func(func, args, kwargs):
@@ -93,75 +98,6 @@ def _build_starmap_func(func, args, kwargs):
         def wrapper(x):
             return func(*x, *args)
         return wrapper
-
-# Codegen for composed functions: generates unrolled try/except chains for any
-# chain length.  Each function call is individually wrapped so _akayu_chain_index
-# tags the correct function on error.  try/except has zero overhead on the happy
-# path in CPython.  Generated source is registered in linecache so tracebacks
-# show the actual generated code.
-
-import linecache as _linecache
-
-_COMPOSED_FACTORIES = {}
-
-def _gen_composed(n):
-    """Generate and cache an unrolled compose-N factory.
-
-    Returns a factory(f0, f1, ..., fN-1) -> composed(x) where each fi is
-    called in sequence with error index tagging.
-    """
-    if n not in _COMPOSED_FACTORIES:
-        args = ', '.join(f'f{i}' for i in range(n))
-        lines = [f'def _mk({args}):', '  def _c(x):']
-        for i in range(n):
-            src = 'x' if i == 0 else 'r'
-            lines += [
-                f'    try:',
-                f'      r = f{i}({src})',
-                f'    except BaseException as e:',
-                f'      e._akayu_chain_index = {i}',
-                f'      raise',
-            ]
-        lines += ['    return r', '  return _c']
-        source = '\n'.join(lines)
-        filename = f'<akayu:composed{n}>'
-        _linecache.cache[filename] = (
-            len(source), None, source.splitlines(True), filename,
-        )
-        ns = {}
-        exec(compile(source, filename, 'exec'), ns)  # noqa: S102
-        _COMPOSED_FACTORIES[n] = ns['_mk']
-    return _COMPOSED_FACTORIES[n]
-
-
-def _compose_maps(f, g):
-    """Compose two map functions into a flat chain.
-
-    Exceptions are tagged with _akayu_chain_index for programmatic narrowing.
-    """
-    f_funcs = getattr(f, '_chain', [f])
-    g_funcs = getattr(g, '_chain', [g])
-    all_funcs = f_funcs + g_funcs
-    factory = _gen_composed(len(all_funcs))
-    composed = factory(*all_funcs)
-    composed._chain = all_funcs
-    return composed
-
-
-def _compose_batch_maps(f, g):
-    """Compose two batch_map functions: batch_map(f).batch_map(g) -> batch_map(composed).
-
-    Each function takes a list and returns a list. The composed function
-    passes the output of f directly to g, avoiding intermediate list allocation.
-    Exceptions are tagged with _akayu_chain_index for programmatic narrowing.
-    """
-    f_funcs = getattr(f, '_chain', [f])
-    g_funcs = getattr(g, '_chain', [g])
-    all_funcs = f_funcs + g_funcs
-    factory = _gen_composed(len(all_funcs))
-    composed = factory(*all_funcs)
-    composed._chain = all_funcs
-    return composed
 
 _thread_pool = None
 _node_locks = {}  # Per-node locks to prevent concurrent update calls
