@@ -94,221 +94,59 @@ def _build_starmap_func(func, args, kwargs):
             return func(*x, *args)
         return wrapper
 
-# fmt: off
-# The unrolled try/except structure in _compose_maps, _compose_filters, and
-# _compose_batch_maps is load-bearing: each call must be individually wrapped
-# so _akayu_chain_index tags the correct function on error.  Do not refactor
-# or let a formatter collapse these blocks.
+# Codegen for composed functions: generates unrolled try/except chains for any
+# chain length.  Each function call is individually wrapped so _akayu_chain_index
+# tags the correct function on error.  try/except has zero overhead on the happy
+# path in CPython.  Generated source is registered in linecache so tracebacks
+# show the actual generated code.
+
+import linecache as _linecache
+
+_COMPOSED_FACTORIES = {}
+
+def _gen_composed(n):
+    """Generate and cache an unrolled compose-N factory.
+
+    Returns a factory(f0, f1, ..., fN-1) -> composed(x) where each fi is
+    called in sequence with error index tagging.
+    """
+    if n not in _COMPOSED_FACTORIES:
+        args = ', '.join(f'f{i}' for i in range(n))
+        lines = [f'def _mk({args}):', '  def _c(x):']
+        for i in range(n):
+            src = 'x' if i == 0 else 'r'
+            lines += [
+                f'    try:',
+                f'      r = f{i}({src})',
+                f'    except BaseException as e:',
+                f'      e._akayu_chain_index = {i}',
+                f'      raise',
+            ]
+        lines += ['    return r', '  return _c']
+        source = '\n'.join(lines)
+        filename = f'<akayu:composed{n}>'
+        _linecache.cache[filename] = (
+            len(source), None, source.splitlines(True), filename,
+        )
+        ns = {}
+        exec(compile(source, filename, 'exec'), ns)  # noqa: S102
+        _COMPOSED_FACTORIES[n] = ns['_mk']
+    return _COMPOSED_FACTORIES[n]
+
 
 def _compose_maps(f, g):
     """Compose two map functions into a flat chain.
 
-    Each function call is on its own line so tracebacks are readable.
     Exceptions are tagged with _akayu_chain_index for programmatic narrowing.
-    try/except has zero overhead on the happy path in CPython.
     """
     f_funcs = getattr(f, '_chain', [f])
     g_funcs = getattr(g, '_chain', [g])
     all_funcs = f_funcs + g_funcs
+    factory = _gen_composed(len(all_funcs))
+    composed = factory(*all_funcs)
+    composed._chain = all_funcs
+    return composed
 
-    if len(all_funcs) == 2:
-        f1, f2 = all_funcs
-        def composed2(x):
-            try:
-                r = f1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                return f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-        composed2._chain = all_funcs
-        return composed2
-    elif len(all_funcs) == 3:
-        f1, f2, f3 = all_funcs
-        def composed3(x):
-            try:
-                r = f1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                return f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-        composed3._chain = all_funcs
-        return composed3
-    elif len(all_funcs) == 4:
-        f1, f2, f3, f4 = all_funcs
-        def composed4(x):
-            try:
-                r = f1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                r = f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-            try:
-                return f4(r)
-            except BaseException as e:
-                e._akayu_chain_index = 3
-                raise
-        composed4._chain = all_funcs
-        return composed4
-    elif len(all_funcs) == 5:
-        f1, f2, f3, f4, f5 = all_funcs
-        def composed5(x):
-            try:
-                r = f1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                r = f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-            try:
-                r = f4(r)
-            except BaseException as e:
-                e._akayu_chain_index = 3
-                raise
-            try:
-                return f5(r)
-            except BaseException as e:
-                e._akayu_chain_index = 4
-                raise
-        composed5._chain = all_funcs
-        return composed5
-    else:
-        def composed_long(x):
-            result = x
-            for i, fn in enumerate(all_funcs):
-                try:
-                    result = fn(result)
-                except BaseException as e:
-                    e._akayu_chain_index = i
-                    raise
-            return result
-        composed_long._chain = all_funcs
-        return composed_long
-
-def _compose_filters(p1, p2):
-    """Compose two filter predicates into a flat chain.
-
-    Preserves short-circuit semantics (stops on first falsy result).
-    Exceptions are tagged with _akayu_chain_index for programmatic narrowing.
-    """
-    p1_preds = getattr(p1, '_chain', [p1])
-    p2_preds = getattr(p2, '_chain', [p2])
-    all_preds = p1_preds + p2_preds
-
-    if len(all_preds) == 2:
-        pred1, pred2 = all_preds
-        def composed2(x):
-            try:
-                r = pred1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            if not r:
-                return r
-            try:
-                return pred2(x)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-        composed2._chain = all_preds
-        return composed2
-    elif len(all_preds) == 3:
-        pred1, pred2, pred3 = all_preds
-        def composed3(x):
-            try:
-                r = pred1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            if not r:
-                return r
-            try:
-                r = pred2(x)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            if not r:
-                return r
-            try:
-                return pred3(x)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-        composed3._chain = all_preds
-        return composed3
-    elif len(all_preds) == 4:
-        pred1, pred2, pred3, pred4 = all_preds
-        def composed4(x):
-            try:
-                r = pred1(x)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            if not r:
-                return r
-            try:
-                r = pred2(x)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            if not r:
-                return r
-            try:
-                r = pred3(x)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-            if not r:
-                return r
-            try:
-                return pred4(x)
-            except BaseException as e:
-                e._akayu_chain_index = 3
-                raise
-        composed4._chain = all_preds
-        return composed4
-    else:
-        def composed_long(x):
-            for i, pred in enumerate(all_preds):
-                try:
-                    r = pred(x)
-                except BaseException as e:
-                    e._akayu_chain_index = i
-                    raise
-                if not r:
-                    return r
-            return r
-        composed_long._chain = all_preds
-        return composed_long
 
 def _compose_batch_maps(f, g):
     """Compose two batch_map functions: batch_map(f).batch_map(g) -> batch_map(composed).
@@ -320,123 +158,10 @@ def _compose_batch_maps(f, g):
     f_funcs = getattr(f, '_chain', [f])
     g_funcs = getattr(g, '_chain', [g])
     all_funcs = f_funcs + g_funcs
-
-    if len(all_funcs) == 2:
-        f1, f2 = all_funcs
-        def composed2(batch):
-            try:
-                r = f1(batch)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                return f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-        composed2._chain = all_funcs
-        return composed2
-    elif len(all_funcs) == 3:
-        f1, f2, f3 = all_funcs
-        def composed3(batch):
-            try:
-                r = f1(batch)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                return f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-        composed3._chain = all_funcs
-        return composed3
-    elif len(all_funcs) == 4:
-        f1, f2, f3, f4 = all_funcs
-        def composed4(batch):
-            try:
-                r = f1(batch)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                r = f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-            try:
-                return f4(r)
-            except BaseException as e:
-                e._akayu_chain_index = 3
-                raise
-        composed4._chain = all_funcs
-        return composed4
-    elif len(all_funcs) == 5:
-        f1, f2, f3, f4, f5 = all_funcs
-        def composed5(batch):
-            try:
-                r = f1(batch)
-            except BaseException as e:
-                e._akayu_chain_index = 0
-                raise
-            try:
-                r = f2(r)
-            except BaseException as e:
-                e._akayu_chain_index = 1
-                raise
-            try:
-                r = f3(r)
-            except BaseException as e:
-                e._akayu_chain_index = 2
-                raise
-            try:
-                r = f4(r)
-            except BaseException as e:
-                e._akayu_chain_index = 3
-                raise
-            try:
-                return f5(r)
-            except BaseException as e:
-                e._akayu_chain_index = 4
-                raise
-        composed5._chain = all_funcs
-        return composed5
-    else:
-        def composed_long(batch):
-            result = batch
-            for i, fn in enumerate(all_funcs):
-                try:
-                    result = fn(result)
-                except BaseException as e:
-                    e._akayu_chain_index = i
-                    raise
-            return result
-        composed_long._chain = all_funcs
-        return composed_long
-
-# fmt: on
-
-def _compose_filter_map(predicate, func):
-    """Compose filter predicate and map function into a single function.
-
-    Returns a function that takes (x) and returns either func(x) or a sentinel
-    indicating the item was filtered out.
-    """
-    def filter_map(x):
-        if predicate(x):
-            return (True, func(x))
-        return (False, None)
-    return filter_map
+    factory = _gen_composed(len(all_funcs))
+    composed = factory(*all_funcs)
+    composed._chain = all_funcs
+    return composed
 
 _thread_pool = None
 _node_locks = {}  # Per-node locks to prevent concurrent update calls

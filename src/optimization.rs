@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::Stream;
-use crate::helpers::{get_compose_batch_maps, get_compose_filters, get_compose_maps};
+use crate::helpers::{get_compose_batch_maps, get_compose_maps};
 use crate::node::NodeLogic;
 
 /// Data extracted from a child node needed for fusion.
@@ -54,7 +54,6 @@ impl Stream {
     ///
     /// This method walks the stream graph and:
     /// - Fuses consecutive Map operations into a single composed Map
-    /// - Fuses consecutive Filter operations into a single composed Filter
     /// - If all nodes have sync-only functions (`func_is_sync` = true), enables
     ///   `skip_async_check` for all nodes to avoid per-emit `is_awaitable` checks
     pub fn optimize_topology(&mut self, py: Python) {
@@ -304,16 +303,14 @@ impl Stream {
 
     /// Fuse linear chains using a multi-phase approach.
     ///
-    /// Phase 1: Same-type chain reduction (Map+Map, Filter+Filter, BatchMap+BatchMap,
+    /// Phase 1: Same-type chain reduction (Map+Map, BatchMap+BatchMap,
     ///          Source passthrough). Repeats until stable so chains fully collapse.
-    /// Phase 2: Non-terminal cross-type fusion (Filter+Map→FilterMap, FilterMap+Map).
+    /// Phase 2: (Reserved for future non-terminal cross-type fusions.)
+    /// Phase 3: Terminal cross-type fusion (Map+Sink→composed Sink).
     ///          Single bottom-up pass after same-type chains are resolved.
-    /// Phase 3: Terminal cross-type fusion (Map+Sink→MapSink, Filter+Sink→FilterSink,
-    ///          FilterMap+Sink→FilterMapSink). Single bottom-up pass after cross-type
-    ///          pairs are resolved.
     ///
-    /// This ordering ensures map chains fully collapse before sinks absorb them,
-    /// and FilterMapSink is reachable (filter+map fuses before map+sink can).
+    /// Note: Filter fusion was removed because the Python wrapper frame overhead
+    /// makes composed filters slower than separate filter nodes.
     pub(crate) fn fuse_linear_chains(&mut self, py: Python) {
         loop {
             if !self.fuse_same_type_pass(py) {
@@ -324,8 +321,8 @@ impl Stream {
         self.fuse_cross_type_terminal(py);
     }
 
-    /// Single bottom-up pass: fuse same-type chains and eliminate Source passthroughs.
-    /// Returns true if any fusion occurred (caller should loop until false).
+    /// Single bottom-up pass: fuse same-type chains (Map+Map, BatchMap+BatchMap)
+    /// and eliminate Source passthroughs. Returns true if any fusion occurred.
     fn fuse_same_type_pass(&mut self, py: Python) -> bool {
         let mut changed = false;
 
@@ -359,29 +356,6 @@ impl Stream {
             return true;
         }
 
-        // Filter + Filter (skip if either has builtin fast-path)
-        if let NodeLogic::Filter {
-            predicate: ref my_pred,
-        } = self.logic
-            && let NodeLogic::Filter {
-                predicate: ref child_pred,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-            && let Ok(compose) = get_compose_filters()
-            && let Ok(composed) = compose.call1(py, (my_pred, child_pred))
-        {
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_fusion(
-                NodeLogic::Filter {
-                    predicate: composed,
-                },
-                child_data,
-            );
-            return true;
-        }
-
         // BatchMap + BatchMap (skip if either has builtin fast-path)
         if let NodeLogic::BatchMap { func: ref my_func } = self.logic
             && let NodeLogic::BatchMap {
@@ -411,76 +385,13 @@ impl Stream {
     }
 
     /// Single bottom-up pass: fuse non-terminal cross-type pairs.
-    /// Filter+Map → FilterMap, FilterMap+Map → FilterMap (extending).
-    fn fuse_cross_type_nonterminal(&mut self, py: Python) {
-        for downstream in &self.downstreams {
-            let mut child = downstream.borrow_mut(py);
-            child.fuse_cross_type_nonterminal(py);
-        }
-
-        if self.downstreams.len() != 1 {
-            return;
-        }
-
-        let child_py = &self.downstreams[0];
-        let child = child_py.borrow_mut(py);
-
-        // Filter + Map → FilterMap (skip if either has builtin fast-path)
-        if let NodeLogic::Filter {
-            predicate: ref my_pred,
-        } = self.logic
-            && let NodeLogic::Map {
-                func: ref child_func,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-        {
-            let pred = my_pred.clone_ref(py);
-            let func = child_func.clone_ref(py);
-            let psc = self.name.split('+').count();
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_fusion(
-                NodeLogic::FilterMap {
-                    predicate: pred,
-                    func,
-                    pred_segment_count: psc,
-                },
-                child_data,
-            );
-            return;
-        }
-
-        // FilterMap + Map → FilterMap (extend the map part; skip if child has builtin)
-        if let NodeLogic::FilterMap {
-            predicate: ref my_pred,
-            func: ref my_func,
-            pred_segment_count,
-        } = self.logic
-            && let NodeLogic::Map {
-                func: ref child_func,
-            } = child.logic
-            && child.builtin_op.is_none()
-            && let Ok(compose) = get_compose_maps()
-            && let Ok(composed) = compose.call1(py, (my_func, child_func))
-        {
-            let pred = my_pred.clone_ref(py);
-            let psc = pred_segment_count;
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_fusion(
-                NodeLogic::FilterMap {
-                    predicate: pred,
-                    func: composed,
-                    pred_segment_count: psc,
-                },
-                child_data,
-            );
-        }
+    /// (Filter fusion removed — wrapper frame overhead makes it slower than separate nodes.)
+    fn fuse_cross_type_nonterminal(&mut self, _py: Python) {
+        // No non-terminal cross-type fusions currently enabled.
     }
 
     /// Single bottom-up pass: fuse terminal cross-type pairs (into sinks).
-    /// Map+Sink → MapSink, Filter+Sink → FilterSink, FilterMap+Sink → FilterMapSink.
+    /// Map+Sink → composed Sink.
     fn fuse_cross_type_terminal(&mut self, py: Python) {
         for downstream in &self.downstreams {
             let mut child = downstream.borrow_mut(py);
@@ -494,78 +405,23 @@ impl Stream {
         let child_py = &self.downstreams[0];
         let child = child_py.borrow_mut(py);
 
-        // Map + Sink → MapSink (skip if either has builtin fast-path)
+        // Map + Sink → composed Sink (skip if either has builtin fast-path)
+        // Compose the map function into the sink function using _compose_maps,
+        // so the fused node is just a Sink with one Python call per item.
         if let NodeLogic::Map { func: ref map_func } = self.logic
             && let NodeLogic::Sink {
                 func: ref sink_func,
             } = child.logic
             && self.builtin_op.is_none()
             && child.builtin_op.is_none()
+            && let Ok(compose) = get_compose_maps()
+            && let Ok(composed) = compose.call1(py, (map_func, sink_func))
         {
-            let map_f = map_func.clone_ref(py);
-            let sink_f = sink_func.clone_ref(py);
             let child_data = FusionChildData::from_child(py, &child);
             drop(child);
-            self.apply_terminal_fusion(
-                NodeLogic::MapSink {
-                    map_func: map_f,
-                    sink_func: sink_f,
-                },
-                child_data,
-            );
+            self.apply_terminal_fusion(NodeLogic::Sink { func: composed }, child_data);
             return;
         }
 
-        // Filter + Sink → FilterSink (skip if either has builtin fast-path)
-        if let NodeLogic::Filter {
-            predicate: ref pred,
-        } = self.logic
-            && let NodeLogic::Sink {
-                func: ref sink_func,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-        {
-            let p = pred.clone_ref(py);
-            let sink_f = sink_func.clone_ref(py);
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_terminal_fusion(
-                NodeLogic::FilterSink {
-                    predicate: p,
-                    sink_func: sink_f,
-                },
-                child_data,
-            );
-            return;
-        }
-
-        // FilterMap + Sink → FilterMapSink (skip if child sink has builtin fast-path)
-        if let NodeLogic::FilterMap {
-            predicate: ref pred,
-            func: ref map_func,
-            pred_segment_count,
-        } = self.logic
-            && let NodeLogic::Sink {
-                func: ref sink_func,
-            } = child.logic
-            && child.builtin_op.is_none()
-        {
-            let p = pred.clone_ref(py);
-            let map_f = map_func.clone_ref(py);
-            let sink_f = sink_func.clone_ref(py);
-            let psc = pred_segment_count;
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_terminal_fusion(
-                NodeLogic::FilterMapSink {
-                    predicate: p,
-                    map_func: map_f,
-                    sink_func: sink_f,
-                    pred_segment_count: psc,
-                },
-                child_data,
-            );
-        }
     }
 }

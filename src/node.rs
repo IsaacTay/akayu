@@ -1,6 +1,7 @@
 //! Node logic variants for stream processing.
 
 use pyo3::prelude::*;
+use pyo3::types::PyString;
 use std::collections::VecDeque;
 
 /// Defines the type of operation a stream node performs.
@@ -68,39 +69,6 @@ pub enum NodeLogic {
         size: usize,
         state: Py<PyAny>, // Python _PrefetchBatchMapState object
     },
-    /// Fused filter + map: if predicate(x) then yield func(x)
-    /// More efficient than separate filter->map because it skips map for filtered items
-    FilterMap {
-        predicate: Py<PyAny>,
-        func: Py<PyAny>,
-        /// Number of predicate segments in the fused node name, used to offset
-        /// `_akayu_chain_index` from composed map functions so narrowing points
-        /// to the correct segment.
-        pred_segment_count: usize,
-    },
-    /// Fused map + sink: sink(func(x))
-    /// Eliminates propagation overhead for terminal map->sink chains
-    MapSink {
-        map_func: Py<PyAny>,
-        sink_func: Py<PyAny>,
-    },
-    /// Fused filter + sink: if predicate(x) then sink(x)
-    /// Skips sink call for filtered items
-    FilterSink {
-        predicate: Py<PyAny>,
-        sink_func: Py<PyAny>,
-    },
-    /// Fused filter + map + sink: if predicate(x) then sink(func(x))
-    /// Combines filter, map, and sink into single operation
-    FilterMapSink {
-        predicate: Py<PyAny>,
-        map_func: Py<PyAny>,
-        sink_func: Py<PyAny>,
-        /// Number of predicate segments in the fused node name, used to offset
-        /// `_akayu_chain_index` from composed map functions so narrowing points
-        /// to the correct segment.
-        pred_segment_count: usize,
-    },
     /// Async map: non-blocking emit with buffered results for async functions
     /// When asynchronous=True is set on a map, coroutines are submitted to a background
     /// event loop and results are returned in order when ready or on flush()
@@ -130,6 +98,18 @@ pub enum BuiltinOp {
     Float,
     /// bool(x) — uses ffi::PyObject_IsTrue
     Bool,
+    /// operator.not_(x) — uses ffi::PyObject_IsTrue + invert
+    Not,
+    /// operator.is_(x, sentinel) — pointer comparison (e.g., `x is None`)
+    Is(Py<PyAny>),
+    /// operator.is_not(x, sentinel) — pointer comparison + invert
+    IsNot(Py<PyAny>),
+    /// operator.truth(x) — same as bool(x)
+    Truth,
+    /// operator.itemgetter(key)(x) — uses x.get_item(key)
+    ItemGetter(Py<PyAny>),
+    /// operator.attrgetter(name)(x) — uses x.getattr(name)
+    AttrGetter(Py<PyString>),
     /// print(x) — uses the cached builtin print reference
     Print,
 }
