@@ -34,9 +34,7 @@ define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(IS_SYNC_CALLABLE, get_is_sync_callable);
 define_py_helper!(COMPOSE_MAPS, get_compose_maps);
-define_py_helper!(COMPOSE_FILTERS, get_compose_filters);
 define_py_helper!(COMPOSE_BATCH_MAPS, get_compose_batch_maps);
-define_py_helper!(COMPOSE_FILTER_MAP, get_compose_filter_map);
 define_py_helper!(PARALLEL_EXECUTE, get_parallel_execute);
 define_py_helper!(PREFETCH_STATE_CLASS, get_prefetch_state_class);
 define_py_helper!(PREFETCH_FILTER_STATE_CLASS, get_prefetch_filter_state_class);
@@ -55,6 +53,12 @@ define_py_helper!(BUILTIN_INT, get_builtin_int);
 define_py_helper!(BUILTIN_FLOAT, get_builtin_float);
 define_py_helper!(BUILTIN_BOOL, get_builtin_bool);
 define_py_helper!(BUILTIN_PRINT, get_builtin_print);
+define_py_helper!(OPERATOR_NOT, get_operator_not);
+define_py_helper!(OPERATOR_IS, get_operator_is);
+define_py_helper!(OPERATOR_IS_NOT, get_operator_is_not);
+define_py_helper!(OPERATOR_TRUTH, get_operator_truth);
+define_py_helper!(OPERATOR_ITEMGETTER, get_operator_itemgetter);
+define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
 
 pub(crate) fn extract_stream_name(
@@ -115,6 +119,32 @@ pub(crate) fn capture_source_location(py: Python) -> String {
         .call0(py)
         .and_then(|r| r.extract::<String>(py))
         .unwrap_or_else(|_| "<unknown>".to_string())
+}
+
+/// Call a Python callable with a single positional argument using vectorcall.
+///
+/// This avoids the tuple allocation that `func.call1(py, (arg,))` does via
+/// `PyObject_Call`.  Falls back to `PyObject_Call` on builds where vectorcall
+/// is not available.
+#[inline(always)]
+pub(crate) fn vectorcall1(
+    py: Python,
+    func: &Py<PyAny>,
+    arg: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    unsafe {
+        let args = [arg.as_ptr()];
+        let result = pyo3::ffi::PyObject_Vectorcall(
+            func.as_ptr(),
+            args.as_ptr(),
+            1,
+            std::ptr::null_mut(),
+        );
+        if result.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(Py::from_owned_ptr(py, result))
+    }
 }
 
 pub(crate) fn wrap_error<T>(
@@ -398,9 +428,7 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
     let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
     let compose_maps = helpers_module.getattr("_compose_maps")?;
-    let compose_filters = helpers_module.getattr("_compose_filters")?;
     let compose_batch_maps = helpers_module.getattr("_compose_batch_maps")?;
-    let compose_filter_map = helpers_module.getattr("_compose_filter_map")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
     let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
     let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
@@ -416,9 +444,7 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
     let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
     let _ = COMPOSE_MAPS.set(compose_maps.unbind());
-    let _ = COMPOSE_FILTERS.set(compose_filters.unbind());
     let _ = COMPOSE_BATCH_MAPS.set(compose_batch_maps.unbind());
-    let _ = COMPOSE_FILTER_MAP.set(compose_filter_map.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
     let _ = SAFE_UPDATE.set(safe_update.unbind());
     let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
@@ -446,6 +472,15 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILTIN_FLOAT.set(builtins.getattr("float")?.unbind());
     let _ = BUILTIN_BOOL.set(builtins.getattr("bool")?.unbind());
     let _ = BUILTIN_PRINT.set(builtins.getattr("print")?.unbind());
+
+    // Cache operator module references for fast-path detection
+    let operator = py.import("operator")?;
+    let _ = OPERATOR_NOT.set(operator.getattr("not_")?.unbind());
+    let _ = OPERATOR_IS.set(operator.getattr("is_")?.unbind());
+    let _ = OPERATOR_IS_NOT.set(operator.getattr("is_not")?.unbind());
+    let _ = OPERATOR_TRUTH.set(operator.getattr("truth")?.unbind());
+    let _ = OPERATOR_ITEMGETTER.set(operator.getattr("itemgetter")?.unbind());
+    let _ = OPERATOR_ATTRGETTER.set(operator.getattr("attrgetter")?.unbind());
 
     Ok(())
 }

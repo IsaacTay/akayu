@@ -8,20 +8,53 @@ use crate::helpers::{
     capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
     get_build_map_func, get_build_starmap_func, get_builtin_bool, get_builtin_float,
     get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_print, get_builtin_str,
-    get_func_name,
-    get_gather, get_is_sync_callable, get_prefetch_batch_map_state_class,
-    get_prefetch_filter_state_class, get_prefetch_state_class, get_profiler_class, wrap_error,
+    get_func_name, get_gather, get_is_sync_callable, get_operator_attrgetter,
+    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
+    get_operator_truth, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
+    get_prefetch_state_class, get_profiler_class, wrap_error,
 };
 use crate::node::{BuiltinOp, NodeLogic};
 use crate::Stream;
 
 /// Detect if a function is a known builtin suitable for map fast-path.
-fn detect_map_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
+fn detect_map_builtin(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
     if let Ok(b) = get_builtin_len() { if func.is(b) { return Some(BuiltinOp::Len); } }
     if let Ok(b) = get_builtin_str() { if func.is(b) { return Some(BuiltinOp::Str); } }
     if let Ok(b) = get_builtin_int() { if func.is(b) { return Some(BuiltinOp::Int); } }
     if let Ok(b) = get_builtin_float() { if func.is(b) { return Some(BuiltinOp::Float); } }
     if let Ok(b) = get_builtin_bool() { if func.is(b) { return Some(BuiltinOp::Bool); } }
+    if let Ok(b) = get_operator_not() { if func.is(b) { return Some(BuiltinOp::Not); } }
+    if let Ok(b) = get_operator_truth() { if func.is(b) { return Some(BuiltinOp::Truth); } }
+    // Detect operator.itemgetter instances (e.g., operator.itemgetter("name"))
+    if let Ok(itemgetter_type) = get_operator_itemgetter() {
+        if func.bind(py).is_instance(itemgetter_type.bind(py)).unwrap_or(false) {
+            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
+                if let Ok(args) = reduced.bind(py).get_item(1) {
+                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
+                        if key_tuple.len() == 1 {
+                            return Some(BuiltinOp::ItemGetter(key_tuple.get_item(0).ok()?.unbind()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Detect operator.attrgetter instances (e.g., operator.attrgetter("name"))
+    if let Ok(attrgetter_type) = get_operator_attrgetter() {
+        if func.bind(py).is_instance(attrgetter_type.bind(py)).unwrap_or(false) {
+            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
+                if let Ok(args) = reduced.bind(py).get_item(1) {
+                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
+                        if key_tuple.len() == 1 {
+                            if let Ok(name_str) = key_tuple.get_item(0).ok()?.cast_into::<pyo3::types::PyString>() {
+                                return Some(BuiltinOp::AttrGetter(name_str.unbind()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     None
 }
 
@@ -90,7 +123,7 @@ impl Stream {
         // Detect builtin map fast-paths: .map(len), .map(str), .map(int), .map(float)
         let args_bound = args.bind(py);
         let builtin_hint = if args_bound.is_empty() && kwargs.is_none() {
-            detect_map_builtin(&func)
+            detect_map_builtin(py, &func)
         } else {
             None
         };
@@ -382,11 +415,29 @@ impl Stream {
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&predicate,))?.is_truthy(py)?;
 
-        // Detect builtin isinstance fast-path: .filter(isinstance, SomeType)
+        // Detect builtin filter fast-paths:
+        //   .filter(isinstance, SomeType) → IsInstance
+        //   .filter(operator.is_, sentinel) → Is (e.g., x is None)
         let args_bound = args.bind(py);
-        let builtin_hint = if let Ok(builtin_isinstance) = get_builtin_isinstance() {
-            if predicate.is(builtin_isinstance) && args_bound.len() == 1 && kwargs.is_none() {
-                Some(BuiltinOp::IsInstance(args_bound.get_item(0)?.unbind()))
+        let builtin_hint = if args_bound.len() == 1 && kwargs.is_none() {
+            if let Ok(builtin_isinstance) = get_builtin_isinstance() {
+                if predicate.is(builtin_isinstance) {
+                    Some(BuiltinOp::IsInstance(args_bound.get_item(0)?.unbind()))
+                } else if let Ok(op_is) = get_operator_is() {
+                    if predicate.is(op_is) {
+                        Some(BuiltinOp::Is(args_bound.get_item(0)?.unbind()))
+                    } else if let Ok(op_is_not) = get_operator_is_not() {
+                        if predicate.is(op_is_not) {
+                            Some(BuiltinOp::IsNot(args_bound.get_item(0)?.unbind()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             } else {
                 None
             }

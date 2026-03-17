@@ -8,7 +8,7 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 use crate::Stream;
 use crate::helpers::{
     get_filter_async, get_gather, get_is_awaitable, get_parallel_execute, get_process_async,
-    get_safe_update, get_safe_update_batch, wrap_error,
+    get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
 };
 use crate::node::{BuiltinOp, NodeLogic};
 use crate::profiling;
@@ -84,9 +84,35 @@ impl Stream {
                             output_batch.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
                         }
                     }
+                    Some(BuiltinOp::Not) => {
+                        for x in items {
+                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                            if r == -1 { return Err(PyErr::fetch(py)); }
+                            output_batch.push(PyBool::new(py, r == 0).to_owned().into_any().unbind());
+                        }
+                    }
+                    Some(BuiltinOp::Truth) => {
+                        for x in items {
+                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                            if r == -1 { return Err(PyErr::fetch(py)); }
+                            output_batch.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
+                        }
+                    }
+                    Some(BuiltinOp::ItemGetter(key)) => {
+                        for x in items {
+                            let result = x.bind(py).get_item(key)?;
+                            output_batch.push(result.unbind());
+                        }
+                    }
+                    Some(BuiltinOp::AttrGetter(name)) => {
+                        for x in items {
+                            let result = x.bind(py).getattr(name)?;
+                            output_batch.push(result.unbind());
+                        }
+                    }
                     _ => {
                         for x in items {
-                            let res = func.call1(py, (x,));
+                            let res = vectorcall1(py, func, &x);
                             let res = wrap_error(py, res, &self.name, &self.source_location)?;
                             output_batch.push(res);
                         }
@@ -105,9 +131,23 @@ impl Stream {
                             }
                         }
                     }
+                    Some(BuiltinOp::Is(sentinel)) => {
+                        for x in items {
+                            if x.is(sentinel) {
+                                output_batch.push(x);
+                            }
+                        }
+                    }
+                    Some(BuiltinOp::IsNot(sentinel)) => {
+                        for x in items {
+                            if !x.is(sentinel) {
+                                output_batch.push(x);
+                            }
+                        }
+                    }
                     _ => {
                         for x in items {
-                            let res = predicate.call1(py, (x.clone_ref(py),));
+                            let res = vectorcall1(py, predicate, &x);
                             let res = wrap_error(py, res, &self.name, &self.source_location)?;
                             if res.is_truthy(py)? {
                                 output_batch.push(x);
@@ -221,28 +261,6 @@ impl Stream {
                 if profiling_active { profiling::record_node(node_id, Duration::ZERO, items_in, output_batch.len() as u64, &self.name, &self.source_location); }
             }
 
-            // -- Fused transforms --
-            NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
-                let last_idx = self.name.matches('+').count();
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
-                    if let Err(ref e) = pred_result {
-                        tag_chain_index(py, e, 0, 0);
-                    }
-                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                    if res.is_truthy(py)? {
-                        let func_result = func.call1(py, (x,));
-                        if let Err(ref e) = func_result {
-                            tag_chain_index(py, e, *pred_segment_count, last_idx);
-                        }
-                        let mapped = wrap_error(py, func_result, &self.name, &self.source_location)?;
-                        output_batch.push(mapped);
-                    }
-                }
-                if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
-            }
-
             // -- Terminals (no propagation) --
             NodeLogic::Sink { func } => {
                 let t = prof_start(profiling_active);
@@ -255,7 +273,7 @@ impl Stream {
                     }
                     _ => {
                         for x in items {
-                            let res = func.call1(py, (x,));
+                            let res = vectorcall1(py, func, &x);
                             wrap_error(py, res, &self.name, &self.source_location)?;
                         }
                     }
@@ -265,87 +283,6 @@ impl Stream {
                 }
                 return Ok(None);
             }
-            NodeLogic::MapSink {
-                map_func,
-                sink_func,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let map_result = map_func.call1(py, (x,));
-                    if let Err(ref e) = map_result {
-                        tag_chain_index(py, e, 0, 0);
-                    }
-                    let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                    let sink_result = sink_func.call1(py, (mapped,));
-                    if let Err(ref e) = sink_result {
-                        tag_chain_index(py, e, 0, last_idx);
-                    }
-                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                }
-                if let Some(t) = t {
-                    profiling::record_node(node_id, t.elapsed(), items_in, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-            NodeLogic::FilterSink {
-                predicate,
-                sink_func,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
-                    if let Err(ref e) = pred_result {
-                        tag_chain_index(py, e, 0, 0);
-                    }
-                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                    if res.is_truthy(py)? {
-                        let sink_result = sink_func.call1(py, (x,));
-                        if let Err(ref e) = sink_result {
-                            tag_chain_index(py, e, 0, last_idx);
-                        }
-                        wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                    }
-                }
-                if let Some(t) = t {
-                    profiling::record_node(node_id, t.elapsed(), items_in, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-            NodeLogic::FilterMapSink {
-                predicate,
-                map_func,
-                sink_func,
-                pred_segment_count,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let pred_result = predicate.call1(py, (x.clone_ref(py),));
-                    if let Err(ref e) = pred_result {
-                        tag_chain_index(py, e, 0, 0);
-                    }
-                    let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                    if res.is_truthy(py)? {
-                        let map_result = map_func.call1(py, (x,));
-                        if let Err(ref e) = map_result {
-                            tag_chain_index(py, e, *pred_segment_count, *pred_segment_count);
-                        }
-                        let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                        let sink_result = sink_func.call1(py, (mapped,));
-                        if let Err(ref e) = sink_result {
-                            tag_chain_index(py, e, 0, last_idx);
-                        }
-                        wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                    }
-                }
-                if let Some(t) = t {
-                    profiling::record_node(node_id, t.elapsed(), items_in, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-
             // -- Concurrent (self-propagating) --
             NodeLogic::Parallel => {
                 let mut futures = Vec::new();
@@ -463,8 +400,24 @@ impl Stream {
                         if r == -1 { return Err(PyErr::fetch(py)); }
                         PyBool::new(py, r != 0).to_owned().into_any().unbind()
                     }
+                    Some(BuiltinOp::Not) => {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        PyBool::new(py, r == 0).to_owned().into_any().unbind()
+                    }
+                    Some(BuiltinOp::Truth) => {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        PyBool::new(py, r != 0).to_owned().into_any().unbind()
+                    }
+                    Some(BuiltinOp::ItemGetter(key)) => {
+                        x.bind(py).get_item(key)?.unbind()
+                    }
+                    Some(BuiltinOp::AttrGetter(name)) => {
+                        x.bind(py).getattr(name)?.unbind()
+                    }
                     _ => {
-                        let res = func.call1(py, (x,));
+                        let res = vectorcall1(py, func, &x);
                         wrap_error(py, res, &self.name, &self.source_location)?
                     }
                 };
@@ -479,10 +432,21 @@ impl Stream {
                         if let Some(t) = t { ft = t.elapsed(); }
                         if passes { Some(x) } else { None }
                     }
-                    _ => {
-                        let x_clone = x.clone_ref(py);
+                    Some(BuiltinOp::Is(sentinel)) => {
                         let t = prof_start(profiling_active);
-                        let res = predicate.call1(py, (x_clone,));
+                        let passes = x.is(sentinel);
+                        if let Some(t) = t { ft = t.elapsed(); }
+                        if passes { Some(x) } else { None }
+                    }
+                    Some(BuiltinOp::IsNot(sentinel)) => {
+                        let t = prof_start(profiling_active);
+                        let passes = !x.is(sentinel);
+                        if let Some(t) = t { ft = t.elapsed(); }
+                        if passes { Some(x) } else { None }
+                    }
+                    _ => {
+                        let t = prof_start(profiling_active);
+                        let res = vectorcall1(py, predicate, &x);
                         if let Some(t) = t { ft = t.elapsed(); }
                         let res = wrap_error(py, res, &self.name, &self.source_location)?;
                         if !self.skip_async_check {
@@ -530,7 +494,7 @@ impl Stream {
                         print_fn.call1(py, (&x,))?;
                     }
                     _ => {
-                        let res = func.call1(py, (x,));
+                        let res = vectorcall1(py, func, &x);
                         wrap_error(py, res, &self.name, &self.source_location)?;
                     }
                 }
@@ -675,115 +639,6 @@ impl Stream {
                 }
                 return Ok(None);
             }
-            NodeLogic::FilterMap { predicate, func, pred_segment_count } => {
-                let last_idx = self.name.matches('+').count();
-                let x_clone = x.clone_ref(py);
-                let t = prof_start(profiling_active);
-                let pred_result = predicate.call1(py, (x_clone,));
-                if let Some(t) = t { ft += t.elapsed(); }
-                if let Err(ref e) = pred_result {
-                    tag_chain_index(py, e, 0, 0);
-                }
-                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                if res.is_truthy(py)? {
-                    let t = prof_start(profiling_active);
-                    let func_result = func.call1(py, (x,));
-                    if let Some(t) = t { ft += t.elapsed(); }
-                    if let Err(ref e) = func_result {
-                        tag_chain_index(py, e, *pred_segment_count, last_idx);
-                    }
-                    Some(wrap_error(py, func_result, &self.name, &self.source_location)?)
-                } else {
-                    None
-                }
-            }
-            NodeLogic::MapSink {
-                map_func,
-                sink_func,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let t = prof_start(profiling_active);
-                let map_result = map_func.call1(py, (x,));
-                if let Some(t) = t { ft += t.elapsed(); }
-                if let Err(ref e) = map_result {
-                    tag_chain_index(py, e, 0, 0);
-                }
-                let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                let t = prof_start(profiling_active);
-                let sink_result = sink_func.call1(py, (mapped,));
-                if let Some(t) = t { ft += t.elapsed(); }
-                if let Err(ref e) = sink_result {
-                    tag_chain_index(py, e, 0, last_idx);
-                }
-                wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-            NodeLogic::FilterSink {
-                predicate,
-                sink_func,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let x_clone = x.clone_ref(py);
-                let t = prof_start(profiling_active);
-                let pred_result = predicate.call1(py, (x_clone,));
-                if let Some(t) = t { ft += t.elapsed(); }
-                if let Err(ref e) = pred_result {
-                    tag_chain_index(py, e, 0, 0);
-                }
-                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                if res.is_truthy(py)? {
-                    let t = prof_start(profiling_active);
-                    let sink_result = sink_func.call1(py, (x,));
-                    if let Some(t) = t { ft += t.elapsed(); }
-                    if let Err(ref e) = sink_result {
-                        tag_chain_index(py, e, 0, last_idx);
-                    }
-                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                }
-                if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
-            NodeLogic::FilterMapSink {
-                predicate,
-                map_func,
-                sink_func,
-                pred_segment_count,
-            } => {
-                let last_idx = self.name.matches('+').count();
-                let x_clone = x.clone_ref(py);
-                let t = prof_start(profiling_active);
-                let pred_result = predicate.call1(py, (x_clone,));
-                if let Some(t) = t { ft += t.elapsed(); }
-                if let Err(ref e) = pred_result {
-                    tag_chain_index(py, e, 0, 0);
-                }
-                let res = wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                if res.is_truthy(py)? {
-                    let t = prof_start(profiling_active);
-                    let map_result = map_func.call1(py, (x,));
-                    if let Some(t) = t { ft += t.elapsed(); }
-                    if let Err(ref e) = map_result {
-                        tag_chain_index(py, e, *pred_segment_count, *pred_segment_count);
-                    }
-                    let mapped = wrap_error(py, map_result, &self.name, &self.source_location)?;
-                    let t = prof_start(profiling_active);
-                    let sink_result = sink_func.call1(py, (mapped,));
-                    if let Some(t) = t { ft += t.elapsed(); }
-                    if let Err(ref e) = sink_result {
-                        tag_chain_index(py, e, 0, last_idx);
-                    }
-                    wrap_error(py, sink_result, &self.name, &self.source_location)?;
-                }
-                if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
-                }
-                return Ok(None);
-            }
             NodeLogic::AsyncMap { func, state } => {
                 let t = prof_start(profiling_active);
                 let coro = func.call1(py, (x,));
@@ -815,24 +670,6 @@ impl Stream {
         }
         Ok(None)
     }
-}
-
-/// Tag `_akayu_chain_index` on a Python exception for error narrowing.
-///
-/// If the exception already has `_akayu_chain_index` (set by a composed function),
-/// offset it by `offset` to account for preceding segments in the fused node name.
-/// If not (non-composed function), set it to `default` so narrowing can still pinpoint
-/// the exact function.
-fn tag_chain_index(py: Python, err: &PyErr, offset: usize, default: usize) {
-    if let Ok(idx_attr) = err.value(py).getattr("_akayu_chain_index") {
-        if let Ok(idx) = idx_attr.extract::<usize>() {
-            if offset > 0 {
-                let _ = err.value(py).setattr("_akayu_chain_index", idx + offset);
-            }
-            return;
-        }
-    }
-    let _ = err.value(py).setattr("_akayu_chain_index", default);
 }
 
 // Propagation methods (non-pymethods)
