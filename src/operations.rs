@@ -6,12 +6,24 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::error::StreamError;
 use crate::helpers::{
     capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
-    get_build_map_func, get_build_starmap_func, get_func_name, get_gather, get_is_sync_callable,
-    get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
-    get_profiler_class, wrap_error,
+    get_build_map_func, get_build_starmap_func, get_builtin_bool, get_builtin_float,
+    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_print, get_builtin_str,
+    get_func_name,
+    get_gather, get_is_sync_callable, get_prefetch_batch_map_state_class,
+    get_prefetch_filter_state_class, get_prefetch_state_class, get_profiler_class, wrap_error,
 };
-use crate::node::NodeLogic;
+use crate::node::{BuiltinOp, NodeLogic};
 use crate::Stream;
+
+/// Detect if a function is a known builtin suitable for map fast-path.
+fn detect_map_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
+    if let Ok(b) = get_builtin_len() { if func.is(b) { return Some(BuiltinOp::Len); } }
+    if let Ok(b) = get_builtin_str() { if func.is(b) { return Some(BuiltinOp::Str); } }
+    if let Ok(b) = get_builtin_int() { if func.is(b) { return Some(BuiltinOp::Int); } }
+    if let Ok(b) = get_builtin_float() { if func.is(b) { return Some(BuiltinOp::Float); } }
+    if let Ok(b) = get_builtin_bool() { if func.is(b) { return Some(BuiltinOp::Bool); } }
+    None
+}
 
 #[pymethods]
 impl Stream {
@@ -37,6 +49,7 @@ impl Stream {
             needs_lock: false,
             compiled: false,
             source_location,
+            builtin_op: None,
         }
     }
 
@@ -74,8 +87,16 @@ impl Stream {
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
+        // Detect builtin map fast-paths: .map(len), .map(str), .map(int), .map(float)
+        let args_bound = args.bind(py);
+        let builtin_hint = if args_bound.is_empty() && kwargs.is_none() {
+            detect_map_builtin(&func)
+        } else {
+            None
+        };
+
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() {
+        let args_opt = if args_bound.is_empty() {
             None
         } else {
             Some(args)
@@ -121,6 +142,7 @@ impl Stream {
                     needs_lock: false,
                     compiled: false,
                     source_location,
+                    builtin_op: None,
                 },
             )?;
 
@@ -141,6 +163,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: builtin_hint,
             },
         )?;
 
@@ -179,6 +202,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
         self.downstreams.push(node.clone_ref(py));
@@ -235,6 +259,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -319,6 +344,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -356,8 +382,20 @@ impl Stream {
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&predicate,))?.is_truthy(py)?;
 
+        // Detect builtin isinstance fast-path: .filter(isinstance, SomeType)
+        let args_bound = args.bind(py);
+        let builtin_hint = if let Ok(builtin_isinstance) = get_builtin_isinstance() {
+            if predicate.is(builtin_isinstance) && args_bound.len() == 1 && kwargs.is_none() {
+                Some(BuiltinOp::IsInstance(args_bound.get_item(0)?.unbind()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() {
+        let args_opt = if args_bound.is_empty() {
             None
         } else {
             Some(args)
@@ -405,6 +443,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: builtin_hint,
             },
         )?;
 
@@ -435,6 +474,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -465,6 +505,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -589,8 +630,16 @@ impl Stream {
         let is_sync_callable = get_is_sync_callable()?;
         let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
 
+        // Detect builtin sink fast-path: .sink(print)
+        let args_bound = args.bind(py);
+        let builtin_hint = if args_bound.is_empty() && kwargs.is_none() {
+            if let Ok(b) = get_builtin_print() { if func.is(b) { Some(BuiltinOp::Print) } else { None } } else { None }
+        } else {
+            None
+        };
+
         let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() {
+        let args_opt = if args_bound.is_empty() {
             None
         } else {
             Some(args)
@@ -610,6 +659,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: builtin_hint,
             },
         )?;
 
@@ -668,6 +718,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 

@@ -110,3 +110,26 @@ pub enum NodeLogic {
         state: Py<PyAny>, // Python _AsyncState object
     },
 }
+
+/// Hint for builtin function fast-paths.
+///
+/// Stored on `Stream` alongside the normal `NodeLogic`. When set, the execution
+/// engine uses a direct Rust/C-API call instead of Python function dispatch.
+/// The regular `func`/`predicate` in `NodeLogic` is still present as fallback
+/// (e.g., after fusion clears the hint).
+pub enum BuiltinOp {
+    /// isinstance(x, type_obj) — uses PyO3's is_instance()
+    IsInstance(Py<PyAny>),
+    /// len(x) — uses PyO3's len()
+    Len,
+    /// str(x) — uses PyO3's str()
+    Str,
+    /// int(x) — uses ffi::PyNumber_Long
+    Int,
+    /// float(x) — uses ffi::PyNumber_Float
+    Float,
+    /// bool(x) — uses ffi::PyObject_IsTrue
+    Bool,
+    /// print(x) — uses the cached builtin print reference
+    Print,
+}

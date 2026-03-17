@@ -26,7 +26,7 @@ mod profiling;
 // Re-exports
 pub use combinators::{combine_latest, union, zip};
 pub use helpers::{from_text_file, to_text_file};
-pub use node::NodeLogic;
+pub use node::{BuiltinOp, NodeLogic};
 
 /// A reactive stream for processing data through a pipeline of operations.
 ///
@@ -60,6 +60,9 @@ pub struct Stream {
     pub(crate) compiled: bool,
     /// Source location where this node was created (e.g., "pipeline.py:42")
     pub(crate) source_location: String,
+    /// Optional builtin fast-path hint. When set, execution bypasses Python
+    /// function dispatch for known builtins. Cleared by fusion.
+    pub(crate) builtin_op: Option<BuiltinOp>,
 }
 
 const HELPERS: &str = include_str!("akayu.py");
