@@ -77,6 +77,24 @@ pub enum NodeLogic {
         func: Py<PyAny>,
         state: Py<PyAny>, // Python _AsyncState object
     },
+    /// Compiled chain: a linear segment of chainable nodes extracted at compile time.
+    /// Eliminates per-node borrow_mut/drop/propagate overhead by processing all steps
+    /// in a flat loop via apply_logic().
+    Chain {
+        steps: Vec<ChainNode>,
+    },
+    /// Sentinel replacing logic in nodes absorbed into a Chain.
+    ChainMember,
+}
+
+/// A single step in a compiled chain, holding the extracted NodeLogic
+/// and per-node metadata needed for execution and profiling.
+pub struct ChainNode {
+    pub logic: NodeLogic,
+    pub name: String,
+    pub source_location: String,
+    pub builtin_op: Option<BuiltinOp>,
+    pub node_id: usize,
 }
 
 /// Hint for builtin function fast-paths.

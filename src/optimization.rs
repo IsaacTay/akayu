@@ -1,53 +1,17 @@
-//! Topology optimization (fusion, prefetch marking)
+//! Topology optimization (fusion, prefetch marking, builtin detection)
 
 use pyo3::prelude::*;
+use pyo3::types::PyTuple;
 use std::collections::{HashMap, HashSet};
 
 use crate::Stream;
-use crate::helpers::{get_compose_batch_maps, get_compose_maps};
-use crate::node::NodeLogic;
-
-/// Data extracted from a child node needed for fusion.
-struct FusionChildData {
-    downstreams: Vec<Py<Stream>>,
-    name: String,
-    source_location: String,
-    func_is_sync: bool,
-}
-
-impl FusionChildData {
-    /// Extract data from a borrowed child node.
-    fn from_child(py: Python, child: &Stream) -> Self {
-        Self {
-            downstreams: child.downstreams.iter().map(|d| d.clone_ref(py)).collect(),
-            name: child.name.clone(),
-            source_location: child.source_location.clone(),
-            func_is_sync: child.func_is_sync,
-        }
-    }
-}
-
-impl Stream {
-    /// Apply a fusion by updating this node's logic and bypassing the child.
-    fn apply_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
-        self.logic = new_logic;
-        self.name = format!("{}+{}", self.name, child_data.name);
-        self.source_location =
-            format!("{}, {}", self.source_location, child_data.source_location);
-        self.downstreams = child_data.downstreams;
-        self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
-    }
-
-    /// Apply a terminal fusion (fusing into a sink - no downstreams).
-    fn apply_terminal_fusion(&mut self, new_logic: NodeLogic, child_data: FusionChildData) {
-        self.logic = new_logic;
-        self.name = format!("{}+{}", self.name, child_data.name);
-        self.source_location =
-            format!("{}, {}", self.source_location, child_data.source_location);
-        self.downstreams = Vec::new();
-        self.func_is_sync = self.func_is_sync && child_data.func_is_sync;
-    }
-}
+use crate::helpers::{
+    get_builtin_bool, get_builtin_float, get_builtin_int, get_builtin_isinstance,
+    get_builtin_len, get_builtin_print, get_builtin_str, get_operator_attrgetter,
+    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
+    get_operator_truth,
+};
+use crate::node::{BuiltinOp, ChainNode, NodeLogic};
 
 impl Stream {
     /// Optimize the topology on first emit.
@@ -88,13 +52,20 @@ impl Stream {
 
     /// Full optimization pass, safe because graph is being frozen via compile().
     ///
-    /// This enables all optimizations including chain fusion, which is only safe
+    /// This enables all optimizations including chain compilation, which is only safe
     /// when the topology is guaranteed not to change after optimization.
     pub fn optimize_topology_full(&mut self, py: Python) {
-        // Phase 1: Fuse consecutive maps and filters (NOW ENABLED)
-        self.fuse_linear_chains(py);
+        // Phase 1: Eliminate source passthroughs
+        self.eliminate_source_passthroughs(py);
 
-        // Phase 2: Collect all nodes and check sync status
+        // Phase 2: Detect builtin fast-paths before chain building
+        // (chain building moves builtin_op into ChainNode structs)
+        self.detect_builtins(py);
+
+        // Phase 3: Build compiled chains for linear segments
+        self.build_compiled_chains(py);
+
+        // Phase 3: Collect all nodes and check sync status
         let all_nodes = self.collect_all_nodes(py);
 
         // If all nodes are sync and asynchronous flag wasn't explicitly set,
@@ -301,127 +272,265 @@ impl Stream {
         }
     }
 
-    /// Fuse linear chains using a multi-phase approach.
-    ///
-    /// Phase 1: Same-type chain reduction (Map+Map, BatchMap+BatchMap,
-    ///          Source passthrough). Repeats until stable so chains fully collapse.
-    /// Phase 2: (Reserved for future non-terminal cross-type fusions.)
-    /// Phase 3: Terminal cross-type fusion (Map+Sink→composed Sink).
-    ///          Single bottom-up pass after same-type chains are resolved.
-    ///
-    /// Note: Filter fusion was removed because the Python wrapper frame overhead
-    /// makes composed filters slower than separate filter nodes.
-    pub(crate) fn fuse_linear_chains(&mut self, py: Python) {
-        loop {
-            if !self.fuse_same_type_pass(py) {
-                break;
-            }
-        }
-        self.fuse_cross_type_nonterminal(py);
-        self.fuse_cross_type_terminal(py);
-    }
-
-    /// Single bottom-up pass: fuse same-type chains (Map+Map, BatchMap+BatchMap)
-    /// and eliminate Source passthroughs. Returns true if any fusion occurred.
-    fn fuse_same_type_pass(&mut self, py: Python) -> bool {
-        let mut changed = false;
-
+    /// Eliminate source passthrough nodes from the graph.
+    /// A Source node with a single downstream that is itself a Source
+    /// can be bypassed (union creates intermediate Source nodes).
+    fn eliminate_source_passthroughs(&mut self, py: Python) {
+        // Recurse into downstreams first (bottom-up)
         for downstream in &self.downstreams {
             let mut child = downstream.borrow_mut(py);
-            if child.fuse_same_type_pass(py) {
-                changed = true;
-            }
+            child.eliminate_source_passthroughs(py);
         }
 
         if self.downstreams.len() != 1 {
-            return changed;
+            return;
         }
 
         let child_py = &self.downstreams[0];
-        let child = child_py.borrow_mut(py);
+        let child = child_py.borrow(py);
 
-        // Map + Map (skip if either has builtin fast-path — Rust fast-path beats fusion)
-        if let NodeLogic::Map { func: ref my_func } = self.logic
-            && let NodeLogic::Map {
-                func: ref child_func,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-            && let Ok(compose) = get_compose_maps()
-            && let Ok(composed) = compose.call1(py, (my_func, child_func))
-        {
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_fusion(NodeLogic::Map { func: composed }, child_data);
-            return true;
-        }
-
-        // BatchMap + BatchMap (skip if either has builtin fast-path)
-        if let NodeLogic::BatchMap { func: ref my_func } = self.logic
-            && let NodeLogic::BatchMap {
-                func: ref child_func,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-            && let Ok(compose) = get_compose_batch_maps()
-            && let Ok(composed) = compose.call1(py, (my_func, child_func))
-        {
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_fusion(NodeLogic::BatchMap { func: composed }, child_data);
-            return true;
-        }
-
-        // Source passthrough elimination
         if matches!(child.logic, NodeLogic::Source) {
             let new_downstreams: Vec<Py<Self>> =
                 child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             drop(child);
             self.downstreams = new_downstreams;
-            return true;
         }
-
-        changed
     }
 
-    /// Single bottom-up pass: fuse non-terminal cross-type pairs.
-    /// (Filter fusion removed — wrapper frame overhead makes it slower than separate nodes.)
-    fn fuse_cross_type_nonterminal(&mut self, _py: Python) {
-        // No non-terminal cross-type fusions currently enabled.
-    }
-
-    /// Single bottom-up pass: fuse terminal cross-type pairs (into sinks).
-    /// Map+Sink → composed Sink.
-    fn fuse_cross_type_terminal(&mut self, py: Python) {
+    /// Build compiled chains for all linear segments reachable from this source.
+    ///
+    /// Walks the graph and extracts linear segments of chainable nodes
+    /// (Map, Filter, Flatten, Accumulate, Sink, BatchMap) into
+    /// `NodeLogic::Chain` variants. Eliminates per-node borrow_mut/drop/propagate
+    /// overhead during execution.
+    pub(crate) fn build_compiled_chains(&mut self, py: Python) {
         for downstream in &self.downstreams {
-            let mut child = downstream.borrow_mut(py);
-            child.fuse_cross_type_terminal(py);
+            Self::build_chain_at(py, downstream);
         }
+    }
 
-        if self.downstreams.len() != 1 {
-            return;
-        }
-
-        let child_py = &self.downstreams[0];
-        let child = child_py.borrow_mut(py);
-
-        // Map + Sink → composed Sink (skip if either has builtin fast-path)
-        // Compose the map function into the sink function using _compose_maps,
-        // so the fused node is just a Sink with one Python call per item.
-        if let NodeLogic::Map { func: ref map_func } = self.logic
-            && let NodeLogic::Sink {
-                func: ref sink_func,
-            } = child.logic
-            && self.builtin_op.is_none()
-            && child.builtin_op.is_none()
-            && let Ok(compose) = get_compose_maps()
-            && let Ok(composed) = compose.call1(py, (map_func, sink_func))
+    /// Try to build a compiled chain starting at the given node.
+    /// Walks forward through single-downstream chainable nodes.
+    fn build_chain_at(py: Python, start_py: &Py<Self>) {
+        // Check if this node is chainable
         {
-            let child_data = FusionChildData::from_child(py, &child);
-            drop(child);
-            self.apply_terminal_fusion(NodeLogic::Sink { func: composed }, child_data);
+            let node = start_py.borrow(py);
+            let is_chainable = matches!(node.logic,
+                NodeLogic::Map { .. } | NodeLogic::Filter { .. } | NodeLogic::Flatten
+                | NodeLogic::Accumulate { .. } | NodeLogic::Sink { .. } | NodeLogic::BatchMap { .. }
+            );
+            if !is_chainable {
+                // Not chainable — recurse into downstreams
+                let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+                drop(node);
+                for ds in &downstreams {
+                    Self::build_chain_at(py, ds);
+                }
+                return;
+            }
+        }
+
+        // Walk forward collecting chainable nodes
+        let mut chain_node_refs: Vec<Py<Self>> = vec![start_py.clone_ref(py)];
+
+        loop {
+            let last_py = chain_node_refs.last().unwrap();
+            let last = last_py.borrow(py);
+
+            // Terminal (Sink) or branching → stop
+            if matches!(last.logic, NodeLogic::Sink { .. }) || last.downstreams.len() != 1 {
+                break;
+            }
+
+            let next_py = last.downstreams[0].clone_ref(py);
+            drop(last);
+
+            let next = next_py.borrow(py);
+            let next_chainable = matches!(next.logic,
+                NodeLogic::Map { .. } | NodeLogic::Filter { .. } | NodeLogic::Flatten
+                | NodeLogic::Accumulate { .. } | NodeLogic::Sink { .. } | NodeLogic::BatchMap { .. }
+            );
+            drop(next);
+
+            if !next_chainable {
+                break;
+            }
+
+            chain_node_refs.push(next_py);
+        }
+
+        // Skip chains of length 1 — no benefit
+        if chain_node_refs.len() < 2 {
+            let node = start_py.borrow(py);
+            let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            drop(node);
+            for ds in &downstreams {
+                Self::build_chain_at(py, ds);
+            }
             return;
         }
 
+        // Get tail downstreams before we start mutating
+        let last_py = chain_node_refs.last().unwrap();
+        let last = last_py.borrow(py);
+        let tail_downstreams: Vec<Py<Self>> = last.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        drop(last);
+
+        // Extract logic from each node into ChainNode structs
+        let mut steps: Vec<ChainNode> = Vec::new();
+        let mut combined_func_is_sync = true;
+
+        for node_py in &chain_node_refs {
+            let mut node = node_py.borrow_mut(py);
+            let node_id = std::ptr::from_ref(&*node) as usize;
+            let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember);
+            let name = std::mem::take(&mut node.name);
+            let source_location = std::mem::take(&mut node.source_location);
+            let builtin_op = node.builtin_op.take();
+            combined_func_is_sync = combined_func_is_sync && node.func_is_sync;
+            steps.push(ChainNode {
+                logic,
+                name,
+                source_location,
+                builtin_op,
+                node_id,
+            });
+        }
+
+        // Set head node's logic to Chain, downstreams to tail's downstreams
+        let mut head = start_py.borrow_mut(py);
+        head.logic = NodeLogic::Chain { steps };
+        head.downstreams = tail_downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        head.func_is_sync = combined_func_is_sync;
+        drop(head);
+
+        // Recurse into tail downstreams and any branches from branching nodes
+        for ds in &tail_downstreams {
+            Self::build_chain_at(py, ds);
+        }
+
+        // Also recurse into downstreams of intermediate nodes that had branches
+        // (This handles the case where a chain stops at a branching node — we already
+        // processed those above via the length-1 skip path)
+    }
+
+    /// Detect builtin fast-path hints for all nodes in the graph.
+    ///
+    /// Called during compile() to populate `builtin_op` on nodes that use
+    /// known builtins (len, str, int, isinstance, etc.) for faster execution.
+    fn detect_builtins(&mut self, py: Python) {
+        let all_nodes = self.collect_all_nodes(py);
+        for node_py in &all_nodes {
+            let mut node = node_py.borrow_mut(py);
+            node.builtin_op = detect_builtin_for_logic(py, &node.logic);
+        }
+    }
+
+}
+
+/// Detect builtin fast-path for a Map function (no extra args).
+fn detect_map_builtin(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
+    if let Ok(b) = get_builtin_len() { if func.is(b) { return Some(BuiltinOp::Len); } }
+    if let Ok(b) = get_builtin_str() { if func.is(b) { return Some(BuiltinOp::Str); } }
+    if let Ok(b) = get_builtin_int() { if func.is(b) { return Some(BuiltinOp::Int); } }
+    if let Ok(b) = get_builtin_float() { if func.is(b) { return Some(BuiltinOp::Float); } }
+    if let Ok(b) = get_builtin_bool() { if func.is(b) { return Some(BuiltinOp::Bool); } }
+    if let Ok(b) = get_operator_not() { if func.is(b) { return Some(BuiltinOp::Not); } }
+    if let Ok(b) = get_operator_truth() { if func.is(b) { return Some(BuiltinOp::Truth); } }
+    // Detect operator.itemgetter instances (e.g., operator.itemgetter("name"))
+    if let Ok(itemgetter_type) = get_operator_itemgetter() {
+        if func.bind(py).is_instance(itemgetter_type.bind(py)).unwrap_or(false) {
+            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
+                if let Ok(args) = reduced.bind(py).get_item(1) {
+                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
+                        if key_tuple.len() == 1 {
+                            return key_tuple.get_item(0).ok().map(|k| BuiltinOp::ItemGetter(k.unbind()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Detect operator.attrgetter instances (e.g., operator.attrgetter("name"))
+    if let Ok(attrgetter_type) = get_operator_attrgetter() {
+        if func.bind(py).is_instance(attrgetter_type.bind(py)).unwrap_or(false) {
+            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
+                if let Ok(args) = reduced.bind(py).get_item(1) {
+                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
+                        if key_tuple.len() == 1 {
+                            if let Some(Ok(name_str)) = key_tuple.get_item(0).ok().map(|k| k.cast_into::<pyo3::types::PyString>()) {
+                                return Some(BuiltinOp::AttrGetter(name_str.unbind()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Detect builtin fast-path for a Filter predicate.
+///
+/// Handles wrapped predicates by checking `_akayu_inner` / `_akayu_args` attributes
+/// set by `_build_map_func` when extra args were provided (e.g., `filter(isinstance, int)`).
+fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp> {
+    // Try to recover the original function and args from the wrapper
+    let (func, args) = if let Ok(inner) = predicate.getattr(py, "_akayu_inner") {
+        let args = predicate.getattr(py, "_akayu_args").ok();
+        (inner, args)
+    } else {
+        // No wrapper — predicate is the original function (no extra args)
+        return None;
+    };
+
+    // Filter builtins require exactly one extra arg
+    let arg = if let Some(ref args_obj) = args {
+        let args_bound = args_obj.bind(py);
+        if let Ok(tuple) = args_bound.cast::<PyTuple>() {
+            if tuple.len() == 1 {
+                Some(tuple.get_item(0).ok()?.unbind())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let arg = arg?;
+
+    if let Ok(builtin_isinstance) = get_builtin_isinstance() {
+        if func.is(&builtin_isinstance) {
+            return Some(BuiltinOp::IsInstance(arg));
+        }
+    }
+    if let Ok(op_is) = get_operator_is() {
+        if func.is(&op_is) {
+            return Some(BuiltinOp::Is(arg));
+        }
+    }
+    if let Ok(op_is_not) = get_operator_is_not() {
+        if func.is(&op_is_not) {
+            return Some(BuiltinOp::IsNot(arg));
+        }
+    }
+    None
+}
+
+/// Detect builtin fast-path for a Sink function (no extra args).
+fn detect_sink_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
+    if let Ok(b) = get_builtin_print() { if func.is(b) { return Some(BuiltinOp::Print); } }
+    None
+}
+
+/// Detect the appropriate builtin fast-path for a given NodeLogic variant.
+fn detect_builtin_for_logic(py: Python, logic: &NodeLogic) -> Option<BuiltinOp> {
+    match logic {
+        NodeLogic::Map { func } => detect_map_builtin(py, func),
+        NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
+        NodeLogic::Sink { func } => detect_sink_builtin(func),
+        _ => None,
     }
 }

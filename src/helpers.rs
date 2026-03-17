@@ -33,8 +33,6 @@ define_py_helper!(FILTER_ASYNC, get_filter_async);
 define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(IS_SYNC_CALLABLE, get_is_sync_callable);
-define_py_helper!(COMPOSE_MAPS, get_compose_maps);
-define_py_helper!(COMPOSE_BATCH_MAPS, get_compose_batch_maps);
 define_py_helper!(PARALLEL_EXECUTE, get_parallel_execute);
 define_py_helper!(PREFETCH_STATE_CLASS, get_prefetch_state_class);
 define_py_helper!(PREFETCH_FILTER_STATE_CLASS, get_prefetch_filter_state_class);
@@ -154,89 +152,18 @@ pub(crate) fn wrap_error<T>(
     source_location: &str,
 ) -> PyResult<T> {
     res.map_err(|e| {
-        let ctx_msg = if node_name.contains('+') {
-            narrow_fused_error(py, &e, node_name, source_location)
-        } else {
-            let mut msg = format!(
-                "Stream operation failed at node '{node_name}' (defined at {source_location})"
-            );
-            // Try to show source line with ^^^^ pointer
-            if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
-                msg.push('\n');
-                msg.push_str(&pointer);
-            }
-            msg
-        };
-        let new_err = pyo3::exceptions::PyRuntimeError::new_err(ctx_msg);
+        let mut msg = format!(
+            "Stream operation failed at node '{node_name}' (defined at {source_location})"
+        );
+        // Try to show source line with ^^^^ pointer
+        if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
+            msg.push('\n');
+            msg.push_str(&pointer);
+        }
+        let new_err = pyo3::exceptions::PyRuntimeError::new_err(msg);
         new_err.set_cause(py, Some(e));
         new_err
     })
-}
-
-/// Format a fused-node error with a per-segment listing and source pointer.
-///
-/// If `_akayu_chain_index` is set on the exception, the failing segment is
-/// marked with `>` and `<-- error`, and the source line is shown with `^^^^`
-/// under the specific call.
-fn narrow_fused_error(
-    py: Python,
-    err: &PyErr,
-    node_name: &str,
-    source_location: &str,
-) -> String {
-    let name_segments: Vec<&str> = node_name.split('+').collect();
-    let loc_segments: Vec<&str> = source_location.split(", ").collect();
-
-    let failing_idx = err
-        .value(py)
-        .getattr("_akayu_chain_index")
-        .ok()
-        .and_then(|attr| attr.extract::<usize>().ok())
-        .filter(|&idx| idx < name_segments.len());
-
-    let max_width = name_segments.iter().map(|s| s.len()).max().unwrap_or(0);
-
-    let mut msg = String::from("Stream operation failed in fused node:\n");
-    for (i, segment) in name_segments.iter().enumerate() {
-        let loc = loc_segments.get(i).copied().unwrap_or("<unknown>");
-        if Some(i) == failing_idx {
-            msg.push_str(&format!(
-                "  > {segment:<width$}  {loc}  <-- error\n",
-                width = max_width
-            ));
-        } else {
-            msg.push_str(&format!(
-                "    {segment:<width$}  {loc}\n",
-                width = max_width
-            ));
-        }
-    }
-
-    // Show source line with ^^^^ for the failing segment
-    if let Some(idx) = failing_idx {
-        if let Some(&loc) = loc_segments.get(idx) {
-            // Count same-location, same-method segments before this one
-            // (".filter(" and ".map(" are different needles on the source line)
-            let method = name_segments[idx].split('(').next().unwrap_or("");
-            let occurrence = name_segments[..idx]
-                .iter()
-                .zip(loc_segments.iter())
-                .filter(|(seg, l)| {
-                    **l == loc && seg.split('(').next().unwrap_or("") == method
-                })
-                .count();
-            if let Some(pointer) = source_pointer(py, loc, name_segments[idx], occurrence) {
-                msg.push_str(&pointer);
-                msg.push('\n');
-            }
-        }
-    }
-
-    // Remove trailing newline
-    if msg.ends_with('\n') {
-        msg.pop();
-    }
-    msg
 }
 
 /// Read a source line using Python's linecache module.
@@ -427,8 +354,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
     let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
-    let compose_maps = helpers_module.getattr("_compose_maps")?;
-    let compose_batch_maps = helpers_module.getattr("_compose_batch_maps")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
     let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
     let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
@@ -443,8 +368,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
     let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
-    let _ = COMPOSE_MAPS.set(compose_maps.unbind());
-    let _ = COMPOSE_BATCH_MAPS.set(compose_batch_maps.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
     let _ = SAFE_UPDATE.set(safe_update.unbind());
     let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
