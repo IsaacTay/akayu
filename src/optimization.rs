@@ -343,11 +343,13 @@ impl Stream {
         let child_py = &self.downstreams[0];
         let child = child_py.borrow_mut(py);
 
-        // Map + Map
+        // Map + Map (skip if either has builtin fast-path — Rust fast-path beats fusion)
         if let NodeLogic::Map { func: ref my_func } = self.logic
             && let NodeLogic::Map {
                 func: ref child_func,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
             && let Ok(compose) = get_compose_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
@@ -357,13 +359,15 @@ impl Stream {
             return true;
         }
 
-        // Filter + Filter
+        // Filter + Filter (skip if either has builtin fast-path)
         if let NodeLogic::Filter {
             predicate: ref my_pred,
         } = self.logic
             && let NodeLogic::Filter {
                 predicate: ref child_pred,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
             && let Ok(compose) = get_compose_filters()
             && let Ok(composed) = compose.call1(py, (my_pred, child_pred))
         {
@@ -378,11 +382,13 @@ impl Stream {
             return true;
         }
 
-        // BatchMap + BatchMap
+        // BatchMap + BatchMap (skip if either has builtin fast-path)
         if let NodeLogic::BatchMap { func: ref my_func } = self.logic
             && let NodeLogic::BatchMap {
                 func: ref child_func,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
             && let Ok(compose) = get_compose_batch_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
@@ -419,13 +425,15 @@ impl Stream {
         let child_py = &self.downstreams[0];
         let child = child_py.borrow_mut(py);
 
-        // Filter + Map → FilterMap
+        // Filter + Map → FilterMap (skip if either has builtin fast-path)
         if let NodeLogic::Filter {
             predicate: ref my_pred,
         } = self.logic
             && let NodeLogic::Map {
                 func: ref child_func,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
         {
             let pred = my_pred.clone_ref(py);
             let func = child_func.clone_ref(py);
@@ -443,7 +451,7 @@ impl Stream {
             return;
         }
 
-        // FilterMap + Map → FilterMap (extend the map part)
+        // FilterMap + Map → FilterMap (extend the map part; skip if child has builtin)
         if let NodeLogic::FilterMap {
             predicate: ref my_pred,
             func: ref my_func,
@@ -452,6 +460,7 @@ impl Stream {
             && let NodeLogic::Map {
                 func: ref child_func,
             } = child.logic
+            && child.builtin_op.is_none()
             && let Ok(compose) = get_compose_maps()
             && let Ok(composed) = compose.call1(py, (my_func, child_func))
         {
@@ -485,11 +494,13 @@ impl Stream {
         let child_py = &self.downstreams[0];
         let child = child_py.borrow_mut(py);
 
-        // Map + Sink → MapSink
+        // Map + Sink → MapSink (skip if either has builtin fast-path)
         if let NodeLogic::Map { func: ref map_func } = self.logic
             && let NodeLogic::Sink {
                 func: ref sink_func,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
         {
             let map_f = map_func.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
@@ -505,13 +516,15 @@ impl Stream {
             return;
         }
 
-        // Filter + Sink → FilterSink
+        // Filter + Sink → FilterSink (skip if either has builtin fast-path)
         if let NodeLogic::Filter {
             predicate: ref pred,
         } = self.logic
             && let NodeLogic::Sink {
                 func: ref sink_func,
             } = child.logic
+            && self.builtin_op.is_none()
+            && child.builtin_op.is_none()
         {
             let p = pred.clone_ref(py);
             let sink_f = sink_func.clone_ref(py);
@@ -527,7 +540,7 @@ impl Stream {
             return;
         }
 
-        // FilterMap + Sink → FilterMapSink
+        // FilterMap + Sink → FilterMapSink (skip if child sink has builtin fast-path)
         if let NodeLogic::FilterMap {
             predicate: ref pred,
             func: ref map_func,
@@ -536,6 +549,7 @@ impl Stream {
             && let NodeLogic::Sink {
                 func: ref sink_func,
             } = child.logic
+            && child.builtin_op.is_none()
         {
             let p = pred.clone_ref(py);
             let map_f = map_func.clone_ref(py);

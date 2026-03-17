@@ -50,6 +50,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -94,6 +95,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -134,6 +136,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
+                builtin_op: None,
             },
         )?;
 
@@ -238,6 +241,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location: source_location.clone(),
+                builtin_op: None,
             },
         )?;
 
@@ -294,6 +298,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location: source_location.clone(),
+                builtin_op: None,
             },
         )?;
 
@@ -337,6 +342,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location: source_location.to_string(),
+                builtin_op: None,
             },
         )?;
         self.downstreams.push(tag_node);
@@ -388,6 +394,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             needs_lock: false,
             compiled: false,
             source_location,
+            builtin_op: None,
         },
     )?;
 
@@ -488,6 +495,7 @@ pub fn combine_latest(
             needs_lock: false,
             compiled: false,
             source_location: source_location.clone(),
+            builtin_op: None,
         },
     )?;
 
@@ -540,6 +548,7 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             needs_lock: false,
             compiled: false,
             source_location: source_location.clone(),
+            builtin_op: None,
         },
     )?;
 

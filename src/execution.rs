@@ -3,14 +3,14 @@
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::Stream;
 use crate::helpers::{
     get_filter_async, get_gather, get_is_awaitable, get_parallel_execute, get_process_async,
     get_safe_update, get_safe_update_batch, wrap_error,
 };
-use crate::node::NodeLogic;
+use crate::node::{BuiltinOp, NodeLogic};
 use crate::profiling;
 
 /// Start a profiling timer if profiling is active.
@@ -45,20 +45,74 @@ impl Stream {
             // -- Core transforms --
             NodeLogic::Map { func } => {
                 let t = prof_start(profiling_active);
-                for x in items {
-                    let res = func.call1(py, (x,));
-                    let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                    output_batch.push(res);
+                match &self.builtin_op {
+                    Some(BuiltinOp::Len) => {
+                        for x in items {
+                            let len = x.bind(py).len()?;
+                            output_batch.push(len.into_pyobject(py)?.into_any().unbind());
+                        }
+                    }
+                    Some(BuiltinOp::Str) => {
+                        for x in items {
+                            output_batch.push(x.bind(py).str()?.into_any().unbind());
+                        }
+                    }
+                    Some(BuiltinOp::Int) => {
+                        for x in items {
+                            let result: Py<PyAny> = unsafe {
+                                let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
+                                if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                                Py::from_owned_ptr(py, ptr)
+                            };
+                            output_batch.push(result);
+                        }
+                    }
+                    Some(BuiltinOp::Float) => {
+                        for x in items {
+                            let result: Py<PyAny> = unsafe {
+                                let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
+                                if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                                Py::from_owned_ptr(py, ptr)
+                            };
+                            output_batch.push(result);
+                        }
+                    }
+                    Some(BuiltinOp::Bool) => {
+                        for x in items {
+                            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                            if r == -1 { return Err(PyErr::fetch(py)); }
+                            output_batch.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
+                        }
+                    }
+                    _ => {
+                        for x in items {
+                            let res = func.call1(py, (x,));
+                            let res = wrap_error(py, res, &self.name, &self.source_location)?;
+                            output_batch.push(res);
+                        }
+                    }
                 }
                 if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
             }
             NodeLogic::Filter { predicate } => {
                 let t = prof_start(profiling_active);
-                for x in items {
-                    let res = predicate.call1(py, (x.clone_ref(py),));
-                    let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                    if res.is_truthy(py)? {
-                        output_batch.push(x);
+                match &self.builtin_op {
+                    Some(BuiltinOp::IsInstance(type_obj)) => {
+                        let type_bound = type_obj.bind(py);
+                        for x in items {
+                            if x.bind(py).is_instance(type_bound)? {
+                                output_batch.push(x);
+                            }
+                        }
+                    }
+                    _ => {
+                        for x in items {
+                            let res = predicate.call1(py, (x.clone_ref(py),));
+                            let res = wrap_error(py, res, &self.name, &self.source_location)?;
+                            if res.is_truthy(py)? {
+                                output_batch.push(x);
+                            }
+                        }
                     }
                 }
                 if let Some(t) = t { profiling::record_node(node_id, t.elapsed(), items_in, output_batch.len() as u64, &self.name, &self.source_location); }
@@ -192,9 +246,19 @@ impl Stream {
             // -- Terminals (no propagation) --
             NodeLogic::Sink { func } => {
                 let t = prof_start(profiling_active);
-                for x in items {
-                    let res = func.call1(py, (x,));
-                    wrap_error(py, res, &self.name, &self.source_location)?;
+                match &self.builtin_op {
+                    Some(BuiltinOp::Print) => {
+                        let print_fn = crate::helpers::get_builtin_print()?;
+                        for x in items {
+                            print_fn.call1(py, (&x,))?;
+                        }
+                    }
+                    _ => {
+                        for x in items {
+                            let res = func.call1(py, (x,));
+                            wrap_error(py, res, &self.name, &self.source_location)?;
+                        }
+                    }
                 }
                 if let Some(t) = t {
                     profiling::record_node(node_id, t.elapsed(), items_in, 0, &self.name, &self.source_location);
@@ -378,30 +442,65 @@ impl Stream {
             NodeLogic::Source => Some(x),
             NodeLogic::Map { func } => {
                 let t = prof_start(profiling_active);
-                let res = func.call1(py, (x,));
+                let result = match &self.builtin_op {
+                    Some(BuiltinOp::Len) => {
+                        let len = x.bind(py).len()?;
+                        len.into_pyobject(py)?.into_any().unbind()
+                    }
+                    Some(BuiltinOp::Str) => x.bind(py).str()?.into_any().unbind(),
+                    Some(BuiltinOp::Int) => unsafe {
+                        let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
+                        if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                        Py::from_owned_ptr(py, ptr)
+                    },
+                    Some(BuiltinOp::Float) => unsafe {
+                        let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
+                        if ptr.is_null() { return Err(PyErr::fetch(py)); }
+                        Py::from_owned_ptr(py, ptr)
+                    },
+                    Some(BuiltinOp::Bool) => {
+                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+                        if r == -1 { return Err(PyErr::fetch(py)); }
+                        PyBool::new(py, r != 0).to_owned().into_any().unbind()
+                    }
+                    _ => {
+                        let res = func.call1(py, (x,));
+                        wrap_error(py, res, &self.name, &self.source_location)?
+                    }
+                };
                 if let Some(t) = t { ft = t.elapsed(); }
-                Some(wrap_error(py, res, &self.name, &self.source_location)?)
+                Some(result)
             }
             NodeLogic::Filter { predicate } => {
-                let x_clone = x.clone_ref(py);
-                let t = prof_start(profiling_active);
-                let res = predicate.call1(py, (x_clone,));
-                if let Some(t) = t { ft = t.elapsed(); }
-                let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                if !self.skip_async_check {
-                    let is_awaitable_fn = get_is_awaitable()?;
-                    let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
-                    if is_awaitable {
-                        let filter_async = get_filter_async()?;
-                        let downstreams_list: Vec<Py<Self>> =
-                            self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
-                        let dl = PyList::new(py, downstreams_list)?;
-                        let coro = filter_async.call1(py, (res, x, dl))?;
-                        return Ok(Some(coro));
+                match &self.builtin_op {
+                    Some(BuiltinOp::IsInstance(type_obj)) => {
+                        let t = prof_start(profiling_active);
+                        let passes = x.bind(py).is_instance(type_obj.bind(py))?;
+                        if let Some(t) = t { ft = t.elapsed(); }
+                        if passes { Some(x) } else { None }
+                    }
+                    _ => {
+                        let x_clone = x.clone_ref(py);
+                        let t = prof_start(profiling_active);
+                        let res = predicate.call1(py, (x_clone,));
+                        if let Some(t) = t { ft = t.elapsed(); }
+                        let res = wrap_error(py, res, &self.name, &self.source_location)?;
+                        if !self.skip_async_check {
+                            let is_awaitable_fn = get_is_awaitable()?;
+                            let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
+                            if is_awaitable {
+                                let filter_async = get_filter_async()?;
+                                let downstreams_list: Vec<Py<Self>> =
+                                    self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
+                                let dl = PyList::new(py, downstreams_list)?;
+                                let coro = filter_async.call1(py, (res, x, dl))?;
+                                return Ok(Some(coro));
+                            }
+                        }
+                        let passes = res.is_truthy(py)?;
+                        if passes { Some(x) } else { None }
                     }
                 }
-                let passes = res.is_truthy(py)?;
-                if passes { Some(x) } else { None }
             }
             NodeLogic::Flatten => {
                 let x_bound = x.bind(py);
@@ -425,9 +524,17 @@ impl Stream {
             }
             NodeLogic::Sink { func } => {
                 let t = prof_start(profiling_active);
-                let res = func.call1(py, (x,));
+                match &self.builtin_op {
+                    Some(BuiltinOp::Print) => {
+                        let print_fn = crate::helpers::get_builtin_print()?;
+                        print_fn.call1(py, (&x,))?;
+                    }
+                    _ => {
+                        let res = func.call1(py, (x,));
+                        wrap_error(py, res, &self.name, &self.source_location)?;
+                    }
+                }
                 if let Some(t) = t { ft = t.elapsed(); }
-                wrap_error(py, res, &self.name, &self.source_location)?;
                 if profiling_active {
                     profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
                 }
@@ -748,17 +855,20 @@ impl Stream {
         let use_lock = self.needs_lock;
 
         if n == 1 {
-            let batch_list = PyList::new(py, &output_batch)?;
-            let result = if use_lock {
+            if use_lock {
+                let batch_list = PyList::new(py, &output_batch)?;
                 let safe_update_batch = get_safe_update_batch()?;
-                safe_update_batch.call1(py, (&self.downstreams[0], batch_list))?
+                let result = safe_update_batch.call1(py, (&self.downstreams[0], batch_list))?;
+                if result.is_none(py) {
+                    return Ok(None);
+                }
+                return Ok(Some(result));
             } else {
-                self.downstreams[0].call_method1(py, "update_batch", (batch_list,))?
-            };
-            if result.is_none(py) {
-                return Ok(None);
+                let mut child = self.downstreams[0].borrow_mut(py);
+                let result = child.update_batch(py, output_batch)?;
+                drop(child);
+                return Ok(result);
             }
-            return Ok(Some(result));
         }
 
         let mut futures = Vec::new();
@@ -779,15 +889,17 @@ impl Stream {
         } else {
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    let result = child.call_method1(py, "update", (val.clone_ref(py),))?;
-                    if !result.is_none(py) {
+                    let mut child_ref = child.borrow_mut(py);
+                    if let Some(result) = child_ref.update(py, val.clone_ref(py))? {
                         futures.push(result);
                     }
+                    drop(child_ref);
                 }
-                let result = self.downstreams[n - 1].call_method1(py, "update", (&val,))?;
-                if !result.is_none(py) {
+                let mut child_ref = self.downstreams[n - 1].borrow_mut(py);
+                if let Some(result) = child_ref.update(py, val)? {
                     futures.push(result);
                 }
+                drop(child_ref);
             }
         }
 
@@ -843,23 +955,28 @@ impl Stream {
                 }
             }
         } else {
-            // Fast path: no locking needed, use direct method calls
+            // Fast path: no locking needed, use direct Rust calls
             if n == 1 {
-                let result = self.downstreams[0].call_method1(py, "update", (&val,))?;
-                if !result.is_none(py) {
-                    futures.push(result);
+                let mut child = self.downstreams[0].borrow_mut(py);
+                let result = child.update(py, val)?;
+                drop(child);
+                if let Some(r) = result {
+                    return Ok(Some(r));
                 }
+                return Ok(None);
             } else {
                 for child in self.downstreams.iter().take(n - 1) {
-                    let result = child.call_method1(py, "update", (val.clone_ref(py),))?;
-                    if !result.is_none(py) {
+                    let mut child_ref = child.borrow_mut(py);
+                    if let Some(result) = child_ref.update(py, val.clone_ref(py))? {
                         futures.push(result);
                     }
+                    drop(child_ref);
                 }
-                let result = self.downstreams[n - 1].call_method1(py, "update", (&val,))?;
-                if !result.is_none(py) {
+                let mut child_ref = self.downstreams[n - 1].borrow_mut(py);
+                if let Some(result) = child_ref.update(py, val)? {
                     futures.push(result);
                 }
+                drop(child_ref);
             }
         }
 

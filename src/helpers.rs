@@ -48,6 +48,13 @@ define_py_helper!(SAFE_UPDATE, get_safe_update);
 define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
 define_py_helper!(ASYNC_STATE_CLASS, get_async_state_class);
 define_py_helper!(CALLER_LOCATION, get_caller_location);
+define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
+define_py_helper!(BUILTIN_LEN, get_builtin_len);
+define_py_helper!(BUILTIN_STR, get_builtin_str);
+define_py_helper!(BUILTIN_INT, get_builtin_int);
+define_py_helper!(BUILTIN_FLOAT, get_builtin_float);
+define_py_helper!(BUILTIN_BOOL, get_builtin_bool);
+define_py_helper!(BUILTIN_PRINT, get_builtin_print);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
 
 pub(crate) fn extract_stream_name(
@@ -331,6 +338,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             needs_lock: false,
             compiled: false,
             source_location,
+            builtin_op: None,
         },
     )?;
     let stream_clone = stream.clone_ref(py);
@@ -428,6 +436,16 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
     let _ = IS_AWAITABLE.set(is_awaitable.unbind());
+
+    // Cache builtin references for fast-path detection
+    let builtins = py.import("builtins")?;
+    let _ = BUILTIN_ISINSTANCE.set(builtins.getattr("isinstance")?.unbind());
+    let _ = BUILTIN_LEN.set(builtins.getattr("len")?.unbind());
+    let _ = BUILTIN_STR.set(builtins.getattr("str")?.unbind());
+    let _ = BUILTIN_INT.set(builtins.getattr("int")?.unbind());
+    let _ = BUILTIN_FLOAT.set(builtins.getattr("float")?.unbind());
+    let _ = BUILTIN_BOOL.set(builtins.getattr("bool")?.unbind());
+    let _ = BUILTIN_PRINT.set(builtins.getattr("print")?.unbind());
 
     Ok(())
 }
