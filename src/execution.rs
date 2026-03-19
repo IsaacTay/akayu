@@ -611,7 +611,9 @@ impl Stream {
         let node_id = if profiling_active { std::ptr::from_ref(&*self) as usize } else { 0 };
 
         // Chainable variants: delegate to apply_logic_batch
-        if self.logic.is_chainable() || matches!(&self.logic, NodeLogic::Chain { .. }) {
+        // compiled_chainable is set at freeze_all() time; includes all chainable except Filter.
+        // Batch path routes ALL filters through apply_logic_batch (no async check needed for batch).
+        if self.compiled_chainable || matches!(&self.logic, NodeLogic::Filter { .. }) {
             let ctx = NodeCtx {
                 builtin_op: &self.builtin_op,
                 cached_vc: &self.cached_vectorcall,
@@ -791,12 +793,8 @@ impl Stream {
 
         // Chainable variants: delegate to apply_logic
         // (except Filter when async check is needed — that stays here)
-        let is_chainable = (self.logic.is_chainable() && !matches!(&self.logic, NodeLogic::Filter { .. }))
-            || matches!(&self.logic, NodeLogic::Chain { .. });
-        let is_chainable_filter = matches!(&self.logic, NodeLogic::Filter { .. })
-            && (self.skip_async_check || self.builtin_op.is_some());
-
-        if is_chainable || is_chainable_filter {
+        // compiled_chainable / compiled_filter_fast are set once at freeze_all() time
+        if self.compiled_chainable || self.compiled_filter_fast {
             let ctx = NodeCtx {
                 builtin_op: &self.builtin_op,
                 cached_vc: &self.cached_vectorcall,

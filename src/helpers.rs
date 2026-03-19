@@ -327,6 +327,8 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             source_location,
             builtin_op: None,
             cached_vectorcall: None,
+            compiled_chainable: false,
+            compiled_filter_fast: false,
         },
     )?;
     let stream_clone = stream.clone_ref(py);
