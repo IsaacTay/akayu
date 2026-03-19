@@ -335,6 +335,11 @@ pub(crate) fn apply_logic(
                     profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0, ctx.name, ctx.source_location);
                 }
                 let t = target.borrow(py);
+                if t.emitting {
+                    let name = t.name.clone();
+                    drop(t);
+                    return Err(crate::error::StreamError::ReentrantEmit(name).into());
+                }
                 t.propagate(py, x)?;
                 return Ok(StepResult::Terminal);
             }
@@ -593,6 +598,11 @@ pub(crate) fn apply_logic_batch(
                     profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0, ctx.name, ctx.source_location);
                 }
                 let t = target.borrow(py);
+                if t.emitting {
+                    let name = t.name.clone();
+                    drop(t);
+                    return Err(crate::error::StreamError::ReentrantEmit(name).into());
+                }
                 for x in items {
                     t.propagate(py, x)?;
                 }
@@ -678,6 +688,11 @@ impl Stream {
                 profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0, &self.name, &self.source_location);
             }
             let t = target.borrow(py);
+            if t.emitting {
+                let name = t.name.clone();
+                drop(t);
+                return Err(crate::error::StreamError::ReentrantEmit(name).into());
+            }
             let mut last_result = None;
             for x in items {
                 last_result = t.propagate(py, x)?;
@@ -951,6 +966,11 @@ impl Stream {
                 profiling::record_node(node_id, Duration::ZERO, 1, 0, &self.name, &self.source_location);
             }
             let t = target.borrow(py);
+            if t.emitting {
+                let name = t.name.clone();
+                drop(t);
+                return Err(crate::error::StreamError::ReentrantEmit(name).into());
+            }
             return t.propagate(py, x);
         }
 

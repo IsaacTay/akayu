@@ -75,6 +75,7 @@ impl Stream {
                 flush_target: None,
                 emit_target: None,
                 flushing: false,
+                emitting: false,
             },
         )
     }
@@ -112,6 +113,7 @@ impl Stream {
             flush_target: None,
             emit_target: None,
             flushing: false,
+            emitting: false,
         }
     }
 
@@ -779,6 +781,11 @@ impl Stream {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
+        // Re-entrancy guard: detect cycles in the data graph
+        if self.emitting {
+            return Err(StreamError::ReentrantEmit(self.name.clone()).into());
+        }
+        self.emitting = true;
 
         // Track wall time if profiling
         let profiling = crate::profiling::is_profiling();
@@ -793,6 +800,7 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
+        self.emitting = false;
         result
     }
 
@@ -813,6 +821,11 @@ impl Stream {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
+        // Re-entrancy guard: detect cycles in the data graph
+        if self.emitting {
+            return Err(StreamError::ReentrantEmit(self.name.clone()).into());
+        }
+        self.emitting = true;
 
         // Track wall time if profiling
         let profiling = crate::profiling::is_profiling();
@@ -827,6 +840,7 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
+        self.emitting = false;
         result
     }
 
