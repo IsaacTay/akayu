@@ -251,6 +251,7 @@ impl Stream {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
+
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
         let node = Self::make_node(
@@ -464,8 +465,28 @@ pub fn combine_latest(
 #[pyfunction]
 #[pyo3(signature = (*streams))]
 pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
-    if streams.len() < 2 {
+    if streams.is_empty() {
         return Err(StreamError::ZipTooFew.into());
+    }
+
+    // Single stream: no-op passthrough
+    if streams.len() == 1 {
+        let stream = &streams[0];
+        let stream_ref = stream.borrow(py);
+        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
+        let source_location = capture_source_location(py);
+        let node = Stream::make_node(
+            py,
+            NodeLogic::Source,
+            "zip".to_string(),
+            source_location,
+            stream_ref.asynchronous,
+            stream_ref.skip_async_check,
+            true,
+        )?;
+        drop(stream_ref);
+        stream.borrow_mut(py).downstreams.push(node.clone_ref(py));
+        return Ok(node);
     }
 
     // Check if any of the streams are frozen
