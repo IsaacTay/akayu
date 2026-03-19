@@ -76,3 +76,5 @@ site/
 
 # Ruff
 .ruff_cache/
+.envrc
+.direnv/

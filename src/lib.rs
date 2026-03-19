@@ -66,6 +66,7 @@ impl StreamPtr {
 pub struct Stream {
     pub(crate) logic: NodeLogic,
     pub(crate) downstreams: Vec<Py<Stream>>,
+    pub(crate) parents: std::sync::Mutex<Vec<Py<Stream>>>,
     pub(crate) name: String,
     pub(crate) asynchronous: Option<bool>,
     /// Pre-computed flag: true if async check can be skipped (asynchronous == Some(false))
@@ -119,6 +120,7 @@ const HELPERS: &str = include_str!("akayu.py");
 fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
     m.add_class::<profiling::ProfileReport>()?;
+    m.add_class::<operations::CollectGuard>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(from_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(union, m)?)?;

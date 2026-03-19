@@ -13,16 +13,47 @@ This project uses **Nix** to manage the development environment and dependencies
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/your-username/akayu.git
+    git clone https://github.com/akayu-io/akayu.git
     cd akayu
     ```
 
 2.  **Enter the development shell**:
     The `flake.nix` file defines the environment with Rust, Python, `uv`, and `maturin`.
     ```bash
-    nix develop
+    direnv allow /mnt/ssd1/vibes/akayu
     ```
-    This command drops you into a shell with all necessary tools installed. It will also automatically create and activate a Python virtual environment (`.venv`) if one doesn't exist.
+    This evaluates the `.envrc` (which runs `use flake`) and activates the development environment with all necessary tools. It will also automatically create and activate a Python virtual environment (`.venv`) if one doesn't exist.
+
+### Without Nix
+
+If you prefer not to use Nix, you can set up the development environment manually:
+
+1.  **Install Rust** via [rustup](https://rustup.rs/):
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+
+2.  **Install Python 3.8+** (e.g., via [pyenv](https://github.com/pyenv/pyenv) or your system package manager).
+
+3.  **Install uv**:
+    ```bash
+    pip install uv
+    ```
+
+4.  **Install development dependencies**:
+    ```bash
+    pip install maturin pytest pytest-asyncio pytest-benchmark
+    ```
+
+5.  **Build and install the package**:
+    ```bash
+    maturin develop
+    ```
+
+6.  **Run tests** (excluding benchmarks):
+    ```bash
+    pytest tests/ -k "not benchmark"
+    ```
 
 ## Quick Start with Just
 
@@ -123,6 +154,7 @@ uv run ruff check tests   # Lint Python
 ## Project Structure
 
 - `src/lib.rs`: The core Rust implementation using PyO3.
+- `python/akayu/`: The Python package containing the Rust extension.
 - `tests/`: Python test suite.
     - `test_ops.py`: Unit tests for standard operations (map, filter, union, etc.).
     - `test_async.py`: Tests for async support.
@@ -145,6 +177,50 @@ uv run ruff check tests   # Lint Python
 - `Cargo.toml`: Rust dependencies and configuration.
 - `pyproject.toml`: Python package configuration.
 - `flake.nix`: Nix environment configuration.
+
+### Python Package Structure (maturin convention)
+
+The Python package lives in `python/akayu/` rather than at the project root. In `pyproject.toml`, you will see:
+
+```toml
+[tool.maturin]
+python-source = "python"
+module-name = "akayu.akayu"
+```
+
+This means the Rust extension (the `.so` file built by maturin) is placed inside `python/akayu/akayu.so`, and Python imports it as `akayu.akayu`. This follows the maturin convention where `module-name` is `akayu.akayu` because `python-source = "python"` means "the Python package is in the `python/` directory" and the extension module name is `akayu`. If this seems confusing, that's normal—it trips up many contributors. The key takeaway is that `import akayu` Just Works, and the extension binary lives nested inside the Python package directory.
+
+## Testing Your Changes
+
+The easiest way to test stream processing logic is to write small inline scripts:
+
+```python
+import akayu
+
+# Test a transform function in isolation
+def my_transform(x):
+    return x * 2
+
+source = akayu.Stream()
+result = source.map(my_transform).to_list()
+source.emit_batch([1, 2, 3])
+assert result == [2, 4, 6]
+```
+
+For more complex testing patterns, see the test suite in `tests/` for examples of filtering, unions, async operations, and error handling.
+
+## License
+
+`akayu` is dual-licensed under the MIT License and Apache License 2.0. See [LICENSE](LICENSE) for details. All contributions are accepted under the same terms.
+
+## First Time Contributors
+
+Welcome! Here are some areas where contributions are especially appreciated:
+
+- **Examples**: The `docs/` directory includes documentation with code blocks. Running `just docs-test-examples` will test these automatically. Good examples are always welcome.
+- **Documentation**: Improvements to docstrings, README, or this CONTRIBUTING guide.
+- **New operations**: If there's a `streamz` operation you'd like to see implemented, open an issue to discuss it first.
+- **Bug fixes**: Check the issue tracker for any `help wanted` or `good first issue` tags.
 
 ## Development Workflow
 

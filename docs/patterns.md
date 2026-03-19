@@ -1,6 +1,76 @@
 # Patterns & Best Practices
 
-This guide covers common architectural patterns for building robust pipelines with `akayu`.
+## Starter Patterns
+
+### Simple Transform
+
+Basic map → filter → sink pipeline:
+
+```python
+import akayu
+
+source = akayu.Stream()
+results = []
+
+source.map(lambda x: x * 2).filter(lambda x: x > 5).sink(results.append)
+
+source.compile()
+source.emit_batch(range(10))
+
+print(results)  # [6, 8, 10, 12, 14, 16, 18]
+```
+
+### Multiple Sinks
+
+Branch to multiple consumers with `par()`:
+
+```python
+source = akayu.Stream()
+
+# Fan out to three independent sinks
+p = source.par()
+p.map(enrich_with_metadata).sink(store_to_db)
+p.map(validate).filter(is_valid).sink(publish_valid)
+p.map(validate).filter(lambda x: not is_valid(x)).sink(publish_invalid)
+
+source.compile()
+```
+
+### Accumulate/Reduce
+
+Running aggregation with `accumulate()`:
+
+```python
+source = akayu.Stream()
+
+# Running sum
+source.accumulate(lambda acc, x: acc + x, start=0).sink(print)
+
+source.emit_batch([1, 2, 3, 4, 5])
+# 1
+# 3
+# 6
+# 10
+# 15
+```
+
+### Testing a Pipeline
+
+Use `union()` to inject test data without modifying your pipeline:
+
+```python
+# Your pipeline
+source = akayu.Stream()
+pipeline = source.map(process).filter(validate).sink(results)
+
+# Test injection point via union
+test_source = akayu.Stream()
+test_pipeline = pipeline.union(test_source)
+
+# Test with synthetic data
+test_source.emit_batch(test_data)
+assert results == expected
+```
 
 ## Injecting Data Midway (The "Side-Door" Pattern)
 
@@ -31,7 +101,7 @@ flowchart LR
 ```
 
 ### Example Code
-<!-- pytest-codeblocks:skip -->
+
 ```python
 import akayu
 
@@ -71,7 +141,7 @@ flowchart LR
     PF --> M[Map: Fetch URL]:::process
     M --> Sink:::sink
 ```
-<!-- pytest-codeblocks:skip -->
+
 ```python
 source = akayu.Stream()
 # Keep 4 requests in flight at once
@@ -98,7 +168,7 @@ flowchart TD
     
     Z --> D[Decision]:::sink
 ```
-<!-- pytest-codeblocks:skip -->
+
 ```python
 source = akayu.Stream()
 p = source.par()
@@ -124,7 +194,7 @@ flowchart LR
     S --> B[batch_map]:::process
     B --> Sink:::sink
 ```
-<!-- pytest-codeblocks:skip -->
+
 ```python
 import numpy as np
 
@@ -146,7 +216,7 @@ source.emit_batch(large_data_chunk)
 ### 1. The "Late Modification"
 
 Attempting to modify the graph after `compile()` will crash your application.
-<!-- pytest-codeblocks:skip -->
+
 ```python
 s = akayu.Stream()
 s.map(f1)
@@ -160,7 +230,7 @@ s.map(f2)  # ❌ RuntimeError: Graph is locked
 ### 2. The Trivial Parallelism
 
 Using `par()` for cheap operations (like simple arithmetic) often makes code *slower* due to thread switching overhead.
-<!-- pytest-codeblocks:skip -->
+
 ```python
 # ❌ Anti-Pattern: Parallelizing trivial math
 s.par().map(lambda x: x + 1) 

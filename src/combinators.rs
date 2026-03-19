@@ -23,36 +23,52 @@ impl Stream {
     ///
     /// Use `seq()` to switch back to sequential execution after parallel branches.
     ///
-    /// Returns:
-    ///     A new Stream that will propagate values to its downstreams in parallel.
+    /// # Returns
     ///
-    /// Example:
-    ///     >>> s = Stream()
-    ///     >>> p = s.par()  # Create parallel branch point
-    ///     >>> a = p.map(load_from_disk)   # Branch 1
-    ///     >>> b = p.map(fetch_from_api)   # Branch 2
-    ///     >>> merged = union(a, b).seq()  # Back to sequential
-    ///     >>> s.emit(filename)  # a and b run in parallel
+    /// A new Stream that will propagate values to its downstreams in parallel.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// p = source.par()  # Create parallel branch point
+    /// a = p.map(load_from_disk)   # Branch 1
+    /// b = p.map(fetch_from_api)   # Branch 2
+    /// merged = akayu.union(a, b).seq()  # Back to sequential
+    /// source.emit(filename)  # a and b run in parallel
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(name = "par")]
-    pub fn par(&mut self, py: Python) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+    pub fn par(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
+        let self_py: Py<Self> = slf.clone().unbind();
         let node = Self::make_node(
             py,
             NodeLogic::Parallel,
             "par".to_string(),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
-    /// Alias for `par()`. Create a parallel branch point.
-    pub fn parallel(&mut self, py: Python) -> PyResult<Py<Self>> {
-        self.par(py)
+    /// Alias for `par()`.
+    ///
+    /// This is an alias for `par()` that provides an alternative name.
+    /// See `par()` for full documentation.
+    pub fn parallel(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        Stream::par(slf, py)
     }
 
     /// Create a sequential branch point (explicit synchronization point).
@@ -60,30 +76,42 @@ impl Stream {
     /// This is the default behavior for streams, but can be used explicitly
     /// after parallel sections to clearly indicate sequential execution resumes.
     ///
-    /// Returns:
-    ///     A new Stream that will propagate values to its downstreams sequentially.
+    /// # Returns
     ///
-    /// Example:
-    ///     >>> s = Stream()
-    ///     >>> p = s.par()
-    ///     >>> a = p.map(slow_op1)
-    ///     >>> b = p.map(slow_op2)
-    ///     >>> merged = union(a, b).seq()  # Explicit sequential point
-    ///     >>> merged.map(f1).sink(...)    # Sequential from here
-    ///     >>> merged.map(f2).sink(...)
-    pub fn seq(&mut self, py: Python) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+    /// A new Stream that will propagate values to its downstreams sequentially.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// p = source.par()
+    /// a = p.map(slow_op1)
+    /// b = p.map(slow_op2)
+    /// merged = akayu.union(a, b).seq()  # Explicit sequential point
+    /// merged.map(f1).sink(...)    # Sequential from here
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
+pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
+        let self_py: Py<Self> = slf.clone().unbind();
         let node = Self::make_node(
             py,
             NodeLogic::Source,
             "seq".to_string(),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -92,39 +120,60 @@ impl Stream {
     /// Creates a new stream that emits elements from this stream and all
     /// other streams. Elements are emitted in the order they arrive.
     ///
-    /// Args:
-    ///     *others: Other streams to merge with this one.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting elements from all input streams.
+    /// * `*others` - Other streams to merge with this one.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting elements from all input streams.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// s1 = akayu.Stream()
+    /// s2 = akayu.Stream()
+    /// merged = s1.union(s2)
+    /// result = []
+    /// merged.sink(result.append)
+    /// s1.emit(1)  # result contains [1]
+    /// s2.emit(2)  # result contains [1, 2]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (*others))]
-    pub fn union(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
-        // Check if any of the other streams are frozen
+    pub fn union(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
             }
         }
         let source_location = capture_source_location(py);
+        let self_py: Py<Self> = slf.clone().unbind();
         let node = Self::make_node(
             py,
             NodeLogic::Source,
             "union".to_string(),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
 
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
 
         for other in others {
-            // Use try_borrow_mut to handle case where other is self (already borrowed)
             if let Ok(mut other_ref) = other.try_borrow_mut(py) {
                 other_ref.downstreams.push(node.clone_ref(py));
+                node.borrow(py).parents.lock().unwrap().push(other.clone_ref(py));
             }
-            // If borrow fails, it means it's self (already added above), so skip
         }
 
         Ok(node)
@@ -136,22 +185,46 @@ impl Stream {
     /// any stream emits. Only starts emitting after all streams have
     /// emitted at least one value.
     ///
-    /// Args:
-    ///     *others: Other streams to combine with this one.
-    ///     emit_on: Stream or list of streams that trigger emission.
-    ///              If None (default), emit on update from any stream.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting tuples of latest values.
+    /// * `*others` - Other streams to combine with this one.
+    /// * `emit_on` - Stream or list of streams that trigger emission.
+    ///   If None (default), emit on update from any stream.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting tuples of latest values.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// s1 = akayu.Stream()
+    /// s2 = akayu.Stream()
+    /// combined = s1.combine_latest(s2)
+    /// result = []
+    /// combined.sink(result.append)
+    /// s1.emit('a')
+    /// s2.emit(1)
+    /// s1.emit('b')  # result contains [('a', 1), ('b', 1)]
+    /// s2.emit(2)    # result contains [('a', 1), ('b', 1), ('b', 2)]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// * `TypeError` - If `emit_on` is not a Stream or list of Streams.
     #[pyo3(signature = (*others, emit_on=None))]
     pub fn combine_latest(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         others: Vec<Py<Self>>,
         emit_on: Option<Py<PyAny>>,
     ) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
-        // Check if any of the other streams are frozen
+        {
+            let this = slf.borrow();
+            check_not_compiled(this.compiled, &this.name)?;
+        }
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
@@ -160,14 +233,10 @@ impl Stream {
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
 
-        // Helper to find stream index. Returns Some(0) if stream is self (can't borrow),
-        // Some(i+1) if stream matches others[i], or None if not found.
         let find_stream_index = |stream: &Py<Self>| -> Option<usize> {
-            // Try to borrow - if it fails, it's self (already mutably borrowed)
             if stream.try_borrow(py).is_err() {
-                return Some(0); // It's self
+                return Some(0);
             }
-            // Check against others
             for (i, other) in others.iter().enumerate() {
                 if stream.as_ptr() == other.as_ptr() {
                     return Some(i + 1);
@@ -176,11 +245,9 @@ impl Stream {
             None
         };
 
-        // Resolve emit_on to indices
         let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
             let mut indices = Vec::new();
 
-            // Check if it's a single stream or a list
             if let Ok(single_stream) = emit_on_obj.extract::<Py<Self>>(py) {
                 if let Some(idx) = find_stream_index(&single_stream) {
                     indices.push(idx);
@@ -199,9 +266,13 @@ impl Stream {
 
             indices
         } else {
-            Vec::new() // Empty means emit on any
+            Vec::new()
         };
 
+        let (asynchronous, skip_async_check) = {
+            let this = slf.borrow();
+            (this.asynchronous, this.skip_async_check)
+        };
         let node = Self::make_node(
             py,
             NodeLogic::CombineLatest {
@@ -210,21 +281,20 @@ impl Stream {
             },
             "combine_latest".to_string(),
             source_location.clone(),
-            self.asynchronous,
-            self.skip_async_check,
+            asynchronous,
+            skip_async_check,
             true,
         )?;
 
-        self.add_tag_node(py, 0, &node, &source_location)?;
+        let self_py: Py<Self> = slf.clone().unbind();
+        slf.borrow_mut().add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
         for (i, other) in others.iter().enumerate() {
-            // Use try_borrow_mut to handle case where other is self (already borrowed)
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node, &source_location)?;
+                    other_ref.add_tag_node(py, i + 1, &node, other.clone_ref(py), &source_location)?;
                 }
                 Err(_) => {
-                    // Already borrowed - means it's self, use self directly
-                    self.add_tag_node(py, i + 1, &node, &source_location)?;
+                    slf.borrow_mut().add_tag_node(py, i + 1, &node, self_py.clone_ref(py), &source_location)?;
                 }
             }
         }
@@ -237,15 +307,37 @@ impl Stream {
     /// Emits tuples containing one element from each stream. Waits until
     /// all streams have an element available before emitting.
     ///
-    /// Args:
-    ///     *others: Other streams to zip with this one.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting zipped tuples.
+    /// * `*others` - Other streams to zip with this one.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting zipped tuples.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// s1 = akayu.Stream()
+    /// s2 = akayu.Stream()
+    /// zipped = s1.zip(s2)
+    /// result = []
+    /// zipped.sink(result.append)
+    /// s1.emit(1)
+    /// s1.emit(2)  # waiting for s2...
+    /// s2.emit('a') # result contains [(1, 'a'), (2, 'a')]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (*others))]
-    pub fn zip(&mut self, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
-        // Check if any of the other streams are frozen
+    pub fn zip(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
+        {
+            let this = slf.borrow();
+            check_not_compiled(this.compiled, &this.name)?;
+        }
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
                 check_not_compiled(other_ref.compiled, &other_ref.name)?;
@@ -254,6 +346,10 @@ impl Stream {
 
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
+        let (asynchronous, skip_async_check) = {
+            let this = slf.borrow();
+            (this.asynchronous, this.skip_async_check)
+        };
         let node = Self::make_node(
             py,
             NodeLogic::Zip {
@@ -261,21 +357,20 @@ impl Stream {
             },
             "zip".to_string(),
             source_location.clone(),
-            self.asynchronous,
-            self.skip_async_check,
+            asynchronous,
+            skip_async_check,
             true,
         )?;
 
-        self.add_tag_node(py, 0, &node, &source_location)?;
+        let self_py: Py<Self> = slf.clone().unbind();
+        slf.borrow_mut().add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
         for (i, other) in others.iter().enumerate() {
-            // Use try_borrow_mut to handle case where other is self (already borrowed)
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node, &source_location)?;
+                    other_ref.add_tag_node(py, i + 1, &node, other.clone_ref(py), &source_location)?;
                 }
                 Err(_) => {
-                    // Already borrowed - means it's self, use self directly
-                    self.add_tag_node(py, i + 1, &node, &source_location)?;
+                    slf.borrow_mut().add_tag_node(py, i + 1, &node, self_py.clone_ref(py), &source_location)?;
                 }
             }
         }
@@ -291,6 +386,7 @@ impl Stream {
         py: Python,
         index: usize,
         target: &Py<Self>,
+        source_py: Py<Self>,
         source_location: &str,
     ) -> PyResult<()> {
         let tag_node = Self::make_node(
@@ -306,7 +402,9 @@ impl Stream {
             .borrow_mut(py)
             .downstreams
             .push(target.clone_ref(py));
-        self.downstreams.push(tag_node);
+        target.borrow(py).parents.lock().unwrap().push(tag_node.clone_ref(py));
+        self.downstreams.push(tag_node.clone_ref(py));
+        tag_node.borrow(py).parents.lock().unwrap().push(source_py);
         Ok(())
     }
 }
@@ -318,24 +416,37 @@ impl Stream {
 /// Creates a new stream that emits elements from all input streams.
 /// Elements are emitted in the order they arrive from any source.
 ///
-/// Args:
-///     *streams: Two or more streams to merge.
+/// # Arguments
 ///
-/// Returns:
-///     A new Stream emitting elements from all input streams.
+/// * `*streams` - Two or more streams to merge.
 ///
-/// Example:
-///     >>> s1 = akayu.Stream()
-///     >>> s2 = akayu.Stream()
-///     >>> merged = akayu.union(s1, s2)
+/// # Returns
+///
+/// A new Stream emitting elements from all input streams.
+///
+/// # Examples
+///
+/// ```python
+/// import akayu
+/// s1 = akayu.Stream()
+/// s2 = akayu.Stream()
+/// merged = akayu.union(s1, s2)
+/// result = []
+/// merged.sink(result.append)
+/// s1.emit(1)  # result contains [1]
+/// s2.emit(2)  # result contains [1, 2]
+/// ```
+///
+/// # Raises
+///
+/// * `ValueError` - If fewer than one stream is provided.
 #[pyfunction]
 #[pyo3(signature = (*streams))]
 pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(StreamError::UnionEmpty.into());
+        return Err(StreamError::UnionEmpty(0).into());
     }
 
-    // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
@@ -352,9 +463,12 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         true,
     )?;
 
-    for stream in streams {
+    for stream in &streams {
+        let stream_py: Py<Stream> = stream.clone_ref(py);
         let mut stream_ref = stream.borrow_mut(py);
         stream_ref.downstreams.push(node.clone_ref(py));
+        drop(stream_ref);
+        node.borrow(py).parents.lock().unwrap().push(stream_py);
     }
 
     Ok(node)
@@ -366,19 +480,38 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
 /// from each input stream whenever any stream emits. Only starts
 /// emitting after all streams have emitted at least one value.
 ///
-/// Args:
-///     *streams: Two or more streams to combine.
-///     emit_on: Stream or list of streams that trigger emission.
-///              If None (default), emit on update from any stream.
+/// # Arguments
 ///
-/// Returns:
-///     A new Stream emitting tuples of latest values.
+/// * `*streams` - Two or more streams to combine.
+/// * `emit_on` - Stream or list of streams that trigger emission.
+///   If None (default), emit on update from any stream.
 ///
-/// Example:
-///     >>> s1 = akayu.Stream()
-///     >>> s2 = akayu.Stream()
-///     >>> combined = akayu.combine_latest(s1, s2)
-///     >>> combined_on_s1 = akayu.combine_latest(s1, s2, emit_on=s1)
+/// # Returns
+///
+/// A new Stream emitting tuples of latest values.
+///
+/// # Examples
+///
+/// ```python
+/// import akayu
+/// s1 = akayu.Stream()
+/// s2 = akayu.Stream()
+/// combined = akayu.combine_latest(s1, s2)
+/// result = []
+/// combined.sink(result.append)
+/// s1.emit('a')
+/// s2.emit(1)
+/// s1.emit('b')  # result contains [('a', 1), ('b', 1)]
+/// s2.emit(2)    # result contains [('a', 1), ('b', 1), ('b', 2)]
+///
+/// # With emit_on trigger
+/// combined_on_s1 = akayu.combine_latest(s1, s2, emit_on=s1)
+/// ```
+///
+/// # Raises
+///
+/// * `ValueError` - If fewer than one stream is provided.
+/// * `TypeError` - If `emit_on` is not a Stream or list of Streams.
 #[pyfunction]
 #[pyo3(signature = (*streams, emit_on=None))]
 pub fn combine_latest(
@@ -387,10 +520,9 @@ pub fn combine_latest(
     emit_on: Option<Py<PyAny>>,
 ) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(StreamError::CombineLatestEmpty.into());
+        return Err(StreamError::CombineLatestEmpty(0).into());
     }
 
-    // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
@@ -398,13 +530,10 @@ pub fn combine_latest(
 
     let source_location = capture_source_location(py);
 
-    // Resolve emit_on to indices within the streams vector
     let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
         let mut indices = Vec::new();
 
-        // Check if it's a single stream or a list
         if let Ok(single_stream) = emit_on_obj.extract::<Py<Stream>>(py) {
-            // Single stream - find its index by comparing Python object pointers
             for (i, s) in streams.iter().enumerate() {
                 if single_stream.as_ptr() == s.as_ptr() {
                     indices.push(i);
@@ -412,7 +541,6 @@ pub fn combine_latest(
                 }
             }
         } else if let Ok(stream_list) = emit_on_obj.extract::<Vec<Py<Stream>>>(py) {
-            // List of streams
             for stream in &stream_list {
                 for (i, s) in streams.iter().enumerate() {
                     if stream.as_ptr() == s.as_ptr() {
@@ -429,7 +557,7 @@ pub fn combine_latest(
 
         indices
     } else {
-        Vec::new() // Empty means emit on any
+        Vec::new()
     };
 
     let total_sources = streams.len();
@@ -447,8 +575,11 @@ pub fn combine_latest(
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
+        let stream_py: Py<Stream> = stream.clone_ref(py);
         let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node, &source_location)?;
+        stream_ref.add_tag_node(py, i, &node, stream_py.clone_ref(py), &source_location)?;
+        drop(stream_ref);
+        node.borrow(py).parents.lock().unwrap().push(stream_py);
     }
 
     Ok(node)
@@ -460,39 +591,61 @@ pub fn combine_latest(
 /// then emits them as a tuple. Buffers items until all streams have
 /// contributed one value.
 ///
-/// Args:
-///     *streams: Two or more streams to zip together.
+/// # Arguments
 ///
-/// Returns:
-///     A new stream that emits tuples of values from all input streams.
+/// * `*streams` - Two or more streams to zip together.
+///
+/// # Returns
+///
+/// A new stream that emits tuples of values from all input streams.
+///
+/// # Examples
+///
+/// ```python
+/// import akayu
+/// s1 = akayu.Stream()
+/// s2 = akayu.Stream()
+/// zipped = akayu.zip(s1, s2)
+/// result = []
+/// zipped.sink(result.append)
+/// s1.emit(1)
+/// s1.emit(2)  # waiting for s2...
+/// s2.emit('a')  # result contains [(1, 'a'), (2, 'a')]
+/// ```
+///
+/// # Raises
+///
+/// * `ValueError` - If fewer than two streams are provided.
 #[pyfunction]
 #[pyo3(signature = (*streams))]
 pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(StreamError::ZipTooFew.into());
+        return Err(StreamError::ZipTooFew(0).into());
     }
 
-    // Single stream: no-op passthrough
     if streams.len() == 1 {
         let stream = &streams[0];
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
         let source_location = capture_source_location(py);
+        let asynchronous = stream_ref.asynchronous;
+        let skip_async_check = stream_ref.skip_async_check;
+        let stream_py: Py<Stream> = stream.clone_ref(py);
+        drop(stream_ref);
         let node = Stream::make_node(
             py,
             NodeLogic::Source,
             "zip".to_string(),
             source_location,
-            stream_ref.asynchronous,
-            stream_ref.skip_async_check,
+            asynchronous,
+            skip_async_check,
             true,
         )?;
-        drop(stream_ref);
         stream.borrow_mut(py).downstreams.push(node.clone_ref(py));
+        node.borrow(py).parents.lock().unwrap().push(stream_py);
         return Ok(node);
     }
 
-    // Check if any of the streams are frozen
     for stream in &streams {
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
@@ -513,8 +666,10 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
+        let stream_py: Py<Stream> = stream.clone_ref(py);
         let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node, &source_location)?;
+        stream_ref.add_tag_node(py, i, &node, stream_py, &source_location)?;
+        drop(stream_ref);
     }
 
     Ok(node)

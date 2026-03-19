@@ -32,7 +32,7 @@ def check_mermaid(files):
                 failed = True
             except FileNotFoundError:
                 print(
-                    " ERROR: 'mmdc' command not found. Ensure mermaid-cli is installed (try 'nix develop')."
+                    " ERROR: 'mmdc' command not found. Ensure mermaid-cli is installed (try 'direnv exec /mnt/ssd1/vibes/akayu')."
                 )
                 sys.exit(1)
 

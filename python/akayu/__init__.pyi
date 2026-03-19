@@ -1,9 +1,57 @@
 """High-performance reactive streams for Python."""
 
-from typing import Any, Callable, Coroutine, Iterable, Optional, TypeVar, List, Union
+from typing import Any, Callable, Coroutine, Iterable, Optional, TypeVar, List, Union, ContextManager
 
 T = TypeVar("T")
 U = TypeVar("U")
+
+class ProfileReport:
+    """Profiling report for a pipeline execution.
+
+    Contains per-node timing and item flow data, preserving the graph
+    structure for tree-view display.
+    """
+
+    def print(self, sort_by: Optional[str] = None) -> None:
+        """Print the profiling report.
+
+        Args:
+            sort_by: If "time", print a flat list sorted by func_time descending.
+                     If None (default), print a tree view showing graph structure.
+        """
+        ...
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return profiling data as a dictionary."""
+        ...
+
+    def to_list(self) -> list[dict[str, Any]]:
+        """Return profiling data as a list of node dicts."""
+        ...
+
+    @property
+    def total_func_time_ms(self) -> float:
+        """Total function time across all nodes in milliseconds."""
+        ...
+
+    @property
+    def total_overhead_ms(self) -> float:
+        """Total framework overhead in milliseconds."""
+        ...
+
+    @property
+    def total_time_ms(self) -> float:
+        """Total wall time in milliseconds."""
+        ...
+
+    @property
+    def emit_count(self) -> int:
+        """Number of emit calls profiled."""
+        ...
+
+    def __repr__(self) -> str:
+        """Return string representation of the profile report."""
+        ...
 
 class Stream:
     """A reactive stream for processing data through a pipeline of operations.
@@ -34,14 +82,26 @@ class Stream:
         """
         ...
 
-    def map(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> "Stream":
+    def __repr__(self) -> str:
+        """Return string representation of the stream."""
+        ...
+
+    def __enter__(self) -> "Stream":
+        """Enter the stream context manager (returns self)."""
+        ...
+
+    def __exit__(self, *args: Any) -> None:
+        """Exit the stream context manager."""
+        ...
+
+    def map(self, func: Callable[..., T], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
         """Apply a function to each element in the stream.
 
         Args:
             func: Function to apply to each element.
             *args: Additional positional arguments passed to func.
+            stream_name: Optional custom name for this node.
             **kwargs: Additional keyword arguments passed to func.
-                Use `stream_name="name"` to set a custom name for this node.
 
         Returns:
             A new Stream emitting the transformed values.
@@ -49,7 +109,7 @@ class Stream:
         ...
 
     def filter(
-        self, predicate: Callable[..., bool], *args: Any, **kwargs: Any
+        self, predicate: Callable[..., bool], *args: Any, stream_name: Optional[str] = None, **kwargs: Any
     ) -> "Stream":
         """Filter elements based on a predicate function.
 
@@ -59,6 +119,7 @@ class Stream:
         Args:
             predicate: Function that returns True for elements to keep.
             *args: Additional positional arguments passed to predicate.
+            stream_name: Optional custom name for this node.
             **kwargs: Additional keyword arguments passed to predicate.
 
         Returns:
@@ -66,7 +127,7 @@ class Stream:
         """
         ...
 
-    def starmap(self, func: Callable[..., T], *args: Any, **kwargs: Any) -> "Stream":
+    def starmap(self, func: Callable[..., T], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
         """Apply a function to each element, unpacking the element as arguments.
 
         Similar to map, but each element is unpacked with *element before
@@ -75,6 +136,7 @@ class Stream:
         Args:
             func: Function to apply (receives unpacked element).
             *args: Additional positional arguments passed to func.
+            stream_name: Optional custom name for this node.
             **kwargs: Additional keyword arguments passed to func.
 
         Returns:
@@ -83,7 +145,7 @@ class Stream:
         ...
 
     def batch_map(
-        self, func: Callable[[List[Any]], Iterable[T]], *args: Any, **kwargs: Any
+        self, func: Callable[[List[Any]], Iterable[T]], *args: Any, stream_name: Optional[str] = None, **kwargs: Any
     ) -> "Stream":
         """Apply a batch-aware function to process entire batches at once.
 
@@ -94,8 +156,8 @@ class Stream:
         Args:
             func: Function that receives a list of items and returns an iterable of results.
             *args: Additional positional arguments passed to func.
+            stream_name: Optional custom name for this node.
             **kwargs: Additional keyword arguments passed to func.
-                Use `stream_name="name"` to set a custom name for this node.
 
         Returns:
             A new Stream emitting the transformed values.
@@ -132,6 +194,44 @@ class Stream:
         """
         ...
 
+    def chunk_by(
+        self, func: Callable[[Any], Any], *, include_delimiter: bool = False
+    ) -> "Stream":
+        """Buffer items until a predicate matches, then emit the buffer as a tuple.
+
+        Each item is buffered. When the predicate returns True for an item,
+        the buffer (including the delimiter if `include_delimiter=True`) is
+        emitted as a tuple downstream, and the buffer is cleared.
+
+        Any remaining items in the buffer are emitted on `flush()`.
+
+        Args:
+            func: Function that returns True for delimiter items.
+            include_delimiter: If True, the delimiter item is included
+                in the emitted tuple. If False, it is excluded.
+
+        Returns:
+            A new Stream emitting tuples of chunked items.
+        """
+        ...
+
+    def drain(self, *args: Any, **kwargs: Any) -> Optional[Coroutine[Any, Any, Any]]:
+        """Recursively flush this node and all downstream nodes.
+
+        Unlike `flush()`, which only flushes this node's buffer,
+        `drain()` flushes this node and then recursively drains every
+        downstream node. Use this when you want to flush an entire
+        pipeline (e.g. at the end of processing).
+
+        Args:
+            *args: Ignored (for compatibility with streamz).
+            **kwargs: Ignored (for compatibility with streamz).
+
+        Returns:
+            A coroutine if async processing is triggered, otherwise None.
+        """
+        ...
+
     def flush(self, *args: Any, **kwargs: Any) -> Optional[Coroutine[Any, Any, Any]]:
         """Flush collected elements downstream.
 
@@ -147,7 +247,7 @@ class Stream:
         """
         ...
 
-    def sink(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> "Stream":
+    def sink(self, func: Callable[..., Any], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
         """Apply a function to each element for side effects.
 
         Similar to map, but the return value of func is discarded.
@@ -156,10 +256,66 @@ class Stream:
         Args:
             func: Function to call with each element.
             *args: Additional positional arguments passed to func.
+            stream_name: Optional custom name for this node.
             **kwargs: Additional keyword arguments passed to func.
 
         Returns:
             A new Stream (for chaining, though sink typically ends a pipeline).
+        """
+        ...
+
+    def to_list(self) -> list[Any]:
+        """Collect all emitted items into a Python list.
+
+        Creates a sink that appends each item to a list, then returns the list.
+        Items are collected as they flow through the stream.
+
+        Returns:
+            A Python list containing all emitted items.
+
+        Example:
+            >>> s = Stream()
+            >>> results = s.map(lambda x: x * 2).to_list()
+            >>> s.emit_batch([1, 2, 3])
+            >>> results
+            [2, 4, 6]
+        """
+        ...
+
+    def to_set(self) -> set[Any]:
+        """Collect all emitted items into a Python set (deduplicates).
+
+        Creates a sink that adds each item to a set, then returns the set.
+        Items are collected as they flow through the stream.
+
+        Returns:
+            A Python set containing all emitted items.
+
+        Example:
+            >>> s = Stream()
+            >>> results = s.map(lambda x: x % 3).to_set()
+            >>> s.emit_batch([1, 2, 3, 4, 5])
+            >>> results
+            {0, 1, 2}
+        """
+        ...
+
+    def collect_context(self) -> "CollectGuard":
+        """Return a context manager that auto-flushes the collect buffer on exit.
+
+        This is a convenience wrapper around collect() that automatically
+        calls flush() when exiting the context manager.
+
+        Returns:
+            A context manager that flushes the collect buffer on exit.
+
+        Example:
+            >>> s = Stream()
+            >>> with s.collect_context() as c:
+            ...     c.sink(print)
+            ...     s.emit(1)
+            ...     s.emit(2)
+            (1, 2)  # printed when context exits
         """
         ...
 
@@ -226,6 +382,62 @@ class Stream:
 
         Returns:
             A coroutine if async processing is triggered, otherwise None.
+        """
+        ...
+
+    def start_profiling(self) -> None:
+        """Start collecting profiling data for subsequent emit() calls.
+
+        Call `stop_profiling()` to end the session and retrieve the report.
+        Profiling adds minimal overhead (~80ns per node per item).
+
+        Raises:
+            RuntimeError: If called on a non-source node or if profiling is already active.
+        """
+        ...
+
+    def stop_profiling(self) -> ProfileReport:
+        """Stop profiling and return the collected report.
+
+        Returns:
+            A ProfileReport with per-node timing and item flow data.
+        """
+        ...
+
+    def profile(self) -> ContextManager[Any]:
+        """Return a Profiler context manager for this source.
+
+        Usage:
+            >>> with source.profile() as p:
+            ...     source.emit(42)
+            >>> print(p.report)
+
+        Returns:
+            A context manager that profiles all emits within the block.
+        """
+        ...
+
+    def emit_profiled(self, x: Any) -> ProfileReport:
+        """Emit a single value and return a profiling report.
+
+        Convenience method combining start_profiling + emit + stop_profiling.
+
+        Args:
+            x: The value to emit.
+
+        Returns:
+            A ProfileReport for this single emit.
+        """
+        ...
+
+    def emit_batch_profiled(self, items: List[Any]) -> ProfileReport:
+        """Emit a batch of values and return a profiling report.
+
+        Args:
+            items: List of values to emit.
+
+        Returns:
+            A ProfileReport for this batch emit.
         """
         ...
 
@@ -360,6 +572,36 @@ class Stream:
 
         Returns:
             A new Stream emitting zipped tuples.
+        """
+        ...
+
+class CollectGuard:
+    """Context manager for collect that auto-flushes on exit.
+
+    Returned by Stream.collect_context(). Use as a context manager
+    to automatically flush the collect buffer when exiting.
+    """
+
+    def __enter__(self) -> "CollectGuard":
+        """Enter the context manager (returns self)."""
+        ...
+
+    def __exit__(self, *args: Any) -> None:
+        """Exit the context manager and flush the collect buffer."""
+        ...
+
+    def sink(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> "CollectGuard":
+        """Apply a function to each element for side effects.
+
+        Similar to Stream.sink but returns self for chaining.
+
+        Args:
+            func: Function to call with each element.
+            *args: Additional positional arguments passed to func.
+            **kwargs: Additional keyword arguments passed to func.
+
+        Returns:
+            self (for chaining).
         """
         ...
 
