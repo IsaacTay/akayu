@@ -165,7 +165,6 @@ pub enum BuiltinOp {
     FrozenSet,
 
     // --- Phase 2: Lambda-decompiled variants ---
-
     /// x <binop> rhs — uses PyNumber_* FFI calls
     BinOp(BinaryOp, Py<PyAny>),
     /// x <cmpop> rhs — uses PyObject_RichCompareBool

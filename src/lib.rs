@@ -110,7 +110,7 @@ pub struct Stream {
     pub(crate) flushing: bool,
     /// Guard against re-entrant emit calls. True while this node is
     /// actively propagating from an emit(). Prevents cycles in the data graph.
-    pub(crate) emitting: bool,
+    pub(crate) emitting: std::sync::atomic::AtomicBool,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

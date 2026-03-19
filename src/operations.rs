@@ -7,12 +7,11 @@ use crate::error::StreamError;
 use crate::helpers::{
     capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
     get_build_map_func, get_build_starmap_func, get_func_name, get_gather, get_is_sync_callable,
-    get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
-    get_prefetch_state_class, get_profiler_class, wrap_error,
+    get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
+    get_profiler_class, wrap_error,
 };
 use crate::node::NodeLogic;
 use crate::Stream;
-
 
 /// Check if a Python callable is synchronous using the cached helper.
 fn check_func_is_sync(py: Python, func: &Py<PyAny>) -> PyResult<bool> {
@@ -75,7 +74,7 @@ impl Stream {
                 flush_target: None,
                 emit_target: None,
                 flushing: false,
-                emitting: false,
+                emitting: std::sync::atomic::AtomicBool::new(false),
             },
         )
     }
@@ -113,7 +112,7 @@ impl Stream {
             flush_target: None,
             emit_target: None,
             flushing: false,
-            emitting: false,
+            emitting: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -158,8 +157,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_map({size})+{name}");
-            this.source_location =
-                format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -170,7 +168,10 @@ impl Stream {
             let state = get_async_state_class()?.call0(py)?;
             let node = Self::make_node(
                 py,
-                NodeLogic::AsyncMap { func: wrapped_func, state },
+                NodeLogic::AsyncMap {
+                    func: wrapped_func,
+                    state,
+                },
                 name,
                 source_location,
                 this.asynchronous,
@@ -310,8 +311,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
-            this.source_location =
-                format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -373,8 +373,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_filter({size})+{name}");
-            this.source_location =
-                format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
             drop(this);
             return Ok(slf.clone().unbind());
@@ -382,7 +381,9 @@ impl Stream {
 
         let node = Self::make_node(
             py,
-            NodeLogic::Filter { predicate: wrapped_predicate },
+            NodeLogic::Filter {
+                predicate: wrapped_predicate,
+            },
             name,
             source_location,
             this.asynchronous,
@@ -562,7 +563,12 @@ impl Stream {
             | NodeLogic::PrefetchFilter { state, .. }
             | NodeLogic::PrefetchBatchMap { state, .. }
             | NodeLogic::AsyncMap { state, .. } => {
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
+                let results = wrap_error(
+                    py,
+                    state.call_method0(py, "flush"),
+                    &self.name,
+                    &self.source_location,
+                )?;
                 for result in results.bind(py).try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
                         futures.push(f);
@@ -653,7 +659,12 @@ impl Stream {
             | NodeLogic::PrefetchFilter { state, .. }
             | NodeLogic::PrefetchBatchMap { state, .. }
             | NodeLogic::AsyncMap { state, .. } => {
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
+                let results = wrap_error(
+                    py,
+                    state.call_method0(py, "flush"),
+                    &self.name,
+                    &self.source_location,
+                )?;
                 for result in results.bind(py).try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
                         futures.push(f);
@@ -753,7 +764,11 @@ impl Stream {
 
         let node = Self::make_node(
             py,
-            NodeLogic::Accumulate { func, state: start, returns_state },
+            NodeLogic::Accumulate {
+                func,
+                state: start,
+                returns_state,
+            },
             name,
             source_location,
             self.asynchronous,
@@ -777,30 +792,28 @@ impl Stream {
     ///
     /// Returns:
     ///     A coroutine if async processing is triggered, otherwise None.
-    pub fn emit(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
-        // Re-entrancy guard: detect cycles in the data graph
-        if self.emitting {
+        if self.emitting.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(StreamError::ReentrantEmit(self.name.clone()).into());
         }
-        self.emitting = true;
+        self.emitting
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Track wall time if profiling
         let profiling = crate::profiling::is_profiling();
         if profiling {
             crate::profiling::begin_emit();
         }
 
-        // Emit bypasses this node's logic and propagates directly to downstreams
-        // (matching streamz behavior)
         let result = self.propagate(py, x);
 
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting = false;
+        self.emitting
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         result
     }
 
@@ -817,30 +830,28 @@ impl Stream {
     ///
     /// Returns:
     ///     A coroutine if async processing is triggered, otherwise None.
-    pub fn emit_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
-        // Re-entrancy guard: detect cycles in the data graph
-        if self.emitting {
+        if self.emitting.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(StreamError::ReentrantEmit(self.name.clone()).into());
         }
-        self.emitting = true;
+        self.emitting
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
-        // Track wall time if profiling
         let profiling = crate::profiling::is_profiling();
         if profiling {
             crate::profiling::begin_emit();
         }
 
-        // Emit bypasses this node's logic and propagates directly to downstreams
-        // (matching streamz behavior)
         let result = self.propagate_batch(py, items);
 
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting = false;
+        self.emitting
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         result
     }
 
@@ -936,7 +947,11 @@ impl Stream {
     ///
     /// Returns:
     ///     A `ProfileReport` for this single emit.
-    pub fn emit_profiled(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Py<crate::profiling::ProfileReport>> {
+    pub fn emit_profiled(
+        &mut self,
+        py: Python,
+        x: Py<PyAny>,
+    ) -> PyResult<Py<crate::profiling::ProfileReport>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
@@ -957,7 +972,11 @@ impl Stream {
     ///
     /// Returns:
     ///     A `ProfileReport` for this batch emit.
-    pub fn emit_batch_profiled(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Py<crate::profiling::ProfileReport>> {
+    pub fn emit_batch_profiled(
+        &mut self,
+        py: Python,
+        items: Vec<Py<PyAny>>,
+    ) -> PyResult<Py<crate::profiling::ProfileReport>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
