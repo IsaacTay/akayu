@@ -333,6 +333,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             flush_target: None,
             emit_target: None,
             flushing: false,
+            emitting: false,
         },
     )?;
     let stream_clone = stream.clone_ref(py);

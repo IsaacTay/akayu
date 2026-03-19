@@ -108,6 +108,9 @@ pub struct Stream {
     /// actively being flushed/drained. Prevents cycles and undefined behavior
     /// in the compiled raw-pointer path.
     pub(crate) flushing: bool,
+    /// Guard against re-entrant emit calls. True while this node is
+    /// actively propagating from an emit(). Prevents cycles in the data graph.
+    pub(crate) emitting: bool,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

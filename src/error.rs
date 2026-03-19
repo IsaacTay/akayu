@@ -37,6 +37,13 @@ pub enum StreamError {
     )]
     ReentrantFlush(String),
 
+    #[error(
+        "Re-entrant emit detected on node '{0}'. \
+         A downstream callback is calling emit() on a node that is already emitting. \
+         This creates a cycle in the data graph — restructure your pipeline to break the loop."
+    )]
+    ReentrantEmit(String),
+
     #[error("akayu not initialized")]
     NotInitialized,
 }
