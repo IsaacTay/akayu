@@ -4,7 +4,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
 use std::collections::{HashMap, HashSet};
 
-use crate::Stream;
+use crate::{Stream, StreamPtr};
 use crate::helpers::{
     get_analyze_lambda, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
     get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list,
@@ -125,6 +125,11 @@ impl Stream {
             || matches!(&self.logic, NodeLogic::Chain { .. });
         self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
             && (self.skip_async_check || self.builtin_op.is_some());
+        // Cache raw pointers to downstream Streams (bypass PyCell borrow checks in propagate)
+        self.compiled_downstream_ptrs = self.downstreams.iter().map(|d| {
+            let mut guard = d.borrow_mut(py);
+            StreamPtr(&mut *guard as *mut Stream)
+        }).collect();
 
         // BFS to freeze all reachable nodes
         let mut to_visit: Vec<Py<Self>> =
@@ -141,6 +146,15 @@ impl Stream {
                     || matches!(&node.logic, NodeLogic::Chain { .. });
                 node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
                     && (node.skip_async_check || node.builtin_op.is_some());
+                // Cache raw pointers to downstream Streams
+                let downstream_refs: Vec<Py<Stream>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+                drop(node);
+                let ptrs: Vec<StreamPtr> = downstream_refs.iter().map(|d| {
+                    let mut guard = d.borrow_mut(py);
+                    StreamPtr(&mut *guard as *mut Stream)
+                }).collect();
+                let mut node = node_py.borrow_mut(py);
+                node.compiled_downstream_ptrs = ptrs;
                 for downstream in &node.downstreams {
                     to_visit.push(downstream.clone_ref(py));
                 }

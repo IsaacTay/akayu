@@ -28,6 +28,26 @@ pub use combinators::{combine_latest, union, zip};
 pub use helpers::{from_text_file, to_text_file};
 pub use node::{BuiltinOp, NodeLogic};
 
+/// A raw pointer to a downstream `Stream`, cached at freeze time to bypass
+/// PyCell's atomic borrow checks in the propagation hot path.
+///
+/// # Safety
+/// Valid only while the parent `Py<Stream>` in `downstreams` keeps the Python object alive.
+/// Must only be dereferenced while holding the GIL, with no other `&mut` to the same `Stream`.
+/// These invariants hold because: the graph is a DAG (no cycles), processing is sequential
+/// (one subtree completes before the next starts), and topology is frozen after compile().
+#[derive(Clone, Copy)]
+pub(crate) struct StreamPtr(*mut Stream);
+unsafe impl Send for StreamPtr {}
+unsafe impl Sync for StreamPtr {}
+
+impl StreamPtr {
+    #[inline(always)]
+    pub(crate) unsafe fn get_mut(self) -> &'static mut Stream {
+        unsafe { &mut *self.0 }
+    }
+}
+
 /// A reactive stream for processing data through a pipeline of operations.
 ///
 /// Stream is the core building block for creating data processing pipelines.
@@ -72,6 +92,10 @@ pub struct Stream {
     /// Set at freeze time. True if this is a Filter whose predicate can skip the
     /// async check (has builtin_op or skip_async_check), so update() routes through apply_logic.
     pub(crate) compiled_filter_fast: bool,
+    /// Cached raw pointers to downstream `Stream` objects, set at freeze time.
+    /// Bypasses PyCell's atomic borrow check (~10ns/downstream/item) in propagate().
+    /// Empty before freeze — propagate falls back to normal `borrow_mut()`.
+    pub(crate) compiled_downstream_ptrs: Vec<StreamPtr>,
 }
 
 const HELPERS: &str = include_str!("akayu.py");
