@@ -59,15 +59,21 @@ impl Stream {
         // Phase 1: Eliminate source passthroughs
         self.eliminate_source_passthroughs(py);
 
-        // Phase 2: Detect builtin fast-paths before chain building
+        // Phase 1.5: Fuse collect+filter→sink(flush) into ChunkBy
+        self.fuse_chunk_by(py);
+
+        // Phase 2: Detect flush targets (Sink → Collect direct Rust call)
+        self.detect_flush_targets(py);
+
+        // Phase 3: Detect builtin fast-paths before chain building
         // (chain building moves builtin_op into ChainNode structs)
         self.detect_builtins(py);
 
-        // Phase 3: Cache vectorcall function pointers before chain building
+        // Phase 4: Cache vectorcall function pointers before chain building
         // (chain building moves cached_vectorcall into ChainNode structs)
         self.cache_vectorcall_ptrs(py);
 
-        // Phase 4: Build compiled chains for linear segments
+        // Phase 5: Build compiled chains for linear segments
         self.build_compiled_chains(py);
 
         // Phase 3: Collect all nodes and check sync status
@@ -442,6 +448,7 @@ impl Stream {
             let source_location = std::mem::take(&mut node.source_location);
             let builtin_op = node.builtin_op.take();
             let cached_vectorcall = node.cached_vectorcall.take();
+            let flush_target = node.flush_target.take();
             combined_func_is_sync = combined_func_is_sync && node.func_is_sync;
             steps.push(ChainNode {
                 logic,
@@ -450,6 +457,7 @@ impl Stream {
                 builtin_op,
                 node_id,
                 cached_vectorcall,
+                flush_target,
             });
         }
 
@@ -479,6 +487,294 @@ impl Stream {
         for node_py in &all_nodes {
             let mut node = node_py.borrow_mut(py);
             node.builtin_op = detect_builtin_for_logic(py, &mut node.logic);
+        }
+    }
+
+    /// Detect Sink nodes whose function calls .flush() on a Collect node in the same graph.
+    /// Sets `flush_target` on those Sink nodes so execution can bypass Python dispatch.
+    fn detect_flush_targets(&mut self, py: Python) {
+        let all_nodes = self.collect_all_nodes(py);
+        for node_py in &all_nodes {
+            let mut node = node_py.borrow_mut(py);
+            if let NodeLogic::Sink { ref func } = node.logic {
+                if let Some(target) = detect_flush_target_from_func(py, func) {
+                    node.flush_target = Some(target);
+                }
+            }
+        }
+    }
+
+    /// Fuse `collect() + filter(pred).sink(flush)` patterns into a single `ChunkBy` node.
+    ///
+    /// Walks the graph to find Sink nodes that call `.flush()` on a Collect node.
+    /// Then traces back to find the Filter providing the predicate and the branch point
+    /// where both paths originate. Extracts any intermediate transforms between the
+    /// branch point and the Collect into `pre_buffer_chain`.
+    fn fuse_chunk_by(&mut self, py: Python) {
+        let all_nodes = self.collect_all_nodes(py);
+
+        // Build parent_map: child_ptr → Vec<(parent_py, downstream_index)>
+        // Also includes self (source) as a parent
+        let mut parent_map: HashMap<usize, Vec<(Py<Self>, usize)>> = HashMap::new();
+        // Source's own downstreams
+        for (i, ds) in self.downstreams.iter().enumerate() {
+            // Use a sentinel Py — we can't reference self as Py, so we handle source specially
+            parent_map
+                .entry(ds.as_ptr() as usize)
+                .or_default()
+                .push((ds.clone_ref(py), i)); // placeholder — we'll handle source separately
+        }
+        // Build from all_nodes
+        let mut parent_map: HashMap<usize, Vec<Py<Self>>> = HashMap::new();
+        for node_py in &all_nodes {
+            let node = node_py.borrow(py);
+            for ds in &node.downstreams {
+                parent_map
+                    .entry(ds.as_ptr() as usize)
+                    .or_default()
+                    .push(node_py.clone_ref(py));
+            }
+        }
+        // Include source as parent of its direct downstreams
+        // We can't store self as Py<Stream>, so we track source_ptr specially
+        let source_ptr = std::ptr::from_ref(&*self) as usize;
+        let mut source_children: HashSet<usize> = HashSet::new();
+        for ds in &self.downstreams {
+            source_children.insert(ds.as_ptr() as usize);
+        }
+
+        // Phase 1: Find all (Sink, Collect) flush pairs
+        let mut flush_pairs: Vec<(Py<Self>, Py<Self>)> = Vec::new(); // (sink_py, collect_py)
+        for node_py in &all_nodes {
+            let node = node_py.borrow(py);
+            if let NodeLogic::Sink { ref func } = node.logic {
+                if let Some(target) = detect_flush_target_from_func(py, func) {
+                    drop(node);
+                    flush_pairs.push((node_py.clone_ref(py), target));
+                }
+            }
+        }
+
+        // Phase 2: For each pair, try to fuse
+        for (sink_py, collect_py) in flush_pairs {
+            // Find Filter: walk up from Sink through single-parent linear path
+            let filter_py = {
+                let mut cur = sink_py.clone_ref(py);
+                let mut found_filter: Option<Py<Self>> = None;
+                loop {
+                    let parents = parent_map.get(&(cur.as_ptr() as usize));
+                    let is_source_child = source_children.contains(&(cur.as_ptr() as usize));
+
+                    // Must have exactly one parent (either from parent_map or source)
+                    let parent_count = parents.map_or(0, |p| p.len()) + if is_source_child { 1 } else { 0 };
+                    if parent_count != 1 {
+                        break;
+                    }
+
+                    let parent_py = if is_source_child {
+                        // Parent is source — can't walk further up
+                        break;
+                    } else {
+                        parents.unwrap()[0].clone_ref(py)
+                    };
+
+                    let parent = parent_py.borrow(py);
+                    if matches!(parent.logic, NodeLogic::Filter { .. }) {
+                        drop(parent);
+                        found_filter = Some(parent_py);
+                        break;
+                    }
+                    drop(parent);
+                    cur = parent_py;
+                }
+                match found_filter {
+                    Some(f) => f,
+                    None => continue, // No filter found, skip
+                }
+            };
+
+            // Find the branch point: the Filter's parent that is also an ancestor of Collect
+            // Constraint: Filter must be a direct downstream of branch point
+            let filter_parents = parent_map.get(&(filter_py.as_ptr() as usize));
+            let filter_is_source_child = source_children.contains(&(filter_py.as_ptr() as usize));
+            let filter_parent_count = filter_parents.map_or(0, |p| p.len()) + if filter_is_source_child { 1 } else { 0 };
+            if filter_parent_count != 1 {
+                continue; // Filter has multiple parents, skip
+            }
+
+            let (branch_point_py, branch_is_source) = if filter_is_source_child {
+                (None, true) // Branch point is the source node (self)
+            } else {
+                (Some(filter_parents.unwrap()[0].clone_ref(py)), false)
+            };
+
+            // Find buffer path: from branch point to Collect
+            // Walk downstreams of the branch point looking for a linear path to collect_py
+            let branch_downstreams = if branch_is_source {
+                self.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>()
+            } else {
+                let bp = branch_point_py.as_ref().unwrap().borrow(py);
+                let ds = bp.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>();
+                drop(bp);
+                ds
+            };
+
+            // Find the buffer-path start (the downstream of branch point that leads to Collect,
+            // excluding the filter path)
+            let collect_ptr = collect_py.as_ptr() as usize;
+            let filter_ptr = filter_py.as_ptr() as usize;
+
+            let mut buffer_path: Option<Vec<Py<Self>>> = None;
+            for start in &branch_downstreams {
+                if start.as_ptr() as usize == filter_ptr {
+                    continue; // Skip the filter path
+                }
+                // DFS from start to find collect_py along a linear path
+                let mut path = vec![start.clone_ref(py)];
+                loop {
+                    let cur = path.last().unwrap();
+                    if cur.as_ptr() as usize == collect_ptr {
+                        // Found it
+                        buffer_path = Some(path);
+                        break;
+                    }
+                    let cur_node = cur.borrow(py);
+                    // Must be chainable and single downstream
+                    if !cur_node.logic.is_chainable() || cur_node.downstreams.len() != 1 {
+                        drop(cur_node);
+                        break; // Dead end
+                    }
+                    let next = cur_node.downstreams[0].clone_ref(py);
+                    drop(cur_node);
+                    path.push(next);
+                }
+                if buffer_path.is_some() {
+                    break;
+                }
+            }
+
+            let buffer_path = match buffer_path {
+                Some(p) => p,
+                None => continue, // No linear path to Collect, skip
+            };
+
+            // Verify all intermediate nodes in buffer_path (excluding Collect at end) are
+            // chainable and have exactly 1 downstream. Also, each must have exactly 1 parent.
+            let mut valid = true;
+            for node_py_ref in &buffer_path[..buffer_path.len().saturating_sub(1)] {
+                let node = node_py_ref.borrow(py);
+                if node.downstreams.len() != 1 || !node.logic.is_chainable() {
+                    valid = false;
+                    break;
+                }
+                drop(node);
+                // Check single parent
+                let parents = parent_map.get(&(node_py_ref.as_ptr() as usize));
+                let is_sc = source_children.contains(&(node_py_ref.as_ptr() as usize));
+                let pc = parents.map_or(0, |p| p.len()) + if is_sc { 1 } else { 0 };
+                if pc != 1 {
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid {
+                continue;
+            }
+
+            // --- All checks passed, perform the fusion ---
+
+            // Extract pre_buffer_chain from intermediate nodes (buffer_path minus the Collect at the end)
+            let mut pre_buffer_chain: Vec<ChainNode> = Vec::new();
+            for node_py_ref in &buffer_path[..buffer_path.len().saturating_sub(1)] {
+                let mut node = node_py_ref.borrow_mut(py);
+                let node_id = std::ptr::from_ref(&*node) as usize;
+                let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember);
+                let name = std::mem::take(&mut node.name);
+                let source_location = std::mem::take(&mut node.source_location);
+                let builtin_op = node.builtin_op.take();
+                let cached_vectorcall = node.cached_vectorcall.take();
+                let flush_target = node.flush_target.take();
+                pre_buffer_chain.push(ChainNode {
+                    logic,
+                    name,
+                    source_location,
+                    builtin_op,
+                    node_id,
+                    cached_vectorcall,
+                    flush_target,
+                });
+            }
+
+            // Extract predicate from Filter
+            let predicate = {
+                let mut filter_node = filter_py.borrow_mut(py);
+                match std::mem::replace(&mut filter_node.logic, NodeLogic::ChainMember) {
+                    NodeLogic::Filter { predicate } => predicate,
+                    _ => unreachable!(),
+                }
+            };
+
+            // Get Collect's downstreams (ChunkBy will inherit them)
+            let collect_downstreams = {
+                let collect_node = collect_py.borrow(py);
+                collect_node.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>()
+            };
+
+            // Get chunk_by name and source location
+            let (filter_name, filter_source) = {
+                let f = filter_py.borrow(py);
+                (f.name.clone(), f.source_location.clone())
+            };
+
+            // Create the ChunkBy node, replacing the first buffer-path node
+            // (or the Collect itself if buffer_path has only 1 element — direct downstream)
+            let chunk_by_target = &buffer_path[0];
+            let chunk_by_ptr = chunk_by_target.as_ptr() as usize;
+
+            // If buffer_path is just [collect], the ChunkBy replaces the Collect directly
+            // Otherwise, the first buffer-path node becomes the ChunkBy
+            let chunk_node_py = if buffer_path.len() == 1 {
+                // Direct: branch_point → collect
+                collect_py.clone_ref(py)
+            } else {
+                buffer_path[0].clone_ref(py)
+            };
+
+            {
+                let mut chunk_node = chunk_node_py.borrow_mut(py);
+                chunk_node.logic = NodeLogic::ChunkBy {
+                    buffer: Vec::new(),
+                    predicate,
+                    include_delimiter: true,
+                    pre_buffer_chain,
+                };
+                chunk_node.name = format!("chunk_by[fused]({})", filter_name);
+                chunk_node.source_location = filter_source;
+                chunk_node.downstreams = collect_downstreams;
+            }
+
+            // If buffer_path had intermediate nodes, mark the Collect as orphaned
+            if buffer_path.len() > 1 {
+                let mut collect_node = collect_py.borrow_mut(py);
+                collect_node.logic = NodeLogic::ChainMember;
+                collect_node.downstreams.clear();
+            }
+
+            // Remove the trigger path: remove Sink from Filter's downstreams
+            // (Filter is now ChainMember, so just clear it)
+            {
+                let mut filter_node = filter_py.borrow_mut(py);
+                filter_node.downstreams.clear();
+            }
+
+            // Remove Filter from branch point's downstreams
+            if branch_is_source {
+                self.downstreams.retain(|d| d.as_ptr() as usize != filter_ptr);
+            } else {
+                let bp = branch_point_py.as_ref().unwrap();
+                let mut bp_node = bp.borrow_mut(py);
+                bp_node.downstreams.retain(|d| d.as_ptr() as usize != filter_ptr);
+            }
         }
     }
 
@@ -786,9 +1082,68 @@ fn detect_builtin_for_logic(py: Python, logic: &mut NodeLogic) -> Option<Builtin
     match logic {
         NodeLogic::Map { func } => detect_map_builtin_with_unwrap(py, func),
         NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
+        NodeLogic::ChunkBy { predicate, .. } => detect_filter_builtin(py, predicate),
         NodeLogic::Sink { func } => detect_sink_builtin(func),
         _ => None,
     }
+}
+
+/// Detect if a Sink's function calls .flush() on a Stream (Collect node).
+///
+/// Handles two forms:
+/// - Bound method: `collected.flush` — check `__self__` is Stream, `__func__.__name__` is "flush"
+/// - Lambda: `lambda _: collected.flush()` — bytecode analysis returns `("call_method0", obj, "flush")`
+fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Stream>> {
+    // Method A: Bound method check (e.g., .sink(collected.flush))
+    let bound = func.bind(py);
+    if let (Ok(self_obj), Ok(func_obj)) = (bound.getattr("__self__"), bound.getattr("__func__")) {
+        if let Ok(name) = func_obj.getattr("__name__") {
+            if let Ok(name_str) = name.extract::<String>() {
+                if name_str == "flush" && self_obj.is_instance_of::<Stream>() {
+                    if let Ok(target) = self_obj.extract::<Py<Stream>>() {
+                        // Verify target is a Collect node
+                        let target_node = target.borrow(py);
+                        if matches!(target_node.logic, NodeLogic::Collect { .. }) {
+                            drop(target_node);
+                            return Some(target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Method B: Lambda bytecode analysis (e.g., .sink(lambda _: collected.flush()))
+    let analyzer = get_analyze_lambda().ok()?;
+    let result = analyzer.call1(py, (func,)).ok()?;
+    if result.is_none(py) {
+        return None;
+    }
+    let bound_result = result.bind(py);
+    let tuple = bound_result.cast::<PyTuple>().ok()?;
+    if tuple.len() != 3 {
+        return None;
+    }
+    let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
+    if tag != "call_method0" {
+        return None;
+    }
+    let method_name: String = tuple.get_item(2).ok()?.extract().ok()?;
+    if method_name != "flush" {
+        return None;
+    }
+    let obj = tuple.get_item(1).ok()?;
+    if !obj.is_instance_of::<Stream>() {
+        return None;
+    }
+    let target: Py<Stream> = obj.extract().ok()?;
+    // Verify target is a Collect node
+    let target_node = target.borrow(py);
+    if matches!(target_node.logic, NodeLogic::Collect { .. }) {
+        drop(target_node);
+        return Some(target);
+    }
+    None
 }
 
 /// Extract the vectorcall function pointer from a Python callable.
@@ -816,6 +1171,7 @@ fn extract_vectorcall_for_logic(_py: Python, logic: &NodeLogic) -> Option<pyo3::
     let callable_ptr = match logic {
         NodeLogic::Map { func } => func.as_ptr(),
         NodeLogic::Filter { predicate } => predicate.as_ptr(),
+        NodeLogic::ChunkBy { predicate, .. } => predicate.as_ptr(),
         NodeLogic::Sink { func } => func.as_ptr(),
         NodeLogic::Accumulate { func, .. } => func.as_ptr(),
         NodeLogic::BatchMap { func } => func.as_ptr(),
