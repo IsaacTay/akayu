@@ -1054,3 +1054,233 @@ class TestTruthinessEdgeCases:
         result = _emit_collect(s, r, [0, 1, "", "hi", [], [1]])
         assert result == [False, True, False, True, False, True]
         assert all(type(v) is bool for v in result)
+
+
+# ===========================================================================
+# Topology tests: branching, union, diamond
+# ===========================================================================
+
+class TestBranchingTopology:
+    """Test BuiltinOp optimization with branching (one source, multiple sinks)."""
+
+    def test_branch_two_maps(self):
+        """Two map branches from one source, each with different BuiltinOps."""
+        s = akayu.Stream()
+        r1, r2 = [], []
+        s.map(lambda x: x["a"]).sink(r1.append)
+        s.map(lambda x: len(x)).sink(r2.append)
+        s.compile()
+        for v in [{"a": 1, "b": 2}, {"a": 10, "b": 20}]:
+            s.emit(v)
+        assert r1 == [1, 10]
+        assert r2 == [2, 2]
+
+    def test_branch_map_and_filter(self):
+        """One branch maps, the other filters — both with BuiltinOps."""
+        s = akayu.Stream()
+        r_map, r_filter = [], []
+        s.map(lambda x: x * 2).sink(r_map.append)
+        s.filter(lambda x: x > 3).sink(r_filter.append)
+        s.compile()
+        for v in [1, 2, 3, 4, 5]:
+            s.emit(v)
+        assert r_map == [2, 4, 6, 8, 10]
+        assert r_filter == [4, 5]
+
+    def test_branch_three_sinks(self):
+        """Three branches from one source."""
+        s = akayu.Stream()
+        r1, r2, r3 = [], [], []
+        s.map(lambda x: x + 1).sink(r1.append)
+        s.map(lambda x: x * 10).sink(r2.append)
+        s.filter(lambda x: x % 2 == 0).sink(r3.append)
+        s.compile()
+        for v in [1, 2, 3, 4]:
+            s.emit(v)
+        assert r1 == [2, 3, 4, 5]
+        assert r2 == [10, 20, 30, 40]
+        assert r3 == [2, 4]
+
+    def test_branch_with_chain(self):
+        """Branch where one path is a chain of BuiltinOps."""
+        s = akayu.Stream()
+        r1, r2 = [], []
+        s.map(lambda x: x["name"]).map(lambda x: x.upper()).sink(r1.append)
+        s.map(lambda x: x["age"]).filter(lambda x: x >= 18).sink(r2.append)
+        s.compile()
+        data = [{"name": "alice", "age": 15}, {"name": "bob", "age": 25}]
+        for v in data:
+            s.emit(v)
+        assert r1 == ["ALICE", "BOB"]
+        assert r2 == [25]
+
+    def test_branch_emit_batch(self):
+        """emit_batch with branching topology."""
+        s = akayu.Stream()
+        r1, r2 = [], []
+        s.map(lambda x: x["k"]).sink(r1.append)
+        s.filter(lambda x: x["v"] > 0).sink(r2.append)
+        s.compile()
+        items = [{"k": "a", "v": 1}, {"k": "b", "v": -1}, {"k": "c", "v": 3}]
+        s.emit_batch(items)
+        assert r1 == ["a", "b", "c"]
+        assert r2 == [{"k": "a", "v": 1}, {"k": "c", "v": 3}]
+
+
+class TestUnionTopology:
+    """Test BuiltinOp optimization with union (multiple sources merge)."""
+
+    def test_union_with_downstream_map(self):
+        """Two sources union into a map with BuiltinOp."""
+        s1 = akayu.Stream()
+        s2 = akayu.Stream()
+        results = []
+        s1.union(s2).map(lambda x: x * 2).sink(results.append)
+        s1.compile()
+        s1.emit(10)
+        s2.emit(20)
+        s1.emit(30)
+        assert results == [20, 40, 60]
+
+    def test_union_with_downstream_filter(self):
+        """Two sources union into a filter with BuiltinOp."""
+        s1 = akayu.Stream()
+        s2 = akayu.Stream()
+        results = []
+        s1.union(s2).filter(lambda x: x > 5).sink(results.append)
+        s1.compile()
+        s1.emit(3)
+        s2.emit(10)
+        s1.emit(7)
+        s2.emit(1)
+        assert results == [10, 7]
+
+    def test_union_with_chain(self):
+        """Union into a chain of BuiltinOp steps."""
+        s1 = akayu.Stream()
+        s2 = akayu.Stream()
+        results = []
+        s1.union(s2).map(lambda x: x["val"]).filter(lambda x: x > 0).sink(results.append)
+        s1.compile()
+        s1.emit({"val": -1})
+        s2.emit({"val": 5})
+        s1.emit({"val": 3})
+        assert results == [5, 3]
+
+    def test_union_three_sources(self):
+        """Three sources merging via union."""
+        s1 = akayu.Stream()
+        s2 = akayu.Stream()
+        s3 = akayu.Stream()
+        results = []
+        akayu.union(s1, s2, s3).map(lambda x: x + 100).sink(results.append)
+        s1.compile()
+        s1.emit(1)
+        s2.emit(2)
+        s3.emit(3)
+        assert results == [101, 102, 103]
+
+
+class TestDiamondTopology:
+    """Test BuiltinOp optimization with diamond patterns (branch then merge)."""
+
+    def test_diamond_union(self):
+        """Source branches into two maps, then merges via union."""
+        s = akayu.Stream()
+        branch1 = s.map(lambda x: x * 2)
+        branch2 = s.map(lambda x: x * 10)
+        results = []
+        branch1.union(branch2).sink(results.append)
+        s.compile()
+        s.emit(5)
+        # Both branches fire for each emit, order: branch1 first then branch2
+        assert sorted(results) == [10, 50]
+
+    def test_diamond_with_downstream_builtin(self):
+        """Diamond with a BuiltinOp map after the merge."""
+        s = akayu.Stream()
+        b1 = s.map(lambda x: x + 1)
+        b2 = s.map(lambda x: x + 100)
+        results = []
+        b1.union(b2).map(lambda x: x * 2).sink(results.append)
+        s.compile()
+        s.emit(5)
+        assert sorted(results) == [12, 210]
+
+    def test_diamond_filter_then_merge(self):
+        """Branch with filters, then merge — only passing items arrive."""
+        s = akayu.Stream()
+        b1 = s.filter(lambda x: x > 0)
+        b2 = s.filter(lambda x: x < 0)
+        results = []
+        b1.union(b2).map(lambda x: abs(x)).sink(results.append)
+        s.compile()
+        for v in [-3, 0, 5, -1, 2]:
+            s.emit(v)
+        # 0 is filtered out by both branches
+        assert sorted(results) == [1, 2, 3, 5]
+
+    def test_diamond_chains_then_merge(self):
+        """Each branch is a chain, then merge via union."""
+        s = akayu.Stream()
+        b1 = s.map(lambda x: x["a"]).filter(lambda x: x > 0)
+        b2 = s.map(lambda x: x["b"]).filter(lambda x: x > 0)
+        results = []
+        b1.union(b2).sink(results.append)
+        s.compile()
+        s.emit({"a": 5, "b": -1})
+        s.emit({"a": -2, "b": 10})
+        s.emit({"a": 3, "b": 7})
+        # First emit: b1 passes 5, b2 filters out -1
+        # Second emit: b1 filters out -2, b2 passes 10
+        # Third emit: both pass
+        assert sorted(results) == [3, 5, 7, 10]
+
+
+class TestBatchWithTopology:
+    """Test emit_batch interacts correctly with non-linear topologies."""
+
+    def test_batch_branch_two_maps(self):
+        """emit_batch with two map branches."""
+        s = akayu.Stream()
+        r1, r2 = [], []
+        s.map(lambda x: x + 1).sink(r1.append)
+        s.map(lambda x: x * 10).sink(r2.append)
+        s.compile()
+        s.emit_batch([1, 2, 3])
+        assert r1 == [2, 3, 4]
+        assert r2 == [10, 20, 30]
+
+    def test_batch_union_downstream(self):
+        """emit_batch on one source of a union, downstream has BuiltinOp."""
+        s1 = akayu.Stream()
+        s2 = akayu.Stream()
+        results = []
+        s1.union(s2).map(lambda x: x * 3).sink(results.append)
+        s1.compile()
+        s1.emit_batch([10, 20])
+        s2.emit_batch([100, 200])
+        assert results == [30, 60, 300, 600]
+
+    def test_batch_diamond(self):
+        """emit_batch through a diamond topology."""
+        s = akayu.Stream()
+        b1 = s.filter(lambda x: x > 0)
+        b2 = s.filter(lambda x: x < 0)
+        results = []
+        b1.union(b2).map(lambda x: abs(x)).sink(results.append)
+        s.compile()
+        s.emit_batch([-3, 0, 5, -1, 2])
+        assert sorted(results) == [1, 2, 3, 5]
+
+    def test_batch_chain_branch(self):
+        """emit_batch where source has a chain, then branches."""
+        s = akayu.Stream()
+        mapped = s.map(lambda x: x["val"])
+        r1, r2 = [], []
+        mapped.map(lambda x: x + 1).sink(r1.append)
+        mapped.filter(lambda x: x > 5).sink(r2.append)
+        s.compile()
+        s.emit_batch([{"val": 3}, {"val": 8}, {"val": 1}])
+        assert r1 == [4, 9, 2]
+        assert r2 == [8]

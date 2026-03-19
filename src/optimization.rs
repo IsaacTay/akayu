@@ -309,14 +309,39 @@ impl Stream {
     /// `NodeLogic::Chain` variants. Eliminates per-node borrow_mut/drop/propagate
     /// overhead during execution.
     pub(crate) fn build_compiled_chains(&mut self, py: Python) {
+        // Compute in-degree for all nodes so we don't absorb shared nodes into chains.
+        // A node with in-degree > 1 (multiple parents) must not be consumed by a chain,
+        // because other parents still need to reach it.
+        let all_nodes = self.collect_all_nodes(py);
+        let mut multi_parent: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut seen_as_child: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+        for node_py in &all_nodes {
+            let node = node_py.borrow(py);
+            for ds in &node.downstreams {
+                let ptr = ds.as_ptr() as usize;
+                if !seen_as_child.insert(ptr) {
+                    multi_parent.insert(ptr);
+                }
+            }
+        }
+        // Also count source's own downstreams
+        for ds in &self.downstreams {
+            let ptr = ds.as_ptr() as usize;
+            if !seen_as_child.insert(ptr) {
+                multi_parent.insert(ptr);
+            }
+        }
+
         for downstream in &self.downstreams {
-            Self::build_chain_at(py, downstream);
+            Self::build_chain_at(py, downstream, &multi_parent);
         }
     }
 
     /// Try to build a compiled chain starting at the given node.
     /// Walks forward through single-downstream chainable nodes.
-    fn build_chain_at(py: Python, start_py: &Py<Self>) {
+    /// Nodes in `multi_parent` have in-degree > 1 and must not be absorbed.
+    fn build_chain_at(py: Python, start_py: &Py<Self>, multi_parent: &std::collections::HashSet<usize>) {
         // Check if this node is chainable
         {
             let node = start_py.borrow(py);
@@ -329,7 +354,7 @@ impl Stream {
                 let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
                 for ds in &downstreams {
-                    Self::build_chain_at(py, ds);
+                    Self::build_chain_at(py, ds, multi_parent);
                 }
                 return;
             }
@@ -349,6 +374,11 @@ impl Stream {
 
             let next_py = last.downstreams[0].clone_ref(py);
             drop(last);
+
+            // Don't absorb a node that has multiple parents
+            if multi_parent.contains(&(next_py.as_ptr() as usize)) {
+                break;
+            }
 
             let next = next_py.borrow(py);
             let next_chainable = matches!(next.logic,
@@ -370,7 +400,7 @@ impl Stream {
             let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             drop(node);
             for ds in &downstreams {
-                Self::build_chain_at(py, ds);
+                Self::build_chain_at(py, ds, multi_parent);
             }
             return;
         }
@@ -413,7 +443,7 @@ impl Stream {
 
         // Recurse into tail downstreams and any branches from branching nodes
         for ds in &tail_downstreams {
-            Self::build_chain_at(py, ds);
+            Self::build_chain_at(py, ds, multi_parent);
         }
 
         // Also recurse into downstreams of intermediate nodes that had branches
