@@ -85,6 +85,18 @@ pub enum NodeLogic {
     },
     /// Sentinel replacing logic in nodes absorbed into a Chain.
     ChainMember,
+    /// Buffers items until a predicate matches, then emits the buffer as a tuple.
+    /// Fused from `collect() + filter(pred).sink(flush)` patterns at compile time,
+    /// or created directly via `chunk_by(pred)`.
+    ChunkBy {
+        buffer: Vec<Py<PyAny>>,
+        predicate: Py<PyAny>,
+        include_delimiter: bool,
+        /// Transforms applied to each item before buffering.
+        /// Extracted from nodes between branch point and the original Collect.
+        /// Empty when Collect was a direct downstream of the branch point.
+        pre_buffer_chain: Vec<ChainNode>,
+    },
 }
 
 /// A single step in a compiled chain, holding the extracted NodeLogic
@@ -98,6 +110,9 @@ pub struct ChainNode {
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Avoids per-call type flag check + offset dereference in the hot loop.
     pub cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
+    /// If this is a Sink that calls .flush() on a Collect node, store the target
+    /// for direct Rust dispatch (bypasses Python vectorcall).
+    pub flush_target: Option<Py<crate::Stream>>,
 }
 
 /// Hint for builtin function fast-paths.

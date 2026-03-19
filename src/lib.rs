@@ -96,6 +96,10 @@ pub struct Stream {
     /// Bypasses PyCell's atomic borrow check (~10ns/downstream/item) in propagate().
     /// Empty before freeze — propagate falls back to normal `borrow_mut()`.
     pub(crate) compiled_downstream_ptrs: Vec<StreamPtr>,
+    /// If this Sink node's function calls .flush() on a Collect node in the same graph,
+    /// store a direct reference to skip Python dispatch at runtime.
+    /// Detected at compile time via bound method check or lambda bytecode analysis.
+    pub(crate) flush_target: Option<Py<Stream>>,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

@@ -59,6 +59,7 @@ pub(crate) struct NodeCtx<'a> {
     pub name: &'a str,
     pub source_location: &'a str,
     pub node_id: usize,
+    pub flush_target: &'a Option<Py<crate::Stream>>,
 }
 
 /// Call a Python callable, using the cached vectorcall pointer if available.
@@ -318,6 +319,15 @@ pub(crate) fn apply_logic(
         }
 
         NodeLogic::Sink { func } => {
+            // Fast path: direct Rust flush (no Python dispatch)
+            if let Some(target) = ctx.flush_target {
+                if profiling {
+                    profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0, ctx.name, ctx.source_location);
+                }
+                let mut t = target.borrow_mut(py);
+                t.flush(py, vec![], None)?;
+                return Ok(StepResult::Terminal);
+            }
             let t = prof_start(profiling);
             match ctx.builtin_op {
                 Some(BuiltinOp::Print) => {
@@ -403,6 +413,7 @@ pub(crate) fn apply_logic(
                     name: &step.name,
                     source_location: &step.source_location,
                     node_id: step.node_id,
+                    flush_target: &step.flush_target,
                 };
                 match apply_logic(py, &mut step.logic, &step_ctx, val, profiling)? {
                     StepResult::Value(v) => { val = v; i += 1; }
@@ -418,6 +429,7 @@ pub(crate) fn apply_logic(
                                 name: &s.name,
                                 source_location: &s.source_location,
                                 node_id: s.node_id,
+                                flush_target: &s.flush_target,
                             };
                             match apply_logic_batch(py, &mut s.logic, &s_ctx, batch, profiling)? {
                                 BatchStepResult::Items(out) => batch = out,
@@ -552,6 +564,17 @@ pub(crate) fn apply_logic_batch(
         }
 
         NodeLogic::Sink { func } => {
+            // Fast path: direct Rust flush (no Python dispatch)
+            if let Some(target) = ctx.flush_target {
+                if profiling {
+                    profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0, ctx.name, ctx.source_location);
+                }
+                for _x in items {
+                    let mut t = target.borrow_mut(py);
+                    t.flush(py, vec![], None)?;
+                }
+                return Ok(BatchStepResult::Terminal);
+            }
             let t = prof_start(profiling);
             match ctx.builtin_op {
                 Some(BuiltinOp::Print) => {
@@ -582,6 +605,7 @@ pub(crate) fn apply_logic_batch(
                     name: &step.name,
                     source_location: &step.source_location,
                     node_id: step.node_id,
+                    flush_target: &step.flush_target,
                 };
                 match apply_logic_batch(py, &mut step.logic, &step_ctx, batch, profiling)? {
                     BatchStepResult::Items(out) => batch = out,
@@ -610,6 +634,20 @@ impl Stream {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active { std::ptr::from_ref(&*self) as usize } else { 0 };
 
+        // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
+        if let Some(ref target) = self.flush_target {
+            if profiling_active {
+                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0, &self.name, &self.source_location);
+            }
+            // Call flush once per item (matching unfused behavior: filter passes each delimiter individually)
+            let mut last_result = None;
+            for _x in items {
+                let mut t = target.borrow_mut(py);
+                last_result = t.flush(py, vec![], None)?;
+            }
+            return Ok(last_result);
+        }
+
         // Chainable variants: delegate to apply_logic_batch
         // compiled_chainable is set at freeze_all() time; includes all chainable except Filter.
         // Batch path routes ALL filters through apply_logic_batch (no async check needed for batch).
@@ -620,6 +658,7 @@ impl Stream {
                 name: &self.name,
                 source_location: &self.source_location,
                 node_id,
+                flush_target: &self.flush_target,
             };
             match apply_logic_batch(py, &mut self.logic, &ctx, items, profiling_active)? {
                 BatchStepResult::Items(output) => return self.propagate_batch(py, output),
@@ -643,6 +682,73 @@ impl Stream {
                     profiling::record_node(node_id, Duration::ZERO, items_in, 0, &self.name, &self.source_location);
                 }
                 buffer.extend(items);
+                return Ok(None);
+            }
+
+            NodeLogic::ChunkBy { buffer, predicate, include_delimiter, pre_buffer_chain } => {
+                let t = prof_start(profiling_active);
+                let mut emitted = Vec::new();
+                for x in items {
+                    // Apply pre_buffer_chain transforms
+                    let buffered = if pre_buffer_chain.is_empty() {
+                        Some(x.clone_ref(py))
+                    } else {
+                        let mut result: Option<Py<PyAny>> = Some(x.clone_ref(py));
+                        for step in pre_buffer_chain.iter_mut() {
+                            let val = match result.take() {
+                                Some(v) => v,
+                                None => break,
+                            };
+                            let step_ctx = NodeCtx {
+                                builtin_op: &step.builtin_op,
+                                cached_vc: &step.cached_vectorcall,
+                                name: &step.name,
+                                source_location: &step.source_location,
+                                node_id: step.node_id,
+                                flush_target: &step.flush_target,
+                            };
+                            match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
+                                StepResult::Value(v) => result = Some(v),
+                                _ => { break; }
+                            }
+                        }
+                        result
+                    };
+                    if let Some(item) = buffered {
+                        buffer.push(item);
+                    }
+                    // Check predicate on raw item
+                    let is_delimiter = match &self.builtin_op {
+                        Some(op) => {
+                            let res = apply_builtin_as_filter(py, op, &x);
+                            wrap_error(py, res, &self.name, &self.source_location)?
+                        }
+                        None => {
+                            let pred_result = vcall1(py, predicate, &x, &self.cached_vectorcall);
+                            let pred_result = wrap_error(py, pred_result, &self.name, &self.source_location)?;
+                            pred_result.is_truthy(py)?
+                        }
+                    };
+                    if is_delimiter {
+                        if !*include_delimiter {
+                            buffer.pop();
+                        }
+                        if !buffer.is_empty() {
+                            let chunk = std::mem::take(buffer);
+                            let tuple = PyTuple::new(py, chunk)?;
+                            emitted.push(tuple.into_any().unbind());
+                        }
+                    }
+                }
+                let items_out = emitted.len() as u64;
+                if let Some(t) = t {
+                    if profiling_active {
+                        profiling::record_node(node_id, t.elapsed(), items_in, items_out, &self.name, &self.source_location);
+                    }
+                }
+                if !emitted.is_empty() {
+                    return self.propagate_batch(py, emitted);
+                }
                 return Ok(None);
             }
 
@@ -791,6 +897,15 @@ impl Stream {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active { std::ptr::from_ref(&*self) as usize } else { 0 };
 
+        // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
+        if let Some(ref target) = self.flush_target {
+            if profiling_active {
+                profiling::record_node(node_id, Duration::ZERO, 1, 0, &self.name, &self.source_location);
+            }
+            let mut t = target.borrow_mut(py);
+            return t.flush(py, vec![], None);
+        }
+
         // Chainable variants: delegate to apply_logic
         // (except Filter when async check is needed — that stays here)
         // compiled_chainable / compiled_filter_fast are set once at freeze_all() time
@@ -801,6 +916,7 @@ impl Stream {
                 name: &self.name,
                 source_location: &self.source_location,
                 node_id,
+                flush_target: &self.flush_target,
             };
             match apply_logic(py, &mut self.logic, &ctx, x, profiling_active)? {
                 StepResult::Value(v) => return self.propagate(py, v),
@@ -843,6 +959,71 @@ impl Stream {
                     profiling::record_node(node_id, Duration::ZERO, 1, 0, &self.name, &self.source_location);
                 }
                 buffer.push(x);
+                return Ok(None);
+            }
+            NodeLogic::ChunkBy { buffer, predicate, include_delimiter, pre_buffer_chain } => {
+                let t = prof_start(profiling_active);
+                // Apply pre_buffer_chain transforms to get the buffered item
+                let buffered = if pre_buffer_chain.is_empty() {
+                    Some(x.clone_ref(py))
+                } else {
+                    let mut result: Option<Py<PyAny>> = Some(x.clone_ref(py));
+                    for step in pre_buffer_chain.iter_mut() {
+                        let val = match result.take() {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        let step_ctx = NodeCtx {
+                            builtin_op: &step.builtin_op,
+                            cached_vc: &step.cached_vectorcall,
+                            name: &step.name,
+                            source_location: &step.source_location,
+                            node_id: step.node_id,
+                            flush_target: &step.flush_target,
+                        };
+                        match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
+                            StepResult::Value(v) => result = Some(v),
+                            _ => { break; }
+                        }
+                    }
+                    result
+                };
+                // Buffer the transformed item (if it survived pre_buffer_chain)
+                if let Some(item) = buffered {
+                    buffer.push(item);
+                }
+                // Check predicate on the raw item (at branch point level)
+                let is_delimiter = match &self.builtin_op {
+                    Some(op) => {
+                        let res = apply_builtin_as_filter(py, op, &x);
+                        wrap_error(py, res, &self.name, &self.source_location)?
+                    }
+                    None => {
+                        let pred_result = vcall1(py, predicate, &x, &self.cached_vectorcall);
+                        let pred_result = wrap_error(py, pred_result, &self.name, &self.source_location)?;
+                        pred_result.is_truthy(py)?
+                    }
+                };
+                if let Some(t) = t {
+                    ft = t.elapsed();
+                }
+                if is_delimiter {
+                    if !*include_delimiter {
+                        // Remove the delimiter (last item added) from buffer
+                        buffer.pop();
+                    }
+                    if !buffer.is_empty() {
+                        let items = std::mem::take(buffer);
+                        let tuple = PyTuple::new(py, items)?;
+                        if profiling_active {
+                            profiling::record_node(node_id, ft, 1, 1, &self.name, &self.source_location);
+                        }
+                        return self.propagate(py, tuple.into());
+                    }
+                }
+                if profiling_active {
+                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
+                }
                 return Ok(None);
             }
             NodeLogic::Tag { index } => {
