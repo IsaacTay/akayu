@@ -65,6 +65,9 @@ impl Stream {
         // Phase 2: Detect flush targets (Sink → Collect direct Rust call)
         self.detect_flush_targets(py);
 
+        // Phase 2.5: Detect emit targets (Sink → Source direct Rust call)
+        self.detect_emit_targets(py);
+
         // Phase 3: Detect builtin fast-paths before chain building
         // (chain building moves builtin_op into ChainNode structs)
         self.detect_builtins(py);
@@ -449,6 +452,7 @@ impl Stream {
             let builtin_op = node.builtin_op.take();
             let cached_vectorcall = node.cached_vectorcall.take();
             let flush_target = node.flush_target.take();
+            let emit_target = node.emit_target.take();
             combined_func_is_sync = combined_func_is_sync && node.func_is_sync;
             steps.push(ChainNode {
                 logic,
@@ -458,6 +462,7 @@ impl Stream {
                 node_id,
                 cached_vectorcall,
                 flush_target,
+                emit_target,
             });
         }
 
@@ -499,6 +504,20 @@ impl Stream {
             if let NodeLogic::Sink { ref func } = node.logic {
                 if let Some(target) = detect_flush_target_from_func(py, func) {
                     node.flush_target = Some(target);
+                }
+            }
+        }
+    }
+
+    /// Detect Sink nodes whose function calls .emit() on a Source node in the same graph.
+    /// Sets `emit_target` on those Sink nodes so execution can bypass Python dispatch.
+    fn detect_emit_targets(&mut self, py: Python) {
+        let all_nodes = self.collect_all_nodes(py);
+        for node_py in &all_nodes {
+            let mut node = node_py.borrow_mut(py);
+            if let NodeLogic::Sink { ref func } = node.logic {
+                if let Some(target) = detect_emit_target_from_func(py, func) {
+                    node.emit_target = Some(target);
                 }
             }
         }
@@ -694,6 +713,7 @@ impl Stream {
                 let builtin_op = node.builtin_op.take();
                 let cached_vectorcall = node.cached_vectorcall.take();
                 let flush_target = node.flush_target.take();
+                let emit_target = node.emit_target.take();
                 pre_buffer_chain.push(ChainNode {
                     logic,
                     name,
@@ -702,6 +722,7 @@ impl Stream {
                     node_id,
                     cached_vectorcall,
                     flush_target,
+                    emit_target,
                 });
             }
 
@@ -1140,6 +1161,64 @@ fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Stre
     // Verify target is a Collect node
     let target_node = target.borrow(py);
     if matches!(target_node.logic, NodeLogic::Collect { .. }) {
+        drop(target_node);
+        return Some(target);
+    }
+    None
+}
+
+/// Detect if a Sink's function calls .emit() on a Stream (Source node).
+///
+/// Handles two forms:
+/// - Bound method: `source.emit` — check `__self__` is Stream, `__func__.__name__` is "emit"
+/// - Lambda: `lambda x: source.emit(x)` — bytecode analysis returns `("call_method1", obj, "emit")`
+fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Stream>> {
+    // Method A: Bound method check (e.g., .sink(source.emit))
+    let bound = func.bind(py);
+    if let (Ok(self_obj), Ok(func_obj)) = (bound.getattr("__self__"), bound.getattr("__func__")) {
+        if let Ok(name) = func_obj.getattr("__name__") {
+            if let Ok(name_str) = name.extract::<String>() {
+                if name_str == "emit" && self_obj.is_instance_of::<Stream>() {
+                    if let Ok(target) = self_obj.extract::<Py<Stream>>() {
+                        // Verify target is a Source node
+                        let target_node = target.borrow(py);
+                        if matches!(target_node.logic, NodeLogic::Source) {
+                            drop(target_node);
+                            return Some(target);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Method B: Lambda bytecode analysis (e.g., .sink(lambda x: source.emit(x)))
+    let analyzer = get_analyze_lambda().ok()?;
+    let result = analyzer.call1(py, (func,)).ok()?;
+    if result.is_none(py) {
+        return None;
+    }
+    let bound_result = result.bind(py);
+    let tuple = bound_result.cast::<PyTuple>().ok()?;
+    if tuple.len() != 3 {
+        return None;
+    }
+    let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
+    if tag != "call_method1" {
+        return None;
+    }
+    let method_name: String = tuple.get_item(2).ok()?.extract().ok()?;
+    if method_name != "emit" {
+        return None;
+    }
+    let obj = tuple.get_item(1).ok()?;
+    if !obj.is_instance_of::<Stream>() {
+        return None;
+    }
+    let target: Py<Stream> = obj.extract().ok()?;
+    // Verify target is a Source node
+    let target_node = target.borrow(py);
+    if matches!(target_node.logic, NodeLogic::Source) {
         drop(target_node);
         return Some(target);
     }

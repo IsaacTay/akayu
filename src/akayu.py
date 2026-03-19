@@ -230,6 +230,17 @@ def _analyze_simple(instrs, func):
         if obj is not _UNRESOLVABLE:
             return ("call_method0", obj, instrs[1].argval)
 
+    # --- Side-effect method call passing x: lambda x: obj.method(x) ---
+    # LOAD_DEREF/LOAD_GLOBAL(obj), LOAD_ATTR(method), LOAD_FAST(x), CALL 1
+    # The lambda's argument is passed directly to the method.
+    if (n == 4 and instrs[0].opname in ('LOAD_DEREF', 'LOAD_GLOBAL')
+            and instrs[1].opname == 'LOAD_ATTR'
+            and instrs[2].opname == 'LOAD_FAST'
+            and instrs[3].opname == 'CALL'):
+        obj = _resolve_value(instrs[0], func)
+        if obj is not _UNRESOLVABLE:
+            return ("call_method1", obj, instrs[1].argval)
+
     # --- Slice: lambda x: x[start:stop] ---
     # LOAD_FAST, LOAD_CONST(start), LOAD_CONST(stop), BINARY_SLICE
     if n == 4 and instrs[0].opname == 'LOAD_FAST' and instrs[3].opname == 'BINARY_SLICE':

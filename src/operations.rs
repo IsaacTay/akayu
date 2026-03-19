@@ -73,6 +73,7 @@ impl Stream {
                 compiled_filter_fast,
                 compiled_downstream_ptrs: Vec::new(),
                 flush_target: None,
+                emit_target: None,
                 flushing: false,
             },
         )
@@ -109,6 +110,7 @@ impl Stream {
             compiled_filter_fast: false,
             compiled_downstream_ptrs: Vec::new(),
             flush_target: None,
+            emit_target: None,
             flushing: false,
         }
     }

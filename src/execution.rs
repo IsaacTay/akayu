@@ -60,6 +60,7 @@ pub(crate) struct NodeCtx<'a> {
     pub source_location: &'a str,
     pub node_id: usize,
     pub flush_target: &'a Option<Py<crate::Stream>>,
+    pub emit_target: &'a Option<Py<crate::Stream>>,
 }
 
 /// Call a Python callable, using the cached vectorcall pointer if available.
@@ -328,6 +329,15 @@ pub(crate) fn apply_logic(
                 t.flush(py, vec![], None)?;
                 return Ok(StepResult::Terminal);
             }
+            // Fast path: direct Rust emit (no Python dispatch)
+            if let Some(target) = ctx.emit_target {
+                if profiling {
+                    profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0, ctx.name, ctx.source_location);
+                }
+                let t = target.borrow(py);
+                t.propagate(py, x)?;
+                return Ok(StepResult::Terminal);
+            }
             let t = prof_start(profiling);
             match ctx.builtin_op {
                 Some(BuiltinOp::Print) => {
@@ -414,6 +424,7 @@ pub(crate) fn apply_logic(
                     source_location: &step.source_location,
                     node_id: step.node_id,
                     flush_target: &step.flush_target,
+                    emit_target: &step.emit_target,
                 };
                 match apply_logic(py, &mut step.logic, &step_ctx, val, profiling)? {
                     StepResult::Value(v) => { val = v; i += 1; }
@@ -430,6 +441,7 @@ pub(crate) fn apply_logic(
                                 source_location: &s.source_location,
                                 node_id: s.node_id,
                                 flush_target: &s.flush_target,
+                                emit_target: &s.emit_target,
                             };
                             match apply_logic_batch(py, &mut s.logic, &s_ctx, batch, profiling)? {
                                 BatchStepResult::Items(out) => batch = out,
@@ -575,6 +587,17 @@ pub(crate) fn apply_logic_batch(
                 }
                 return Ok(BatchStepResult::Terminal);
             }
+            // Fast path: direct Rust emit (no Python dispatch)
+            if let Some(target) = ctx.emit_target {
+                if profiling {
+                    profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0, ctx.name, ctx.source_location);
+                }
+                let t = target.borrow(py);
+                for x in items {
+                    t.propagate(py, x)?;
+                }
+                return Ok(BatchStepResult::Terminal);
+            }
             let t = prof_start(profiling);
             match ctx.builtin_op {
                 Some(BuiltinOp::Print) => {
@@ -606,6 +629,7 @@ pub(crate) fn apply_logic_batch(
                     source_location: &step.source_location,
                     node_id: step.node_id,
                     flush_target: &step.flush_target,
+                    emit_target: &step.emit_target,
                 };
                 match apply_logic_batch(py, &mut step.logic, &step_ctx, batch, profiling)? {
                     BatchStepResult::Items(out) => batch = out,
@@ -648,6 +672,19 @@ impl Stream {
             return Ok(last_result);
         }
 
+        // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
+        if let Some(ref target) = self.emit_target {
+            if profiling_active {
+                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0, &self.name, &self.source_location);
+            }
+            let t = target.borrow(py);
+            let mut last_result = None;
+            for x in items {
+                last_result = t.propagate(py, x)?;
+            }
+            return Ok(last_result);
+        }
+
         // Chainable variants: delegate to apply_logic_batch
         // compiled_chainable is set at freeze_all() time; includes all chainable except Filter.
         // Batch path routes ALL filters through apply_logic_batch (no async check needed for batch).
@@ -659,6 +696,7 @@ impl Stream {
                 source_location: &self.source_location,
                 node_id,
                 flush_target: &self.flush_target,
+                emit_target: &self.emit_target,
             };
             match apply_logic_batch(py, &mut self.logic, &ctx, items, profiling_active)? {
                 BatchStepResult::Items(output) => return self.propagate_batch(py, output),
@@ -706,6 +744,7 @@ impl Stream {
                                 source_location: &step.source_location,
                                 node_id: step.node_id,
                                 flush_target: &step.flush_target,
+                                emit_target: &step.emit_target,
                             };
                             match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
                                 StepResult::Value(v) => result = Some(v),
@@ -906,6 +945,15 @@ impl Stream {
             return t.flush(py, vec![], None);
         }
 
+        // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
+        if let Some(ref target) = self.emit_target {
+            if profiling_active {
+                profiling::record_node(node_id, Duration::ZERO, 1, 0, &self.name, &self.source_location);
+            }
+            let t = target.borrow(py);
+            return t.propagate(py, x);
+        }
+
         // Chainable variants: delegate to apply_logic
         // (except Filter when async check is needed — that stays here)
         // compiled_chainable / compiled_filter_fast are set once at freeze_all() time
@@ -917,6 +965,7 @@ impl Stream {
                 source_location: &self.source_location,
                 node_id,
                 flush_target: &self.flush_target,
+                emit_target: &self.emit_target,
             };
             match apply_logic(py, &mut self.logic, &ctx, x, profiling_active)? {
                 StepResult::Value(v) => return self.propagate(py, v),
@@ -980,6 +1029,7 @@ impl Stream {
                             source_location: &step.source_location,
                             node_id: step.node_id,
                             flush_target: &step.flush_target,
+                            emit_target: &step.emit_target,
                         };
                         match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
                             StepResult::Value(v) => result = Some(v),
