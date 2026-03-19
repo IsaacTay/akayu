@@ -331,6 +331,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             compiled_filter_fast: false,
             compiled_downstream_ptrs: Vec::new(),
             flush_target: None,
+            emit_target: None,
             flushing: false,
         },
     )?;

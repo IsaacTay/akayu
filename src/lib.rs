@@ -100,6 +100,10 @@ pub struct Stream {
     /// store a direct reference to skip Python dispatch at runtime.
     /// Detected at compile time via bound method check or lambda bytecode analysis.
     pub(crate) flush_target: Option<Py<Stream>>,
+    /// If this Sink node's function calls .emit() on a Source node in the same graph,
+    /// store a direct reference to skip Python dispatch at runtime.
+    /// Detected at compile time via bound method check or lambda bytecode analysis.
+    pub(crate) emit_target: Option<Py<Stream>>,
     /// Guard against re-entrant flush/drain calls. True while this node is
     /// actively being flushed/drained. Prevents cycles and undefined behavior
     /// in the compiled raw-pointer path.

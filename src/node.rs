@@ -113,6 +113,9 @@ pub struct ChainNode {
     /// If this is a Sink that calls .flush() on a Collect node, store the target
     /// for direct Rust dispatch (bypasses Python vectorcall).
     pub flush_target: Option<Py<crate::Stream>>,
+    /// If this is a Sink that calls .emit() on a Source node, store the target
+    /// for direct Rust dispatch (bypasses Python vectorcall).
+    pub emit_target: Option<Py<crate::Stream>>,
 }
 
 /// Hint for builtin function fast-paths.
