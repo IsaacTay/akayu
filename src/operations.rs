@@ -73,6 +73,7 @@ impl Stream {
                 compiled_filter_fast,
                 compiled_downstream_ptrs: Vec::new(),
                 flush_target: None,
+                flushing: false,
             },
         )
     }
@@ -108,6 +109,7 @@ impl Stream {
             compiled_filter_fast: false,
             compiled_downstream_ptrs: Vec::new(),
             flush_target: None,
+            flushing: false,
         }
     }
 
@@ -501,9 +503,20 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
+        // Re-entrancy guard: detect cycles in the flush graph
+        if self.flushing {
+            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
+        }
+        self.flushing = true;
+        let result = self.flush_inner(py);
+        self.flushing = false;
+        result
+    }
+
+    fn flush_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         let mut futures = Vec::new();
 
-        // Handle this node's flush behavior
+        // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
         let has_buffer = matches!(
             self.logic,
             NodeLogic::Collect { .. }
@@ -601,9 +614,20 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Option<Py<PyAny>>> {
+        // Re-entrancy guard: detect cycles in the flush graph
+        if self.flushing {
+            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
+        }
+        self.flushing = true;
+        let result = self.drain_inner(py);
+        self.flushing = false;
+        result
+    }
+
+    fn drain_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
         let mut futures = Vec::new();
 
-        // Flush this node's buffer (reuse flush logic inline)
+        // Flush this node's buffer
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
