@@ -95,6 +95,9 @@ pub struct ChainNode {
     pub source_location: String,
     pub builtin_op: Option<BuiltinOp>,
     pub node_id: usize,
+    /// Cached vectorcall function pointer, extracted at compile time.
+    /// Avoids per-call type flag check + offset dereference in the hot loop.
+    pub cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
 }
 
 /// Hint for builtin function fast-paths.
@@ -130,4 +133,82 @@ pub enum BuiltinOp {
     AttrGetter(Py<PyString>),
     /// print(x) — uses the cached builtin print reference
     Print,
+    /// type(x) — returns the type object
+    Type,
+    /// hasattr(x, name) — uses ffi::PyObject_HasAttr
+    HasAttr(Py<PyString>),
+    /// tuple(x) — converts iterable to tuple via ffi::PySequence_Tuple
+    Tuple,
+    /// list(x) — converts iterable to list via ffi::PySequence_List
+    List,
+    /// set(x) — converts iterable to set via ffi::PySet_New
+    Set,
+    /// frozenset(x) — converts iterable to frozenset via ffi::PyFrozenSet_New
+    FrozenSet,
+
+    // --- Phase 2: Lambda-decompiled variants ---
+
+    /// x <binop> rhs — uses PyNumber_* FFI calls
+    BinOp(BinaryOp, Py<PyAny>),
+    /// x <cmpop> rhs — uses PyObject_RichCompareBool
+    Compare(CompareOp, Py<PyAny>),
+    /// x in collection — uses PySequence_Contains
+    Contains(Py<PyAny>),
+    /// x not in collection — uses PySequence_Contains + invert
+    NotContains(Py<PyAny>),
+    /// x.method() — zero-arg method call
+    MethodCall(Py<PyString>),
+    /// x.method(arg) — single-arg method call
+    MethodCall1(Py<PyString>, Py<PyAny>),
+    /// x.method(arg1, arg2) — two-arg method call
+    MethodCall2(Py<PyString>, Py<PyAny>, Py<PyAny>),
+    /// x[start:stop] — uses PySlice_New + PyObject_GetItem
+    Slice(Py<PyAny>, Py<PyAny>),
+    /// (op1(x), op2(x), ...) — apply each op to x, collect into tuple
+    TupleConstruct(Vec<BuiltinOp>),
+    /// [op1(x), op2(x), ...] — apply each op to x, collect into list
+    ListConstruct(Vec<BuiltinOp>),
+    /// Apply first op to x, then apply second op to result
+    Chain(Box<BuiltinOp>, Box<BuiltinOp>),
+    /// not <expr>
+    Negate(Box<BuiltinOp>),
+    /// <A> and <B> — short-circuit evaluation
+    And(Box<BuiltinOp>, Box<BuiltinOp>),
+    /// <A> or <B> — short-circuit evaluation
+    Or(Box<BuiltinOp>, Box<BuiltinOp>),
+}
+
+/// Binary arithmetic operations for `BuiltinOp::BinOp`.
+pub enum BinaryOp {
+    Add,
+    Sub,
+    Mul,
+    TrueDiv,
+    FloorDiv,
+    Mod,
+    Pow,
+}
+
+/// Comparison operations for `BuiltinOp::Compare`.
+pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
+}
+
+impl CompareOp {
+    /// Convert to the C-API `Py_CompareOp` constant for `PyObject_RichCompareBool`.
+    pub fn to_ffi(&self) -> std::ffi::c_int {
+        match self {
+            Self::Lt => pyo3::ffi::Py_LT,
+            Self::Le => pyo3::ffi::Py_LE,
+            Self::Eq => pyo3::ffi::Py_EQ,
+            Self::Ne => pyo3::ffi::Py_NE,
+            Self::Gt => pyo3::ffi::Py_GT,
+            Self::Ge => pyo3::ffi::Py_GE,
+        }
+    }
 }
