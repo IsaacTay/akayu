@@ -967,6 +967,10 @@ impl Stream {
                     return Ok(None);
                 }
                 return Ok(Some(result));
+            } else if !self.compiled_downstream_ptrs.is_empty() {
+                let child = unsafe { self.compiled_downstream_ptrs[0].get_mut() };
+                let result = child.update_batch(py, output_batch)?;
+                return Ok(result);
             } else {
                 let mut child = self.downstreams[0].borrow_mut(py);
                 let result = child.update_batch(py, output_batch)?;
@@ -987,6 +991,20 @@ impl Stream {
                 }
                 let result = safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
                 if !result.is_none(py) {
+                    futures.push(result);
+                }
+            }
+        } else if !self.compiled_downstream_ptrs.is_empty() {
+            let ptrs = &self.compiled_downstream_ptrs;
+            for val in output_batch {
+                for ptr in ptrs.iter().take(n - 1) {
+                    let child = unsafe { ptr.get_mut() };
+                    if let Some(result) = child.update(py, val.clone_ref(py))? {
+                        futures.push(result);
+                    }
+                }
+                let child = unsafe { ptrs[n - 1].get_mut() };
+                if let Some(result) = child.update(py, val)? {
                     futures.push(result);
                 }
             }
@@ -1058,8 +1076,32 @@ impl Stream {
                     futures.push(result);
                 }
             }
+        } else if !self.compiled_downstream_ptrs.is_empty() {
+            // Compiled fast path: bypass PyCell borrow checks using cached raw pointers.
+            // Safe because: DAG (no cycles), sequential processing (no aliasing),
+            // frozen topology (pointers remain valid while Py<Stream> refs in downstreams live).
+            let ptrs = &self.compiled_downstream_ptrs;
+            if n == 1 {
+                let child = unsafe { ptrs[0].get_mut() };
+                let result = child.update(py, val)?;
+                if let Some(r) = result {
+                    return Ok(Some(r));
+                }
+                return Ok(None);
+            } else {
+                for ptr in ptrs.iter().take(n - 1) {
+                    let child = unsafe { ptr.get_mut() };
+                    if let Some(result) = child.update(py, val.clone_ref(py))? {
+                        futures.push(result);
+                    }
+                }
+                let child = unsafe { ptrs[n - 1].get_mut() };
+                if let Some(result) = child.update(py, val)? {
+                    futures.push(result);
+                }
+            }
         } else {
-            // Fast path: no locking needed, use direct Rust calls
+            // Pre-compile fallback: use PyCell borrow_mut
             if n == 1 {
                 let mut child = self.downstreams[0].borrow_mut(py);
                 let result = child.update(py, val)?;

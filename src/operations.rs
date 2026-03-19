@@ -71,6 +71,7 @@ impl Stream {
                 cached_vectorcall: None,
                 compiled_chainable,
                 compiled_filter_fast,
+                compiled_downstream_ptrs: Vec::new(),
             },
         )
     }
@@ -104,6 +105,7 @@ impl Stream {
             cached_vectorcall: None,
             compiled_chainable: false,
             compiled_filter_fast: false,
+            compiled_downstream_ptrs: Vec::new(),
         }
     }
 
