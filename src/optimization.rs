@@ -119,6 +119,12 @@ impl Stream {
     pub fn freeze_all(&mut self, py: Python) {
         self.frozen = true;
         self.compiled = true;
+        // Cache chainability for the source node
+        self.compiled_chainable = (self.logic.is_chainable()
+            && !matches!(&self.logic, NodeLogic::Filter { .. }))
+            || matches!(&self.logic, NodeLogic::Chain { .. });
+        self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
+            && (self.skip_async_check || self.builtin_op.is_some());
 
         // BFS to freeze all reachable nodes
         let mut to_visit: Vec<Py<Self>> =
@@ -129,6 +135,12 @@ impl Stream {
             if !node.frozen {
                 node.frozen = true;
                 node.compiled = true;
+                // Cache chainability so update() doesn't re-derive it per item
+                node.compiled_chainable = (node.logic.is_chainable()
+                    && !matches!(&node.logic, NodeLogic::Filter { .. }))
+                    || matches!(&node.logic, NodeLogic::Chain { .. });
+                node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
+                    && (node.skip_async_check || node.builtin_op.is_some());
                 for downstream in &node.downstreams {
                     to_visit.push(downstream.clone_ref(py));
                 }

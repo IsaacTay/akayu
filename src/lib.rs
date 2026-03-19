@@ -66,6 +66,12 @@ pub struct Stream {
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Bypasses per-call type flag check + offset dereference in the hot loop.
     pub(crate) cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
+    /// Set at freeze time. True if update() should route through apply_logic
+    /// (non-filter chainable: Map/Flatten/Accumulate/Sink/BatchMap, or compiled Chain).
+    pub(crate) compiled_chainable: bool,
+    /// Set at freeze time. True if this is a Filter whose predicate can skip the
+    /// async check (has builtin_op or skip_async_check), so update() routes through apply_logic.
+    pub(crate) compiled_filter_fast: bool,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

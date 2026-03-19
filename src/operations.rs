@@ -50,6 +50,10 @@ impl Stream {
         skip_async_check: bool,
         func_is_sync: bool,
     ) -> PyResult<Py<Self>> {
+        let compiled_chainable = (logic.is_chainable()
+            && !matches!(&logic, NodeLogic::Filter { .. }))
+            || matches!(&logic, NodeLogic::Chain { .. });
+        let compiled_filter_fast = matches!(&logic, NodeLogic::Filter { .. }) && skip_async_check;
         Py::new(
             py,
             Self {
@@ -65,6 +69,8 @@ impl Stream {
                 source_location,
                 builtin_op: None,
                 cached_vectorcall: None,
+                compiled_chainable,
+                compiled_filter_fast,
             },
         )
     }
@@ -96,6 +102,8 @@ impl Stream {
             source_location,
             builtin_op: None,
             cached_vectorcall: None,
+            compiled_chainable: false,
+            compiled_filter_fast: false,
         }
     }
 
