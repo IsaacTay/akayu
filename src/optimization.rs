@@ -345,11 +345,7 @@ impl Stream {
         // Check if this node is chainable
         {
             let node = start_py.borrow(py);
-            let is_chainable = matches!(node.logic,
-                NodeLogic::Map { .. } | NodeLogic::Filter { .. } | NodeLogic::Flatten
-                | NodeLogic::Accumulate { .. } | NodeLogic::Sink { .. } | NodeLogic::BatchMap { .. }
-            );
-            if !is_chainable {
+            if !node.logic.is_chainable() {
                 // Not chainable — recurse into downstreams
                 let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
@@ -381,10 +377,7 @@ impl Stream {
             }
 
             let next = next_py.borrow(py);
-            let next_chainable = matches!(next.logic,
-                NodeLogic::Map { .. } | NodeLogic::Filter { .. } | NodeLogic::Flatten
-                | NodeLogic::Accumulate { .. } | NodeLogic::Sink { .. } | NodeLogic::BatchMap { .. }
-            );
+            let next_chainable = next.logic.is_chainable();
             drop(next);
 
             if !next_chainable {
@@ -509,6 +502,7 @@ fn parse_binary_op(s: &str) -> Option<BinaryOp> {
 /// Recursively parse the tuple returned by `_analyze_lambda()` into a `BuiltinOp`.
 ///
 /// The Python analyzer returns nested tuples like `("chain", ("attrgetter", "name"), ("compare", "==", "John"))`.
+#[allow(clippy::only_used_in_recursion)]
 fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp> {
     let tuple = obj.cast::<PyTuple>().ok()?;
     let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
@@ -636,46 +630,45 @@ fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
 
 /// Detect builtin fast-path for a Map function via identity checks only.
 fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
-    if let Ok(b) = get_builtin_len() { if func.is(b) { return Some(BuiltinOp::Len); } }
-    if let Ok(b) = get_builtin_str() { if func.is(b) { return Some(BuiltinOp::Str); } }
-    if let Ok(b) = get_builtin_int() { if func.is(b) { return Some(BuiltinOp::Int); } }
-    if let Ok(b) = get_builtin_float() { if func.is(b) { return Some(BuiltinOp::Float); } }
-    if let Ok(b) = get_builtin_bool() { if func.is(b) { return Some(BuiltinOp::Bool); } }
-    if let Ok(b) = get_operator_not() { if func.is(b) { return Some(BuiltinOp::Not); } }
-    if let Ok(b) = get_operator_truth() { if func.is(b) { return Some(BuiltinOp::Truth); } }
-    if let Ok(b) = get_builtin_type() { if func.is(b) { return Some(BuiltinOp::Type); } }
-    if let Ok(b) = get_builtin_tuple() { if func.is(b) { return Some(BuiltinOp::Tuple); } }
-    if let Ok(b) = get_builtin_list() { if func.is(b) { return Some(BuiltinOp::List); } }
-    if let Ok(b) = get_builtin_set() { if func.is(b) { return Some(BuiltinOp::Set); } }
-    if let Ok(b) = get_builtin_frozenset() { if func.is(b) { return Some(BuiltinOp::FrozenSet); } }
+    // Simple identity checks: func is exactly the builtin
+    macro_rules! check_identity {
+        ($getter:ident, $op:expr) => {
+            if let Ok(b) = $getter() { if func.is(b) { return Some($op); } }
+        };
+    }
+    check_identity!(get_builtin_len, BuiltinOp::Len);
+    check_identity!(get_builtin_str, BuiltinOp::Str);
+    check_identity!(get_builtin_int, BuiltinOp::Int);
+    check_identity!(get_builtin_float, BuiltinOp::Float);
+    check_identity!(get_builtin_bool, BuiltinOp::Bool);
+    check_identity!(get_operator_not, BuiltinOp::Not);
+    check_identity!(get_operator_truth, BuiltinOp::Truth);
+    check_identity!(get_builtin_type, BuiltinOp::Type);
+    check_identity!(get_builtin_tuple, BuiltinOp::Tuple);
+    check_identity!(get_builtin_list, BuiltinOp::List);
+    check_identity!(get_builtin_set, BuiltinOp::Set);
+    check_identity!(get_builtin_frozenset, BuiltinOp::FrozenSet);
+
     // Detect operator.itemgetter instances (e.g., operator.itemgetter("name"))
-    if let Ok(itemgetter_type) = get_operator_itemgetter() {
-        if func.bind(py).is_instance(itemgetter_type.bind(py)).unwrap_or(false) {
-            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
-                if let Ok(args) = reduced.bind(py).get_item(1) {
-                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
-                        if key_tuple.len() == 1 {
-                            return key_tuple.get_item(0).ok().map(|k| BuiltinOp::ItemGetter(k.unbind()));
-                        }
-                    }
-                }
-            }
+    if get_operator_itemgetter().is_ok_and(|ig| func.bind(py).is_instance(ig.bind(py)).unwrap_or(false)) {
+        let key = func.call_method0(py, "__reduce__").ok()
+            .and_then(|r| r.bind(py).get_item(1).ok().map(|a| a.unbind()))
+            .and_then(|a| a.bind(py).cast::<PyTuple>().ok().map(|t| t.to_owned()))
+            .filter(|t| t.len() == 1)
+            .and_then(|t| t.get_item(0).ok().map(|k| k.unbind()));
+        if let Some(k) = key {
+            return Some(BuiltinOp::ItemGetter(k));
         }
     }
     // Detect operator.attrgetter instances (e.g., operator.attrgetter("name"))
-    if let Ok(attrgetter_type) = get_operator_attrgetter() {
-        if func.bind(py).is_instance(attrgetter_type.bind(py)).unwrap_or(false) {
-            if let Ok(reduced) = func.call_method0(py, "__reduce__") {
-                if let Ok(args) = reduced.bind(py).get_item(1) {
-                    if let Ok(key_tuple) = args.cast::<PyTuple>() {
-                        if key_tuple.len() == 1 {
-                            if let Some(Ok(name_str)) = key_tuple.get_item(0).ok().map(|k| k.cast_into::<pyo3::types::PyString>()) {
-                                return Some(BuiltinOp::AttrGetter(name_str.unbind()));
-                            }
-                        }
-                    }
-                }
-            }
+    if get_operator_attrgetter().is_ok_and(|ag| func.bind(py).is_instance(ag.bind(py)).unwrap_or(false)) {
+        let name = func.call_method0(py, "__reduce__").ok()
+            .and_then(|r| r.bind(py).get_item(1).ok().map(|a| a.unbind()))
+            .and_then(|a| a.bind(py).cast::<PyTuple>().ok().map(|t| t.to_owned()))
+            .filter(|t| t.len() == 1)
+            .and_then(|t| t.get_item(0).ok()?.cast_into::<pyo3::types::PyString>().ok());
+        if let Some(name_str) = name {
+            return Some(BuiltinOp::AttrGetter(name_str.unbind()));
         }
     }
     // Fallback: analyze lambda bytecode
@@ -742,27 +735,21 @@ fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp>
     };
     let arg = arg?;
 
-    if let Ok(builtin_isinstance) = get_builtin_isinstance() {
-        if func.is(&builtin_isinstance) {
-            return Some(BuiltinOp::IsInstance(arg));
-        }
+    if get_builtin_isinstance().is_ok_and(|b| func.is(b)) {
+        return Some(BuiltinOp::IsInstance(arg));
     }
-    if let Ok(op_is) = get_operator_is() {
-        if func.is(&op_is) {
-            return Some(BuiltinOp::Is(arg));
-        }
+    if get_operator_is().is_ok_and(|b| func.is(b)) {
+        return Some(BuiltinOp::Is(arg));
     }
-    if let Ok(op_is_not) = get_operator_is_not() {
-        if func.is(&op_is_not) {
-            return Some(BuiltinOp::IsNot(arg));
-        }
+    if get_operator_is_not().is_ok_and(|b| func.is(b)) {
+        return Some(BuiltinOp::IsNot(arg));
     }
     None
 }
 
 /// Detect builtin fast-path for a Sink function (no extra args).
 fn detect_sink_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
-    if let Ok(b) = get_builtin_print() { if func.is(b) { return Some(BuiltinOp::Print); } }
+    if get_builtin_print().is_ok_and(|b| func.is(b)) { return Some(BuiltinOp::Print); }
     None
 }
 

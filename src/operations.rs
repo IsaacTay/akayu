@@ -6,14 +6,69 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::error::StreamError;
 use crate::helpers::{
     capture_source_location, check_not_compiled, extract_stream_name, get_async_state_class,
-    get_build_map_func, get_build_starmap_func,
-    get_func_name, get_gather, get_is_sync_callable,
+    get_build_map_func, get_build_starmap_func, get_func_name, get_gather, get_is_sync_callable,
     get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
     get_prefetch_state_class, get_profiler_class, wrap_error,
 };
 use crate::node::NodeLogic;
 use crate::Stream;
 
+
+/// Check if a Python callable is synchronous using the cached helper.
+fn check_func_is_sync(py: Python, func: &Py<PyAny>) -> PyResult<bool> {
+    let is_sync_callable = get_is_sync_callable()?;
+    is_sync_callable.call1(py, (func,))?.is_truthy(py)
+}
+
+/// Wrap a function with additional args/kwargs using the build_map_func helper.
+fn wrap_func(
+    py: Python,
+    func: Py<PyAny>,
+    args: Py<PyTuple>,
+    kwargs: Option<Py<PyDict>>,
+    builder: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let args_opt = if args.bind(py).is_empty() {
+        None
+    } else {
+        Some(args)
+    };
+    builder.call1(py, (func, args_opt, kwargs))
+}
+
+impl Stream {
+    /// Create a new Stream node with default field values.
+    ///
+    /// This is an associated function (not &self) to avoid borrow conflicts
+    /// when the caller already holds a mutable borrow on a parent node.
+    pub(crate) fn make_node(
+        py: Python,
+        logic: NodeLogic,
+        name: String,
+        source_location: String,
+        asynchronous: Option<bool>,
+        skip_async_check: bool,
+        func_is_sync: bool,
+    ) -> PyResult<Py<Self>> {
+        Py::new(
+            py,
+            Self {
+                logic,
+                downstreams: Vec::new(),
+                name,
+                asynchronous,
+                skip_async_check,
+                func_is_sync,
+                frozen: false,
+                needs_lock: false,
+                compiled: false,
+                source_location,
+                builtin_op: None,
+                cached_vectorcall: None,
+            },
+        )
+    }
+}
 
 #[pymethods]
 impl Stream {
@@ -73,25 +128,12 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "map", func_name.as_deref())?;
         let source_location = capture_source_location(py);
-
-        // Check if the original function is sync (before wrapping/moving)
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
-
-        let args_bound = args.bind(py);
-        let builder = get_build_map_func()?;
-        let args_opt = if args_bound.is_empty() {
-            None
-        } else {
-            Some(args)
-        };
-        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+        let func_is_sync = check_func_is_sync(py, &func)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchMap
         if let NodeLogic::Prefetch { size } = this.logic {
-            let prefetch_state_class = get_prefetch_state_class()?;
-            let state = prefetch_state_class.call1(py, (&wrapped_func, size))?;
-
+            let state = get_prefetch_state_class()?.call1(py, (&wrapped_func, size))?;
             this.logic = NodeLogic::PrefetchMap {
                 func: wrapped_func,
                 size,
@@ -107,52 +149,29 @@ impl Stream {
 
         // If asynchronous=True, create AsyncMap node for non-blocking emit
         if this.asynchronous == Some(true) {
-            let async_state_class = get_async_state_class()?;
-            let state = async_state_class.call0(py)?;
-
-            let node = Py::new(
+            let state = get_async_state_class()?.call0(py)?;
+            let node = Self::make_node(
                 py,
-                Self {
-                    logic: NodeLogic::AsyncMap {
-                        func: wrapped_func,
-                        state,
-                    },
-                    downstreams: Vec::new(),
-                    name,
-                    asynchronous: this.asynchronous,
-                    skip_async_check: true, // AsyncMap handles async internally
-                    func_is_sync: false,    // By definition, async
-                    frozen: false,
-                    needs_lock: false,
-                    compiled: false,
-                    source_location,
-                    builtin_op: None,
-                cached_vectorcall: None,
-                },
+                NodeLogic::AsyncMap { func: wrapped_func, state },
+                name,
+                source_location,
+                this.asynchronous,
+                true,  // AsyncMap handles async internally
+                false, // By definition, async
             )?;
-
             this.downstreams.push(node.clone_ref(py));
             return Ok(node);
         }
 
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Map { func: wrapped_func },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: this.asynchronous,
-                skip_async_check: this.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Map { func: wrapped_func },
+            name,
+            source_location,
+            this.asynchronous,
+            this.skip_async_check,
+            func_is_sync,
         )?;
-
         this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -175,22 +194,14 @@ impl Stream {
             return Err(StreamError::InvalidPrefetchSize.into());
         }
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Prefetch { size: n },
-                downstreams: Vec::new(),
-                name: format!("prefetch({})", n),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Prefetch { size: n },
+            format!("prefetch({})", n),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
@@ -220,37 +231,18 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "starmap", func_name.as_deref())?;
         let source_location = capture_source_location(py);
+        let func_is_sync = check_func_is_sync(py, &func)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_starmap_func()?)?;
 
-        // Check if the original function is sync (before wrapping/moving)
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
-
-        let builder = get_build_starmap_func()?;
-        let args_opt = if args.bind(py).is_empty() {
-            None
-        } else {
-            Some(args)
-        };
-        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
-
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Map { func: wrapped_func },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Map { func: wrapped_func },
+            name,
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            func_is_sync,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -288,24 +280,12 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "batch_map", func_name.as_deref())?;
         let source_location = capture_source_location(py);
-
-        // Check if the original function is sync (before wrapping/moving)
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
-
-        let builder = get_build_map_func()?;
-        let args_opt = if args.bind(py).is_empty() {
-            None
-        } else {
-            Some(args)
-        };
-        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
+        let func_is_sync = check_func_is_sync(py, &func)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchBatchMap
         if let NodeLogic::Prefetch { size } = this.logic {
-            let prefetch_batch_map_state_class = get_prefetch_batch_map_state_class()?;
-            let state = prefetch_batch_map_state_class.call1(py, (&wrapped_func, size))?;
-
+            let state = get_prefetch_batch_map_state_class()?.call1(py, (&wrapped_func, size))?;
             this.logic = NodeLogic::PrefetchBatchMap {
                 func: wrapped_func,
                 size,
@@ -319,24 +299,15 @@ impl Stream {
             return Ok(slf.clone().unbind());
         }
 
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::BatchMap { func: wrapped_func },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: this.asynchronous,
-                skip_async_check: this.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::BatchMap { func: wrapped_func },
+            name,
+            source_location,
+            this.asynchronous,
+            this.skip_async_check,
+            func_is_sync,
         )?;
-
         this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -366,32 +337,17 @@ impl Stream {
         let func_name = get_func_name(py, &predicate);
         let name = extract_stream_name(py, &kwargs, "filter", func_name.as_deref())?;
         let source_location = capture_source_location(py);
-
-        // Check if the original predicate is sync (before wrapping/moving)
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&predicate,))?.is_truthy(py)?;
-
-        let args_bound = args.bind(py);
-        let builder = get_build_map_func()?;
-        let args_opt = if args_bound.is_empty() {
-            None
-        } else {
-            Some(args)
-        };
-        let wrapped_predicate: Py<PyAny> = builder
-            .call1(py, (predicate, args_opt, kwargs))?
-            .extract(py)?;
+        let func_is_sync = check_func_is_sync(py, &predicate)?;
+        let wrapped_predicate = wrap_func(py, predicate, args, kwargs, get_build_map_func()?)?;
 
         // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchFilter
         if let NodeLogic::Prefetch { size } = this.logic {
-            let prefetch_filter_state_class = get_prefetch_filter_state_class()?;
-            // Wrap predicate to return (predicate_result, original_value)
             let wrapper_code = "lambda p: lambda x: (p(x), x)";
             let builtins = py.import("builtins")?;
             let eval_fn = builtins.getattr("eval")?;
             let make_wrapper = eval_fn.call1((wrapper_code,))?;
             let wrapped_pred = make_wrapper.call1((&wrapped_predicate,))?;
-            let state = prefetch_filter_state_class.call1(py, (&wrapped_pred, size))?;
+            let state = get_prefetch_filter_state_class()?.call1(py, (&wrapped_pred, size))?;
 
             this.logic = NodeLogic::PrefetchFilter {
                 predicate: wrapped_pred.unbind(),
@@ -406,26 +362,15 @@ impl Stream {
             return Ok(slf.clone().unbind());
         }
 
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Filter {
-                    predicate: wrapped_predicate,
-                },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: this.asynchronous,
-                skip_async_check: this.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Filter { predicate: wrapped_predicate },
+            name,
+            source_location,
+            this.asynchronous,
+            this.skip_async_check,
+            func_is_sync,
         )?;
-
         this.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -440,24 +385,15 @@ impl Stream {
     pub fn flatten(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Flatten,
-                downstreams: Vec::new(),
-                name: "flatten".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Flatten,
+            "flatten".to_string(),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -472,24 +408,15 @@ impl Stream {
     pub fn collect(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Collect { buffer: Vec::new() },
-                downstreams: Vec::new(),
-                name: "collect".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Collect { buffer: Vec::new() },
+            "collect".to_string(),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -523,41 +450,12 @@ impl Stream {
                     futures.push(f);
                 }
             }
-            NodeLogic::PrefetchMap { state, .. } => {
-                // Flush the prefetch state - wait for all pending items and propagate
+            NodeLogic::PrefetchMap { state, .. }
+            | NodeLogic::PrefetchFilter { state, .. }
+            | NodeLogic::PrefetchBatchMap { state, .. }
+            | NodeLogic::AsyncMap { state, .. } => {
                 let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
-                let results_list = results.bind(py);
-                for result in results_list.try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            NodeLogic::PrefetchFilter { state, .. } => {
-                // Flush the prefetch filter state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
-                let results_list = results.bind(py);
-                for result in results_list.try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            NodeLogic::PrefetchBatchMap { state, .. } => {
-                // Flush the prefetch batch_map state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
-                let results_list = results.bind(py);
-                for result in results_list.try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            NodeLogic::AsyncMap { state, .. } => {
-                // Flush the async state - wait for all pending items and propagate
-                let results = wrap_error(py, state.call_method0(py, "flush"), &self.name, &self.source_location)?;
-                let results_list = results.bind(py);
-                for result in results_list.try_iter()? {
+                for result in results.bind(py).try_iter()? {
                     if let Some(f) = self.propagate(py, result?.into())? {
                         futures.push(f);
                     }
@@ -606,38 +504,18 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "sink", func_name.as_deref())?;
         let source_location = capture_source_location(py);
+        let func_is_sync = check_func_is_sync(py, &func)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
-        // Check if the original function is sync (before wrapping/moving)
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
-
-        let args_bound = args.bind(py);
-        let builder = get_build_map_func()?;
-        let args_opt = if args_bound.is_empty() {
-            None
-        } else {
-            Some(args)
-        };
-        let wrapped_func: Py<PyAny> = builder.call1(py, (func, args_opt, kwargs))?.extract(py)?;
-
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Sink { func: wrapped_func },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Sink { func: wrapped_func },
+            name,
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            func_is_sync,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -667,37 +545,22 @@ impl Stream {
         check_not_compiled(self.compiled, &self.name)?;
         let func_name = get_func_name(py, &func);
         let source_location = capture_source_location(py);
-        // Check if the accumulator function is sync
-        let is_sync_callable = get_is_sync_callable()?;
-        let func_is_sync = is_sync_callable.call1(py, (&func,))?.is_truthy(py)?;
+        let func_is_sync = check_func_is_sync(py, &func)?;
 
         let name = match func_name {
             Some(ref n) => format!("accumulate({n})"),
             None => "accumulate".to_string(),
         };
 
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Accumulate {
-                    func,
-                    state: start,
-                    returns_state,
-                },
-                downstreams: Vec::new(),
-                name,
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync,
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Accumulate { func, state: start, returns_state },
+            name,
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            func_is_sync,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
