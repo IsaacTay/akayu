@@ -1,7 +1,7 @@
 //! Stream transformation operations (map, filter, sink, etc.)
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 
 use crate::error::StreamError;
 use crate::helpers::{
@@ -58,6 +58,7 @@ impl Stream {
             Self {
                 logic,
                 downstreams: Vec::new(),
+                parents: std::sync::Mutex::new(Vec::new()),
                 name,
                 asynchronous,
                 skip_async_check,
@@ -96,6 +97,7 @@ impl Stream {
         Self {
             logic: NodeLogic::Source,
             downstreams: Vec::new(),
+            parents: std::sync::Mutex::new(Vec::new()),
             name: name.unwrap_or_else(|| "source".to_string()),
             asynchronous,
             skip_async_check,
@@ -124,14 +126,34 @@ impl Stream {
 
     /// Apply a function to each element in the stream.
     ///
-    /// Args:
-    ///     func: Function to apply to each element.
-    ///     *args: Additional positional arguments passed to func.
-    ///     **kwargs: Additional keyword arguments passed to func.
-    ///         Use `stream_name="name`" to set a custom name for this node.
+    /// Transforms each element by passing it through the provided function.
+    /// The function can accept additional positional and keyword arguments.
     ///
-    /// Returns:
-    ///     A new Stream emitting the transformed values.
+    /// # Arguments
+    ///
+    /// * `func` - Function to apply to each element.
+    /// * `*args` - Additional positional arguments passed to `func`.
+    /// * `**kwargs` - Additional keyword arguments passed to `func`. Use
+    ///   `stream_name="name"` to set a custom name for this node.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting the transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// doubled = source.map(lambda x: x * 2)
+    /// result = []
+    /// doubled.sink(result.append)
+    /// source.emit(5)  # result contains [10]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn map(
         slf: &Bound<'_, Self>,
@@ -148,7 +170,6 @@ impl Stream {
         let func_is_sync = check_func_is_sync(py, &func)?;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
-        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchMap
         if let NodeLogic::Prefetch { size } = this.logic {
             let state = get_prefetch_state_class()?.call1(py, (&wrapped_func, size))?;
             this.logic = NodeLogic::PrefetchMap {
@@ -159,11 +180,9 @@ impl Stream {
             this.name = format!("prefetch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
-            drop(this);
             return Ok(slf.clone().unbind());
         }
 
-        // If asynchronous=True, create AsyncMap node for non-blocking emit
         if this.asynchronous == Some(true) {
             let state = get_async_state_class()?.call0(py)?;
             let node = Self::make_node(
@@ -175,10 +194,13 @@ impl Stream {
                 name,
                 source_location,
                 this.asynchronous,
-                true,  // AsyncMap handles async internally
-                false, // By definition, async
+                true,
+                false,
             )?;
             this.downstreams.push(node.clone_ref(py));
+            let self_py = slf.clone().unbind();
+            drop(this);
+            node.borrow(py).parents.lock().unwrap().push(self_py);
             return Ok(node);
         }
 
@@ -192,6 +214,9 @@ impl Stream {
             func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -201,16 +226,44 @@ impl Stream {
     /// concurrently while preserving output order. Uses a shared global thread pool,
     /// making it efficient to combine with `par()` for parallel branch execution.
     ///
-    /// Args:
-    ///     n: Maximum number of items to process concurrently.
+    /// Eager fusion: If the next operation is `map()`, `filter()`, or `batch_map()`,
+    /// the prefetch is fused into that operation at creation time, avoiding
+    /// unnecessary node creation.
     ///
-    /// Returns:
-    ///     A new Stream that will modify the next map to use prefetching.
+    /// # Arguments
+    ///
+    /// * `n` - Maximum number of items to process concurrently.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream that will prefetch items for the next transformation.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// # Process up to 4 items concurrently
+    /// result = source.prefetch(4).map(lambda x: x * 2)
+    /// output = []
+    /// result.sink(output.append)
+    /// source.emit_batch([1, 2, 3, 4])  # processed concurrently
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If `n` is 0.
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(name = "prefetch", signature = (n))]
-    pub fn prefetch(&mut self, py: Python, n: usize) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+    pub fn prefetch(
+        slf: &Bound<'_, Self>,
+        py: Python,
+        n: usize,
+    ) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         if n == 0 {
-            return Err(StreamError::InvalidPrefetchSize.into());
+            return Err(StreamError::InvalidPrefetchSize(n).into());
         }
         let source_location = capture_source_location(py);
         let node = Self::make_node(
@@ -218,35 +271,58 @@ impl Stream {
             NodeLogic::Prefetch { size: n },
             format!("prefetch({})", n),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
     /// Apply a function to each element, unpacking the element as arguments.
     ///
-    /// Similar to map, but each element is unpacked with *element before
-    /// being passed to the function. Useful when elements are tuples.
+    /// Similar to map, but each element is unpacked with `*element` before
+    /// being passed to the function. Useful when elements are tuples or
+    /// iterables that should be spread as function arguments.
     ///
-    /// Args:
-    ///     func: Function to apply (receives unpacked element).
-    ///     *args: Additional positional arguments passed to func.
-    ///     **kwargs: Additional keyword arguments passed to func.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting the transformed values.
+    /// * `func` - Function to apply (receives unpacked element).
+    /// * `*args` - Additional positional arguments passed to `func`.
+    /// * `**kwargs` - Additional keyword arguments passed to `func`.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting the transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// summed = source.starmap(lambda a, b: a + b)
+    /// result = []
+    /// summed.sink(result.append)
+    /// source.emit((1, 2))   # result contains [3]
+    /// source.emit((3, 4))   # result contains [3, 7]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn starmap(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "starmap", func_name.as_deref())?;
         let source_location = capture_source_location(py);
@@ -258,11 +334,14 @@ impl Stream {
             NodeLogic::Map { func: wrapped_func },
             name,
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             func_is_sync,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -270,22 +349,35 @@ impl Stream {
     ///
     /// Unlike `map()` which calls the function once per item, `batch_map()` calls
     /// the function once per batch with all items as a list. This is ideal for
-    /// vectorized operations like `NumPy` functions that can process arrays efficiently.
+    /// vectorized operations like NumPy functions that can process arrays efficiently.
     ///
-    /// Args:
-    ///     func: Function that receives a list of items and returns an iterable of results.
-    ///     *args: Additional positional arguments passed to func.
-    ///     **kwargs: Additional keyword arguments passed to func.
-    ///         Use `stream_name="name`" to set a custom name for this node.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting the transformed values.
+    /// * `func` - Function that receives a list of items and returns an
+    ///   iterable of results.
+    /// * `*args` - Additional positional arguments passed to `func`.
+    /// * `**kwargs` - Additional keyword arguments passed to `func`. Use
+    ///   `stream_name="name"` to set a custom name for this node.
     ///
-    /// Example:
-    ///     >>> import numpy as np
-    ///     >>> s = `Stream()`
-    ///     >>> `s.batch_map(np.sqrt).sink(print)`
-    ///     >>> `s.emit_batch`([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
+    /// # Returns
+    ///
+    /// A new Stream emitting the transformed values.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// import numpy as np
+    /// source = akayu.Stream()
+    /// squared = source.batch_map(np.square)
+    /// result = []
+    /// squared.sink(result.append)
+    /// source.emit_batch([1, 4, 9, 16])  # result contains [1, 4, 9, 16]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn batch_map(
         slf: &Bound<'_, Self>,
@@ -302,7 +394,6 @@ impl Stream {
         let func_is_sync = check_func_is_sync(py, &func)?;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
-        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchBatchMap
         if let NodeLogic::Prefetch { size } = this.logic {
             let state = get_prefetch_batch_map_state_class()?.call1(py, (&wrapped_func, size))?;
             this.logic = NodeLogic::PrefetchBatchMap {
@@ -313,7 +404,6 @@ impl Stream {
             this.name = format!("prefetch_batch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
-            drop(this);
             return Ok(slf.clone().unbind());
         }
 
@@ -327,6 +417,9 @@ impl Stream {
             func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -335,13 +428,31 @@ impl Stream {
     /// Only elements for which the predicate returns a truthy value
     /// are passed downstream.
     ///
-    /// Args:
-    ///     predicate: Function that returns True for elements to keep.
-    ///     *args: Additional positional arguments passed to predicate.
-    ///     **kwargs: Additional keyword arguments passed to predicate.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting only elements that pass the filter.
+    /// * `predicate` - Function that returns True for elements to keep.
+    /// * `*args` - Additional positional arguments passed to `predicate`.
+    /// * `**kwargs` - Additional keyword arguments passed to `predicate`.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting only elements that pass the filter.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// evens = source.filter(lambda x: x % 2 == 0)
+    /// result = []
+    /// evens.sink(result.append)
+    /// source.emit(5)   # filtered out
+    /// source.emit(4)   # result contains [4]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (predicate, *args, **kwargs))]
     pub fn filter(
         slf: &Bound<'_, Self>,
@@ -358,7 +469,6 @@ impl Stream {
         let func_is_sync = check_func_is_sync(py, &predicate)?;
         let wrapped_predicate = wrap_func(py, predicate, args, kwargs, get_build_map_func()?)?;
 
-        // Eager Prefetch fusion: if parent is Prefetch, transform into PrefetchFilter
         if let NodeLogic::Prefetch { size } = this.logic {
             let wrapper_code = "lambda p: lambda x: (p(x), x)";
             let builtins = py.import("builtins")?;
@@ -375,7 +485,6 @@ impl Stream {
             this.name = format!("prefetch_filter({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
             this.func_is_sync = func_is_sync;
-            drop(this);
             return Ok(slf.clone().unbind());
         }
 
@@ -391,29 +500,53 @@ impl Stream {
             func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
     /// Flatten an iterable element into individual elements.
     ///
     /// Each element is expected to be iterable. The items within each
-    /// element are emitted individually downstream.
+    /// element are emitted individually downstream. Useful for
+    /// processing streams where each item contains multiple sub-items.
     ///
-    /// Returns:
-    ///     A new Stream emitting the flattened elements.
-    pub fn flatten(&mut self, py: Python) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+    /// # Returns
+    ///
+    /// A new Stream emitting the flattened elements.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// flattened = source.flatten()
+    /// result = []
+    /// flattened.sink(result.append)
+    /// source.emit([1, 2, 3])  # result contains [1, 2, 3]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
+    pub fn flatten(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let node = Self::make_node(
             py,
             NodeLogic::Flatten,
             "flatten".to_string(),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -421,22 +554,46 @@ impl Stream {
     ///
     /// Elements are accumulated in an internal buffer. When `flush()` is
     /// called, all collected elements are emitted as a single tuple.
+    /// This is useful for batching elements before downstream processing.
     ///
-    /// Returns:
-    ///     A new Stream that emits collected tuples on flush.
-    pub fn collect(&mut self, py: Python) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+    /// # Returns
+    ///
+    /// A new Stream that emits collected tuples on flush.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// collected = source.collect()
+    /// result = []
+    /// collected.sink(result.append)
+    /// source.emit(1)
+    /// source.emit(2)
+    /// source.emit(3)
+    /// source.flush()  # result contains [(1, 2, 3)]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
+    pub fn collect(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let node = Self::make_node(
             py,
             NodeLogic::Collect { buffer: Vec::new() },
             "collect".to_string(),
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             true,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -448,21 +605,44 @@ impl Stream {
     ///
     /// Any remaining items in the buffer are emitted on `flush()`.
     ///
-    /// Args:
-    ///     predicate: Function that returns True for delimiter items.
-    ///     include_delimiter: If True (default), the delimiter item is included
-    ///         in the emitted tuple. If False, it is excluded.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting tuples of chunked items.
+    /// * `predicate` - Function that returns True for delimiter items.
+    /// * `include_delimiter` - If True (default), the delimiter item is included
+    ///   in the emitted tuple. If False, it is excluded.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting tuples of chunked items.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// # Split on newlines (delimiter)
+    /// chunks = source.chunk_by(lambda x: x == '\n')
+    /// result = []
+    /// chunks.sink(result.append)
+    /// source.emit('a')
+    /// source.emit('b')
+    /// source.emit('\n')  # flushes buffer
+    /// source.flush()     # flushes remaining 'a', 'b', '\n'
+    /// # result contains [('a', 'b', '\n')]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (predicate, *, include_delimiter=true))]
     pub fn chunk_by(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         predicate: Py<PyAny>,
         include_delimiter: bool,
     ) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let func_name = get_func_name(py, &predicate);
         let source_location = capture_source_location(py);
         let func_is_sync = check_func_is_sync(py, &predicate)?;
@@ -482,11 +662,14 @@ impl Stream {
             },
             name,
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             func_is_sync,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -495,12 +678,31 @@ impl Stream {
     /// For `collect()` nodes, emits all buffered elements as a tuple
     /// and clears the buffer. Has no effect on other node types.
     ///
-    /// Args:
-    ///     *args: Ignored (for compatibility with streamz).
-    ///     **kwargs: Ignored (for compatibility with streamz).
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A coroutine if async processing is triggered, otherwise None.
+    /// * `*args` - Ignored (for compatibility with streamz).
+    /// * `**kwargs` - Ignored (for compatibility with streamz).
+    ///
+    /// # Returns
+    ///
+    /// A coroutine if async processing is triggered, otherwise None.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// collected = source.collect()
+    /// result = []
+    /// collected.sink(result.append)
+    /// source.emit(1)
+    /// source.emit(2)
+    /// source.flush()  # result now contains [(1, 2)]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called re-entrantly (during a flush).
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn flush(
         &mut self,
@@ -611,12 +813,32 @@ impl Stream {
     /// downstream node. Use this when you want to flush an entire
     /// pipeline (e.g. at the end of processing).
     ///
-    /// Args:
-    ///     *args: Ignored (for compatibility with streamz).
-    ///     **kwargs: Ignored (for compatibility with streamz).
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A coroutine if async processing is triggered, otherwise None.
+    /// * `*args` - Ignored (for compatibility with streamz).
+    /// * `**kwargs` - Ignored (for compatibility with streamz).
+    ///
+    /// # Returns
+    ///
+    /// A coroutine if async processing is triggered, otherwise None.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// collected = source.collect()
+    /// result = []
+    /// collected.sink(result.append)
+    /// source.emit(1)
+    /// source.emit(2)
+    /// source.drain()  # drains entire pipeline
+    /// # result contains [(1, 2)]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called re-entrantly (during a drain).
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn drain(
         &mut self,
@@ -694,23 +916,41 @@ impl Stream {
     ///
     /// Similar to map, but the return value of func is discarded.
     /// Use this for terminal operations like printing or storing results.
+    /// Unlike map which returns a transformed stream, sink typically ends
+    /// a pipeline (no further operations are typically added after sink).
     ///
-    /// Args:
-    ///     func: Function to call with each element.
-    ///     *args: Additional positional arguments passed to func.
-    ///     **kwargs: Additional keyword arguments passed to func.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream (for chaining, though sink typically ends a pipeline).
+    /// * `func` - Function to call with each element.
+    /// * `*args` - Additional positional arguments passed to `func`.
+    /// * `**kwargs` - Additional keyword arguments passed to `func`.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream (for chaining, though sink typically ends a pipeline).
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// source.map(lambda x: x * 2).sink(print)  # prints doubled values
+    /// source.emit(5)  # prints 10
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (func, *args, **kwargs))]
     pub fn sink(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         func: Py<PyAny>,
         args: Py<PyTuple>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let func_name = get_func_name(py, &func);
         let name = extract_stream_name(py, &kwargs, "sink", func_name.as_deref())?;
         let source_location = capture_source_location(py);
@@ -722,37 +962,62 @@ impl Stream {
             NodeLogic::Sink { func: wrapped_func },
             name,
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             func_is_sync,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
     /// Accumulate values using a function, emitting each intermediate state.
     ///
-    /// Similar to functools.reduce, but emits every intermediate result.
-    /// The function receives (`current_state`, `new_element`) and returns the new state.
+    /// Similar to functools.reduce, but emits every intermediate result
+    /// rather than just the final state. The function receives
+    /// `(current_state, new_element)` and returns the new state.
     ///
-    /// Args:
-    ///     func: Accumulator function (state, element) -> `new_state`.
-    ///           If `returns_state=True`, function should return (new_state, result).
-    ///     start: Initial state value.
-    ///     returns_state: If True, func returns (state, result) tuple where state
-    ///           is passed to next call and result is emitted. Default False.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A new Stream emitting accumulated states (or results if `returns_state=True`).
+    /// * `func` - Accumulator function `(state, element) -> new_state`. If
+    ///   `returns_state=True`, function should return `(new_state, result)`.
+    /// * `start` - Initial state value passed to first call of `func`.
+    /// * `returns_state` - If True, `func` returns `(state, result)` tuple
+    ///   where state is passed to next call and result is emitted.
+    ///   Default is False (only final state is emitted).
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting accumulated states (or results if `returns_state=True`).
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// accumulated = source.accumulate(lambda state, x: state + x, start=0)
+    /// result = []
+    /// accumulated.sink(result.append)
+    /// source.emit(1)  # result contains [1]
+    /// source.emit(2)  # result contains [1, 3]
+    /// source.emit(3)  # result contains [1, 3, 6]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (func, start, returns_state=false))]
     pub fn accumulate(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         func: Py<PyAny>,
         start: Py<PyAny>,
         returns_state: bool,
     ) -> PyResult<Py<Self>> {
-        check_not_compiled(self.compiled, &self.name)?;
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
         let func_name = get_func_name(py, &func);
         let source_location = capture_source_location(py);
         let func_is_sync = check_func_is_sync(py, &func)?;
@@ -771,11 +1036,14 @@ impl Stream {
             },
             name,
             source_location,
-            self.asynchronous,
-            self.skip_async_check,
+            this.asynchronous,
+            this.skip_async_check,
             func_is_sync,
         )?;
-        self.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
         Ok(node)
     }
 
@@ -787,11 +1055,27 @@ impl Stream {
     /// **Restriction**: This method can ONLY be called on a source node.
     /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
     ///
-    /// Args:
-    ///     x: The value to emit.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A coroutine if async processing is triggered, otherwise None.
+    /// * `x` - The value to emit.
+    ///
+    /// # Returns
+    ///
+    /// A coroutine if async processing is triggered, otherwise None.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// result = []
+    /// source.map(lambda x: x * 2).sink(result.append)
+    /// source.emit(5)  # result contains [10]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
@@ -825,11 +1109,27 @@ impl Stream {
     /// **Restriction**: This method can ONLY be called on a source node.
     /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
     ///
-    /// Args:
-    ///     items: List of values to emit.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A coroutine if async processing is triggered, otherwise None.
+    /// * `items` - List of values to emit.
+    ///
+    /// # Returns
+    ///
+    /// A coroutine if async processing is triggered, otherwise None.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// result = []
+    /// source.map(lambda x: x * 2).sink(result.append)
+    /// source.emit_batch([1, 2, 3])  # result contains [2, 4, 6]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
@@ -870,26 +1170,33 @@ impl Stream {
     /// filter, sink, etc.) to any part of the graph will raise a RuntimeError.
     /// Build your complete pipeline before calling this method.
     ///
-    /// Returns:
-    ///     self (for chaining)
+    /// # Returns
     ///
-    /// Raises:
-    ///     RuntimeError: If the graph is already compiled/frozen or if
-    ///                  modifications are attempted after compilation.
+    /// self (for chaining).
     ///
-    /// Example:
-    ///     >>> s = Stream()
-    ///     >>> s.map(f1).map(f2).sink(print)
-    ///     >>> s.compile()  # f1 and f2 are fused into a single map
-    ///     >>> s.emit(1)    # Fast path with optimized graph
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// source.map(f1).map(f2).sink(print)
+    /// source.compile()  # f1 and f2 are fused into a single map
+    /// source.emit(1)   # Fast path with optimized graph
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the graph is already compiled/frozen or if
+    ///   modifications are attempted after compilation.
     pub fn compile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+        let source_py_ptr = slf.as_ptr() as usize;
         let mut this = slf.borrow_mut();
         if this.compiled {
             return Err(StreamError::AlreadyCompiled(this.name.clone()).into());
         }
 
         // Run full optimization (including chain fusion)
-        this.optimize_topology_full(py);
+        this.optimize_topology_full(py, source_py_ptr);
 
         // Mark this node and all reachable nodes as frozen and compiled
         this.freeze_all(py);
@@ -903,8 +1210,9 @@ impl Stream {
     /// Call `stop_profiling()` to end the session and retrieve the report.
     /// Profiling adds minimal overhead (~80ns per node per item).
     ///
-    /// Raises:
-    ///     RuntimeError: If called on a non-source node or if profiling is already active.
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called on a non-source node or if profiling is already active.
     pub fn start_profiling(&self) -> PyResult<()> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
@@ -914,8 +1222,11 @@ impl Stream {
 
     /// Stop profiling and return the collected report.
     ///
-    /// Returns:
-    ///     A `ProfileReport` with per-node timing and item flow data.
+    /// Returns a `ProfileReport` with per-node timing and item flow data.
+    ///
+    /// # Returns
+    ///
+    /// A `ProfileReport` with per-node timing and item flow data.
     pub fn stop_profiling(&self, py: Python) -> PyResult<Py<crate::profiling::ProfileReport>> {
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
         crate::profiling::build_report(py, self, data, wall_time, emit_count)
@@ -923,10 +1234,24 @@ impl Stream {
 
     /// Return a `Profiler` context manager for this source.
     ///
-    /// Usage:
-    ///     >>> with source.profile() as p:
-    ///     ...     source.emit(42)
-    ///     >>> print(p.report)
+    /// Provides a convenient way to profile a block of emit calls.
+    /// The profiler is a context manager that automatically starts
+    /// profiling on entry and stops on exit.
+    ///
+    /// # Returns
+    ///
+    /// A `Profiler` context manager.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// source.map(lambda x: x * 2).sink(print)
+    /// with source.profile() as p:
+    ///     source.emit(42)
+    /// print(p.report)
+    /// ```
     pub fn profile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyAny>> {
         {
             let this = slf.borrow();
@@ -940,13 +1265,30 @@ impl Stream {
 
     /// Emit a single value and return a profiling report.
     ///
-    /// Convenience method combining start_profiling + emit + stop_profiling.
+    /// Convenience method combining start_profiling + emit + stop_profiling
+    /// for single-shot profiling of an emit call.
     ///
-    /// Args:
-    ///     x: The value to emit.
+    /// # Arguments
     ///
-    /// Returns:
-    ///     A `ProfileReport` for this single emit.
+    /// * `x` - The value to emit.
+    ///
+    /// # Returns
+    ///
+    /// A `ProfileReport` for this single emit.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// source.map(lambda x: x * 2).sink(print)
+    /// report = source.emit_profiled(5)  # prints 10
+    /// print(report)  # shows timing breakdown
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called on a non-source node.
     pub fn emit_profiled(
         &mut self,
         py: Python,
@@ -967,11 +1309,30 @@ impl Stream {
 
     /// Emit a batch of values and return a profiling report.
     ///
-    /// Args:
-    ///     items: List of values to emit.
+    /// Convenience method combining start_profiling + emit_batch + stop_profiling
+    /// for profiling a batch emit call.
     ///
-    /// Returns:
-    ///     A `ProfileReport` for this batch emit.
+    /// # Arguments
+    ///
+    /// * `items` - List of values to emit.
+    ///
+    /// # Returns
+    ///
+    /// A `ProfileReport` for this batch emit.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// source.map(lambda x: x * 2).sink(print)
+    /// report = source.emit_batch_profiled([1, 2, 3])  # prints 2, 4, 6
+    /// print(report)  # shows timing breakdown
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If called on a non-source node.
     pub fn emit_batch_profiled(
         &mut self,
         py: Python,
@@ -987,5 +1348,207 @@ impl Stream {
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
         result?;
         crate::profiling::build_report(py, self, data, wall_time, emit_count)
+    }
+
+    /// Returns a string representation of the stream for debugging.
+    ///
+    /// # Returns
+    ///
+    /// A string showing the stream type and compiled status.
+    pub fn __repr__(&self) -> String {
+        format!("<Stream(nodes=1, compiled={})>", self.compiled)
+    }
+
+    /// Enter the stream context (returns self for use with `with` statement).
+    ///
+    /// # Returns
+    ///
+    /// The stream itself.
+    pub fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Exit the stream context (flushes the stream).
+    ///
+    /// Automatically calls `flush()` on the stream when exiting a `with` block.
+    ///
+    /// # Arguments
+    ///
+    /// * `*args` - Ignored.
+    ///
+    /// # Returns
+    ///
+    /// None.
+    #[pyo3(signature = (*_args))]
+    pub fn __exit__(&mut self, py: Python, _args: Bound<'_, PyTuple>) -> PyResult<()> {
+        self.flush(py, vec![], None)?;
+        Ok(())
+    }
+
+    /// Convert the stream to a Python list.
+    ///
+    /// Adds a sink that appends each element to a list and returns it.
+    /// This is a terminal operation that collects all emitted values.
+    ///
+    /// # Returns
+    ///
+    /// A Python list containing all emitted elements.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// result = source.map(lambda x: x * 2).to_list()
+    /// source.emit(1)
+    /// source.emit(2)
+    /// source.emit(3)
+    /// source.flush()
+    /// print(result)  # [2, 4, 6]
+    /// ```
+    pub fn to_list(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyList>> {
+        let list: Bound<'_, PyList> = PyList::new(py, Vec::<Py<PyAny>>::new())?;
+        let append: Py<PyAny> = list.getattr("append")?.unbind();
+        let args: Py<PyTuple> = PyTuple::empty(py).unbind();
+        let self_py: Py<Self> = slf.clone().unbind();
+        Stream::sink(&self_py.into_bound(py), py, append, args, None)?;
+        Ok(list.unbind())
+    }
+
+    /// Convert the stream to a Python set.
+    ///
+    /// Adds a sink that adds each element to a set and returns it.
+    /// This is a terminal operation that collects all emitted values.
+    ///
+    /// # Returns
+    ///
+    /// A Python set containing all emitted elements.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// result = source.filter(lambda x: x > 5).to_set()
+    /// source.emit(1)
+    /// source.emit(10)
+    /// source.emit(20)
+    /// source.emit(10)  # duplicate
+    /// source.flush()
+    /// print(result)  # {10, 20}
+    /// ```
+    pub fn to_set(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PySet>> {
+        let set: Bound<'_, PySet> = PySet::new(py, Vec::<Py<PyAny>>::new())?;
+        let add: Py<PyAny> = set.getattr("add")?.unbind();
+        let args: Py<PyTuple> = PyTuple::empty(py).unbind();
+        let self_py: Py<Self> = slf.clone().unbind();
+        Stream::sink(&self_py.into_bound(py), py, add, args, None)?;
+        Ok(set.unbind())
+    }
+
+    /// Collect elements with context manager support.
+    ///
+    /// Returns a context manager that automatically flushes the
+    /// collected elements when exiting the context.
+    ///
+    /// # Returns
+    ///
+    /// A `CollectGuard` context manager that flushes on exit.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// collected = source.collect()
+    /// result = []
+    /// collected.sink(result.append)
+    /// with source.collect_context():
+    ///     source.emit(1)
+    ///     source.emit(2)
+    ///     source.emit(3)
+    /// # result contains [(1, 2, 3)]
+    /// ```
+    pub fn collect_context(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<CollectGuard>> {
+        let collect_node = Stream::collect(slf, py)?;
+        Py::new(py, CollectGuard { collect_node })
+    }
+}
+
+#[pyclass]
+pub struct CollectGuard {
+    collect_node: Py<Stream>,
+}
+
+#[pymethods]
+impl CollectGuard {
+    /// Enter the context manager (returns self).
+    ///
+    /// # Returns
+    ///
+    /// The CollectGuard itself.
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    /// Exit the context manager (flushes the collected elements).
+    ///
+    /// Automatically calls `flush()` on the underlying collect node
+    /// when exiting the context.
+    ///
+    /// # Arguments
+    ///
+    /// * `*args` - Ignored.
+    ///
+    /// # Returns
+    ///
+    /// False (does not suppress exceptions).
+    #[pyo3(signature = (*_args))]
+    fn __exit__(&mut self, py: Python, _args: Bound<'_, PyTuple>) -> PyResult<bool> {
+        let mut node = self.collect_node.borrow_mut(py);
+        node.flush(py, vec![], None)?;
+        Ok(false)
+    }
+
+    /// Add a sink to the collect guard for chaining.
+    ///
+    /// Allows adding operations after creating a collect context.
+    /// Returns a new CollectGuard with the additional sink.
+    ///
+    /// # Arguments
+    ///
+    /// * `func` - Function to call with each element.
+    /// * `*args` - Additional positional arguments passed to `func`.
+    /// * `**kwargs` - Additional keyword arguments passed to `func`.
+    ///
+    /// # Returns
+    ///
+    /// A new CollectGuard with the sink added.
+    ///
+    /// # Examples
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// result = []
+    /// with source.collect_context() as guard:
+    ///     guard.sink(print)  # Print items as they flow through
+    ///     source.emit(1)
+    ///     source.emit(2)
+    /// ```
+    #[pyo3(signature = (func, *args, **kwargs))]
+    fn sink(
+        &mut self,
+        py: Python,
+        func: Py<PyAny>,
+        args: Py<PyTuple>,
+        kwargs: Option<Py<PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        let node = self.collect_node.clone_ref(py);
+        let self_py: Py<Stream> = node.clone_ref(py);
+        Stream::sink(&self_py.into_bound(py), py, func, args, kwargs)?;
+        Ok(Py::new(py, Self {
+            collect_node: self.collect_node.clone_ref(py),
+        })?)
     }
 }

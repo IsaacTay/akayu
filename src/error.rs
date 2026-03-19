@@ -17,17 +17,17 @@ pub enum StreamError {
     #[error("Stream '{0}' is already compiled")]
     AlreadyCompiled(String),
 
-    #[error("prefetch size must be at least 1")]
-    InvalidPrefetchSize,
+    #[error("prefetch size must be at least 1, got {0}")]
+    InvalidPrefetchSize(usize),
 
-    #[error("union requires at least one stream")]
-    UnionEmpty,
+    #[error("union() requires at least one stream, got {0}")]
+    UnionEmpty(usize),
 
-    #[error("combine_latest requires at least one stream")]
-    CombineLatestEmpty,
+    #[error("combine_latest() requires at least two streams, got {0}")]
+    CombineLatestEmpty(usize),
 
-    #[error("zip requires at least two streams")]
-    ZipTooFew,
+    #[error("zip() requires at least two streams, got {0}")]
+    ZipTooFew(usize),
 
     #[error(
         "Re-entrant flush detected on node '{0}'. \
@@ -44,17 +44,20 @@ pub enum StreamError {
     )]
     ReentrantEmit(String),
 
-    #[error("akayu not initialized")]
+    #[error(
+        "akayu module not properly initialized. \
+         This is an internal error — please report this issue at https://github.com/user/akayu/issues"
+    )]
     NotInitialized,
 }
 
 impl From<StreamError> for PyErr {
     fn from(err: StreamError) -> Self {
         match &err {
-            StreamError::InvalidPrefetchSize
-            | StreamError::UnionEmpty
-            | StreamError::CombineLatestEmpty
-            | StreamError::ZipTooFew => PyValueError::new_err(err.to_string()),
+            StreamError::InvalidPrefetchSize(_)
+            | StreamError::UnionEmpty(_)
+            | StreamError::CombineLatestEmpty(_)
+            | StreamError::ZipTooFew(_) => PyValueError::new_err(err.to_string()),
             _ => PyRuntimeError::new_err(err.to_string()),
         }
     }

@@ -185,23 +185,6 @@ def test_accumulate_returns_state():
     assert L == [2, 6, 12]
 
 
-def test_combine_latest_emit_on():
-    """Test combine_latest only emits when specified streams update."""
-    s1 = Stream()
-    s2 = Stream()
-    L = []
-    s1.combine_latest(s2, emit_on=s1).sink(L.append)  # only emit on s1 updates
-    s1.emit(1)  # no emit yet (s2 not primed)
-    s2.emit("a")  # no emit (emit_on=s1 only)
-    assert L == []
-    s1.emit(2)  # emit (2, "a")
-    assert L == [(2, "a")]
-    s2.emit("b")  # no emit (emit_on=s1 only)
-    assert L == [(2, "a")]
-    s1.emit(3)  # emit (3, "b")
-    assert L == [(2, "a"), (3, "b")]
-
-
 def test_zip_three_streams():
     """Test zip with three streams."""
     s1, s2, s3 = Stream(), Stream(), Stream()

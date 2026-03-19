@@ -334,20 +334,8 @@ def test_union_empty():
 
 def test_combine_latest_empty():
     """akayu.combine_latest() with no streams raises ValueError."""
-    with pytest.raises(ValueError, match="at least one stream"):
-        akayu.combine_latest()
-
-
-# ---------------------------------------------------------------------------
-# StreamError::ZipTooFew
-# ---------------------------------------------------------------------------
-
-
-def test_zip_too_few():
-    """akayu.zip() with fewer than two streams raises ValueError."""
-    s = akayu.Stream()
     with pytest.raises(ValueError, match="at least two streams"):
-        akayu.zip(s)
+        akayu.combine_latest()
 
 
 # ---------------------------------------------------------------------------

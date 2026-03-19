@@ -1,10 +1,14 @@
 # Getting Started
 
+## System Requirements
+
+- Python 3.8+
+- No Rust toolchain required — pre-built wheels are distributed via pip
+
 ## Installation
 
 /// tab | pip
 
-<!-- pytest-codeblocks:skip -->
 ```bash
 pip install akayu
 ```
@@ -13,7 +17,6 @@ pip install akayu
 
 /// tab | uv
 
-<!-- pytest-codeblocks:skip -->
 ```bash
 uv add akayu
 ```
@@ -22,12 +25,17 @@ uv add akayu
 
 /// tab | pixi
 
-<!-- pytest-codeblocks:skip -->
 ```bash
 pixi add akayu
 ```
 
 ///
+
+## Verify Installation
+
+```bash
+python -c "import akayu; print('akayu installed!')"
+```
 
 ## Basic Usage
 
@@ -63,10 +71,8 @@ filtered.sink(results.append)
 
 ### Emitting Data
 
-Push data through the pipeline using `emit()` or `emit_batch()`:
-
-!!! note "Source Nodes Only"
-    Data can only be emitted into **source** nodes (nodes created with `Stream()`). Trying to emit data into derived nodes (like those returned by `.map()` or `.filter()`) is not allowed and will raise a `RuntimeError`.
+!!! warning "Source Nodes Only"
+    Data can only be emitted into **source** nodes (nodes created with `Stream()`). Trying to emit data into derived nodes (like those returned by `.map()` or `.filter()`) raises a `RuntimeError`.
 
 ```mermaid
 flowchart LR
@@ -81,7 +87,7 @@ flowchart LR
     
     linkStyle 2 stroke:#dc2626,stroke-width:2px,color:red
 ```
-<!-- pytest-codeblocks:cont -->
+
 ```python
 # Single item
 source.emit(5)
@@ -90,43 +96,69 @@ source.emit(5)
 source.emit_batch([1, 2, 3, 4, 5])
 ```
 
-### Compiling for Performance
+### To compile or not to compile?
 
-Call `.compile()` before processing to enable optimizations like operator fusion:
+The `compile()` step enables graph optimizations but is **optional**.
+
+**What compile() does:**
+- **Operator fusion** — Chains of `map.map.map` become a single fused operation
+- **Graph locking** — Prevents accidental modifications after optimization
+- **State initialization** — Prepares accumulate states upfront
+
+**When to use it:**
+- Production pipelines processing high volumes
+- Hot loops where overhead matters
+- When you want protection against accidental graph mutation
+
+**When to skip it:**
+- Debugging — uncompiled graphs are easier to inspect
+- Dynamic pipelines — you need to add/remove nodes at runtime
+- Rapid prototyping — faster iteration without recompiling
 
 ```python
-import akayu
-
-f1 = f2 = f3 = lambda x: x
-data = []
-source = akayu.Stream()
-source.map(f1).map(f2).map(f3).sink(print)
-
-# Freeze topology and apply optimizations
+# Optional but recommended for production
 source.compile()
-
-# Now emit data through the optimized pipeline
 source.emit_batch(data)
 ```
 
-!!! warning
-    **Graph Locking**: Once `.compile()` is called, the stream graph is **locked** and becomes immutable. Attempting to add any new operations (like `.map()`, `.filter()`, etc.) to any part of the compiled graph will raise a `RuntimeError`. Build your entire pipeline first, then compile it once. See [Graph Locking & Immutability](features/compile-optimizations.md#graph-locking-immutability) for details.
+## Common Mistakes
+
+### Emitting to a non-source node
+
+```python
+source = akaku.Stream()
+mapped = source.map(lambda x: x * 2)
+
+mapped.emit(5)  # ❌ RuntimeError: Cannot emit to non-source node
+```
+
+**Error:**
+```
+RuntimeError: Cannot emit to non-source node. Only source nodes (created with Stream()) can receive data.
+```
+
+**Fix:** Always emit to the original source node:
+
+```python
+source.emit(5)  # ✅ Correct
+```
 
 ## Available Operations
 
 ### Transformations
 
-- [`#!python map(func)`](api.md#akayu.Stream.map): Transform each element using the provided function.
-- [`#!python filter(predicate)`](api.md#akayu.Stream.filter): Keep only elements that satisfy the predicate.
-- [`#!python flatten()`](api.md#akayu.Stream.flatten): Expand iterable elements into individual items downstream.
-- [`#!python accumulate(func, start)`](api.md#akayu.Stream.accumulate): Accumulate values (like reduce) and emit every intermediate result.
-- [`#!python sink(func)`](api.md#akayu.Stream.sink): Execute a side-effect function for each element (terminal operation).
+- [`#!python map(func)`](api.md#akayu.Stream.map) — Transform each element
+- [`#!python filter(predicate)`](api.md#akayu.Stream.filter) — Keep matching elements
+- [`#!python flatten()`](api.md#akayu.Stream.flatten) — Expand iterables into individual items
+- [`#!python accumulate(func, start)`](api.md#akayu.Stream.accumulate) — Running aggregation
+- [`#!python batch_map(func)`](api.md#akayu.Stream.batch_map) — Vectorized batch transformation
+- [`#!python sink(func)`](api.md#akayu.Stream.sink) — Terminal side-effect operation
 
 ### Combining Streams
 
-- [`#!python union(*streams)`](api.md#akayu.Stream.union): Merge multiple streams into one, emitting items as they arrive.
-- [`#!python zip(*streams)`](api.md#akayu.Stream.zip): Wait for one item from each stream and emit them as a tuple.
-- [`#!python combine_latest(*streams)`](api.md#akayu.Stream.combine_latest): Emit the latest value from each stream whenever any of them updates.
+- [`#!python union(*streams)`](api.md#akayu.Stream.union) — Merge multiple streams
+- [`#!python zip(*streams)`](api.md#akayu.Stream.zip) — Pair items from multiple streams
+- [`#!python combine_latest(*streams)`](api.md#akayu.Stream.combine_latest) — Latest value from each stream
 
 ## Example: Processing Pipeline
 
@@ -159,3 +191,9 @@ source.emit_batch(records)
 print(results)
 # [{'id': 1, 'value': 20}, {'id': 3, 'value': 40}]
 ```
+
+## Next Steps
+
+- [Starter Patterns](patterns.md#starter-patterns) — Common patterns with examples
+- [Advanced Patterns](patterns.md#patterns--best-practices) — Concurrency, batching, anti-patterns
+- [API Reference](api.md) — Full method documentation

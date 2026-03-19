@@ -270,16 +270,35 @@ pub(crate) fn check_not_compiled(compiled: bool, name: &str) -> PyResult<()> {
     Ok(())
 }
 
+#[pyfunction]
+#[pyo3(signature = (data, path))]
 /// Write data to a text file, appending a newline.
 ///
 /// Converts the input data to a string and appends it as a new line to the specified file.
-/// Creates the file if it doesn't exist.
+/// Creates the file if it doesn't exist. This is a side-effect operation intended
+/// for logging or output purposes.
 ///
-/// Args:
-///     data: The data to write (will be converted to string).
-///     path: The file path to write to.
-#[pyfunction]
-#[pyo3(signature = (data, path))]
+/// # Arguments
+///
+/// * `data` - The data to write (will be converted to string via `str()`).
+/// * `path` - The file path to write to.
+///
+/// # Returns
+///
+/// None.
+///
+/// # Examples
+///
+/// ```python
+/// import akayu
+/// source = akayu.Stream()
+/// source.sink(akayu.to_text_file, path="output.txt")
+/// source.emit("Hello")
+/// source.emit("World")
+/// # output.txt contains:
+/// # Hello
+/// # World
+/// ```
 pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
@@ -290,19 +309,39 @@ pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
     Ok(())
 }
 
+#[pyfunction]
+#[pyo3(signature = (path, interval=None))]
 /// Create a Stream that emits lines from a text file.
 ///
 /// Reads the file line by line in a background thread and emits each line
-/// as a string to the returned stream.
+/// as a string to the returned stream. The file is watched and re-watched
+/// if an interval is specified.
 ///
-/// Args:
-///     path: The file path to read from.
-///     interval: Optional delay in seconds between emitting lines.
+/// # Arguments
 ///
-/// Returns:
-///     A Stream that will emit each line from the file.
-#[pyfunction]
-#[pyo3(signature = (path, interval=None))]
+/// * `path` - The file path to read from.
+/// * `interval` - Optional delay in seconds between emitting lines. If None,
+///   the file is read once and the stream closes. If specified, the file
+///   is watched and new lines are emitted as they appear.
+///
+/// # Returns
+///
+/// A Stream that will emit each line from the file.
+///
+/// # Examples
+///
+/// ```python
+/// import akayu
+/// # Read file once
+/// source = akayu.from_text_file("data.txt")
+/// result = []
+/// source.sink(result.append)
+/// # result contains all lines from data.txt
+///
+/// # Watch file for changes
+/// source = akayu.from_text_file("log.txt", interval=0.5)
+/// source.sink(print)  # prints new lines as they appear
+/// ```
 pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<Py<Stream>> {
     let source_location = capture_source_location(py);
     let stream = Py::new(
@@ -310,6 +349,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
         Stream {
             logic: NodeLogic::Source,
             downstreams: Vec::new(),
+            parents: std::sync::Mutex::new(Vec::new()),
             name: "file_source".to_string(),
             asynchronous: None,
             skip_async_check: false,
