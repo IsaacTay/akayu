@@ -13,6 +13,18 @@ use crate::helpers::{
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
 use crate::profiling;
 
+/// Check for pending signals (e.g. KeyboardInterrupt).
+/// Cost: ~7ns when no signal pending (atomic flag read).
+#[inline(always)]
+fn check_signals(py: Python) -> PyResult<()> {
+    unsafe {
+        if pyo3::ffi::PyErr_CheckSignals() == -1 {
+            return Err(PyErr::fetch(py));
+        }
+    }
+    Ok(())
+}
+
 /// Start a profiling timer if profiling is active.
 #[inline(always)]
 fn prof_start(profiling: bool) -> Option<Instant> {
@@ -433,7 +445,10 @@ pub(crate) fn apply_logic_batch(
             let mut output = Vec::with_capacity(items.len());
             match builtin_op {
                 Some(op) => {
-                    for x in items {
+                    for (i, x) in items.into_iter().enumerate() {
+                        if i & 1023 == 0 {
+                            check_signals(py)?;
+                        }
                         let res = apply_builtin(py, op, &x);
                         output.push(wrap_error(py, res, name, source_location)?);
                     }
@@ -454,7 +469,10 @@ pub(crate) fn apply_logic_batch(
             let mut output = Vec::with_capacity(items.len());
             match builtin_op {
                 Some(op) => {
-                    for x in items {
+                    for (i, x) in items.into_iter().enumerate() {
+                        if i & 1023 == 0 {
+                            check_signals(py)?;
+                        }
                         let res = apply_builtin_as_filter(py, op, &x);
                         if wrap_error(py, res, name, source_location)? {
                             output.push(x);
