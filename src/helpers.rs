@@ -51,6 +51,12 @@ define_py_helper!(BUILTIN_INT, get_builtin_int);
 define_py_helper!(BUILTIN_FLOAT, get_builtin_float);
 define_py_helper!(BUILTIN_BOOL, get_builtin_bool);
 define_py_helper!(BUILTIN_PRINT, get_builtin_print);
+define_py_helper!(BUILTIN_TYPE, get_builtin_type);
+define_py_helper!(BUILTIN_HASATTR, get_builtin_hasattr);
+define_py_helper!(BUILTIN_TUPLE, get_builtin_tuple);
+define_py_helper!(BUILTIN_LIST, get_builtin_list);
+define_py_helper!(BUILTIN_SET, get_builtin_set);
+define_py_helper!(BUILTIN_FROZENSET, get_builtin_frozenset);
 define_py_helper!(OPERATOR_NOT, get_operator_not);
 define_py_helper!(OPERATOR_IS, get_operator_is);
 define_py_helper!(OPERATOR_IS_NOT, get_operator_is_not);
@@ -58,6 +64,7 @@ define_py_helper!(OPERATOR_TRUTH, get_operator_truth);
 define_py_helper!(OPERATOR_ITEMGETTER, get_operator_itemgetter);
 define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
+define_py_helper!(ANALYZE_LAMBDA, get_analyze_lambda);
 
 pub(crate) fn extract_stream_name(
     py: Python,
@@ -133,6 +140,34 @@ pub(crate) fn vectorcall1(
     unsafe {
         let args = [arg.as_ptr()];
         let result = pyo3::ffi::PyObject_Vectorcall(
+            func.as_ptr(),
+            args.as_ptr(),
+            1,
+            std::ptr::null_mut(),
+        );
+        if result.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(Py::from_owned_ptr(py, result))
+    }
+}
+
+/// Call a Python callable using a pre-cached vectorcall function pointer.
+///
+/// Skips the per-call type flag check, `tp_vectorcall_offset` dereference,
+/// and `_Py_CheckFunctionResult` that `PyObject_Vectorcall` performs.
+/// The caller must ensure `func_ptr` was extracted from `func` and that
+/// `func` has not been replaced since extraction.
+#[inline(always)]
+pub(crate) fn cached_vectorcall1(
+    py: Python,
+    func_ptr: pyo3::ffi::vectorcallfunc,
+    func: &Py<PyAny>,
+    arg: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    unsafe {
+        let args = [arg.as_ptr()];
+        let result = func_ptr(
             func.as_ptr(),
             args.as_ptr(),
             1,
@@ -296,6 +331,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             compiled: false,
             source_location,
             builtin_op: None,
+            cached_vectorcall: None,
         },
     )?;
     let stream_clone = stream.clone_ref(py);
@@ -382,6 +418,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let profiler_class = helpers_module.getattr("_Profiler")?;
     let _ = PROFILER_CLASS.set(profiler_class.unbind());
 
+    let analyze_lambda = helpers_module.getattr("_analyze_lambda")?;
+    let _ = ANALYZE_LAMBDA.set(analyze_lambda.unbind());
+
     let inspect = py.import("inspect")?;
     let is_awaitable = inspect.getattr("isawaitable")?;
     let _ = IS_AWAITABLE.set(is_awaitable.unbind());
@@ -395,6 +434,12 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILTIN_FLOAT.set(builtins.getattr("float")?.unbind());
     let _ = BUILTIN_BOOL.set(builtins.getattr("bool")?.unbind());
     let _ = BUILTIN_PRINT.set(builtins.getattr("print")?.unbind());
+    let _ = BUILTIN_TYPE.set(builtins.getattr("type")?.unbind());
+    let _ = BUILTIN_HASATTR.set(builtins.getattr("hasattr")?.unbind());
+    let _ = BUILTIN_TUPLE.set(builtins.getattr("tuple")?.unbind());
+    let _ = BUILTIN_LIST.set(builtins.getattr("list")?.unbind());
+    let _ = BUILTIN_SET.set(builtins.getattr("set")?.unbind());
+    let _ = BUILTIN_FROZENSET.set(builtins.getattr("frozenset")?.unbind());
 
     // Cache operator module references for fast-path detection
     let operator = py.import("operator")?;

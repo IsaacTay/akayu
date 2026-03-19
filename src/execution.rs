@@ -7,10 +7,10 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::Stream;
 use crate::helpers::{
-    get_filter_async, get_gather, get_is_awaitable, get_parallel_execute, get_process_async,
-    get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
+    cached_vectorcall1, get_filter_async, get_gather, get_is_awaitable, get_parallel_execute,
+    get_process_async, get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
 };
-use crate::node::{BuiltinOp, NodeLogic};
+use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
 use crate::profiling;
 
 /// Start a profiling timer if profiling is active.
@@ -39,6 +39,212 @@ pub(crate) enum BatchStepResult {
     Terminal,
 }
 
+/// Call a Python callable, using the cached vectorcall pointer if available.
+#[inline(always)]
+fn vcall1(
+    py: Python,
+    func: &Py<PyAny>,
+    arg: &Py<PyAny>,
+    cached: &Option<pyo3::ffi::vectorcallfunc>,
+) -> PyResult<Py<PyAny>> {
+    if let Some(ptr) = cached {
+        cached_vectorcall1(py, *ptr, func, arg)
+    } else {
+        vectorcall1(py, func, arg)
+    }
+}
+
+/// Apply a `BuiltinOp` to a single value, returning the result.
+///
+/// This is the recursive workhorse for Chain, And, Or, Negate.
+/// For leaf ops it performs the same C-API calls as the inline match arms
+/// in `apply_logic`, but factored out so compound ops can compose them.
+#[inline]
+fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    match op {
+        BuiltinOp::Len => {
+            let len = x.bind(py).len()?;
+            Ok(len.into_pyobject(py)?.into_any().unbind())
+        }
+        BuiltinOp::Str => Ok(x.bind(py).str()?.into_any().unbind()),
+        BuiltinOp::Int => unsafe {
+            let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+        BuiltinOp::Float => unsafe {
+            let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+        BuiltinOp::Bool => {
+            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r != 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::Not => {
+            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r == 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::Truth => {
+            let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r != 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::ItemGetter(key) => Ok(x.bind(py).get_item(key)?.unbind()),
+        BuiltinOp::AttrGetter(attr_name) => Ok(x.bind(py).getattr(attr_name)?.unbind()),
+        BuiltinOp::IsInstance(type_obj) => {
+            let r = x.bind(py).is_instance(type_obj.bind(py))?;
+            Ok(PyBool::new(py, r).to_owned().into_any().unbind())
+        }
+        BuiltinOp::Is(sentinel) => Ok(PyBool::new(py, x.is(sentinel)).to_owned().into_any().unbind()),
+        BuiltinOp::IsNot(sentinel) => Ok(PyBool::new(py, !x.is(sentinel)).to_owned().into_any().unbind()),
+        BuiltinOp::Print => {
+            let print_fn = crate::helpers::get_builtin_print()?;
+            print_fn.call1(py, (x,))?;
+            Ok(py.None().into())
+        }
+        BuiltinOp::Type => Ok(x.bind(py).get_type().into_any().unbind()),
+        BuiltinOp::HasAttr(attr_name) => {
+            let r = unsafe { pyo3::ffi::PyObject_HasAttr(x.as_ptr(), attr_name.as_ptr()) };
+            Ok(PyBool::new(py, r == 1).to_owned().into_any().unbind())
+        }
+        BuiltinOp::Tuple => unsafe {
+            let ptr = pyo3::ffi::PySequence_Tuple(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+        BuiltinOp::List => unsafe {
+            let ptr = pyo3::ffi::PySequence_List(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+        BuiltinOp::Set => unsafe {
+            let ptr = pyo3::ffi::PySet_New(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+        BuiltinOp::FrozenSet => unsafe {
+            let ptr = pyo3::ffi::PyFrozenSet_New(x.as_ptr());
+            if ptr.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, ptr))
+        },
+
+        // --- Phase 2 variants ---
+
+        BuiltinOp::BinOp(bin_op, rhs) => unsafe {
+            let result = match bin_op {
+                BinaryOp::Add => pyo3::ffi::PyNumber_Add(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::Sub => pyo3::ffi::PyNumber_Subtract(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::Mul => pyo3::ffi::PyNumber_Multiply(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::TrueDiv => pyo3::ffi::PyNumber_TrueDivide(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::FloorDiv => pyo3::ffi::PyNumber_FloorDivide(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::Mod => pyo3::ffi::PyNumber_Remainder(x.as_ptr(), rhs.as_ptr()),
+                BinaryOp::Pow => pyo3::ffi::PyNumber_Power(x.as_ptr(), rhs.as_ptr(), pyo3::ffi::Py_None()),
+            };
+            if result.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, result))
+        },
+        BuiltinOp::Compare(cmp_op, rhs) => {
+            let r = unsafe {
+                pyo3::ffi::PyObject_RichCompareBool(x.as_ptr(), rhs.as_ptr(), cmp_op.to_ffi())
+            };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r != 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::Contains(coll) => {
+            let r = unsafe { pyo3::ffi::PySequence_Contains(coll.as_ptr(), x.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r != 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::NotContains(coll) => {
+            let r = unsafe { pyo3::ffi::PySequence_Contains(coll.as_ptr(), x.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r == 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::MethodCall(method_name) => {
+            Ok(x.bind(py).call_method0(method_name)?.unbind())
+        }
+        BuiltinOp::MethodCall1(method_name, arg) => {
+            Ok(x.bind(py).call_method1(method_name, (arg,))?.unbind())
+        }
+        BuiltinOp::MethodCall2(method_name, arg1, arg2) => {
+            Ok(x.bind(py).call_method1(method_name, (arg1, arg2))?.unbind())
+        }
+        BuiltinOp::Slice(start, stop) => unsafe {
+            let slice = pyo3::ffi::PySlice_New(start.as_ptr(), stop.as_ptr(), std::ptr::null_mut());
+            if slice.is_null() { return Err(PyErr::fetch(py)); }
+            let result = pyo3::ffi::PyObject_GetItem(x.as_ptr(), slice);
+            pyo3::ffi::Py_DECREF(slice);
+            if result.is_null() { return Err(PyErr::fetch(py)); }
+            Ok(Py::from_owned_ptr(py, result))
+        },
+        BuiltinOp::TupleConstruct(ops) => {
+            let mut elems = Vec::with_capacity(ops.len());
+            for op in ops {
+                elems.push(apply_builtin(py, op, x)?);
+            }
+            Ok(PyTuple::new(py, &elems)?.into_any().unbind())
+        }
+        BuiltinOp::ListConstruct(ops) => {
+            let mut elems = Vec::with_capacity(ops.len());
+            for op in ops {
+                elems.push(apply_builtin(py, op, x)?);
+            }
+            Ok(PyList::new(py, &elems)?.into_any().unbind())
+        }
+        BuiltinOp::Chain(first, second) => {
+            let mid = apply_builtin(py, first, x)?;
+            apply_builtin(py, second, &mid)
+        }
+        BuiltinOp::Negate(inner) => {
+            let result = apply_builtin(py, inner, x)?;
+            let r = unsafe { pyo3::ffi::PyObject_IsTrue(result.as_ptr()) };
+            if r == -1 { return Err(PyErr::fetch(py)); }
+            Ok(PyBool::new(py, r == 0).to_owned().into_any().unbind())
+        }
+        BuiltinOp::And(a, b) => {
+            let ra = apply_builtin(py, a, x)?;
+            let truthy = unsafe { pyo3::ffi::PyObject_IsTrue(ra.as_ptr()) };
+            if truthy == -1 { return Err(PyErr::fetch(py)); }
+            if truthy == 0 { Ok(ra) } else { apply_builtin(py, b, x) }
+        }
+        BuiltinOp::Or(a, b) => {
+            let ra = apply_builtin(py, a, x)?;
+            let truthy = unsafe { pyo3::ffi::PyObject_IsTrue(ra.as_ptr()) };
+            if truthy == -1 { return Err(PyErr::fetch(py)); }
+            if truthy != 0 { Ok(ra) } else { apply_builtin(py, b, x) }
+        }
+    }
+}
+
+/// Apply a `BuiltinOp` as a filter predicate, returning whether the item passes.
+#[inline]
+fn apply_builtin_as_filter(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<bool> {
+    // For certain ops we can skip the intermediate PyObject and go straight to bool
+    match op {
+        BuiltinOp::IsInstance(type_obj) => x.bind(py).is_instance(type_obj.bind(py)),
+        BuiltinOp::Is(sentinel) => Ok(x.is(sentinel)),
+        BuiltinOp::IsNot(sentinel) => Ok(!x.is(sentinel)),
+        BuiltinOp::HasAttr(attr_name) => {
+            let r = unsafe { pyo3::ffi::PyObject_HasAttr(x.as_ptr(), attr_name.as_ptr()) };
+            Ok(r == 1)
+        }
+        BuiltinOp::And(a, b) => {
+            if !apply_builtin_as_filter(py, a, x)? { Ok(false) } else { apply_builtin_as_filter(py, b, x) }
+        }
+        BuiltinOp::Or(a, b) => {
+            if apply_builtin_as_filter(py, a, x)? { Ok(true) } else { apply_builtin_as_filter(py, b, x) }
+        }
+        BuiltinOp::Negate(inner) => Ok(!apply_builtin_as_filter(py, inner, x)?),
+        _ => {
+            let result = apply_builtin(py, op, x)?;
+            result.is_truthy(py)
+        }
+    }
+}
+
 /// Process a single item through a chainable NodeLogic variant.
 ///
 /// Handles: Map, Filter (simple path), Sink, Accumulate, Flatten, BatchMap.
@@ -51,6 +257,7 @@ pub(crate) fn apply_logic(
     py: Python,
     logic: &mut NodeLogic,
     builtin_op: &Option<BuiltinOp>,
+    cached_vc: &Option<pyo3::ffi::vectorcallfunc>,
     name: &str,
     source_location: &str,
     node_id: usize,
@@ -60,48 +267,11 @@ pub(crate) fn apply_logic(
     match logic {
         NodeLogic::Map { func } => {
             let t = prof_start(profiling);
-            let result = match builtin_op {
-                Some(BuiltinOp::Len) => {
-                    let len = x.bind(py).len()?;
-                    len.into_pyobject(py)?.into_any().unbind()
-                }
-                Some(BuiltinOp::Str) => x.bind(py).str()?.into_any().unbind(),
-                Some(BuiltinOp::Int) => unsafe {
-                    let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
-                    if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                    Py::from_owned_ptr(py, ptr)
-                },
-                Some(BuiltinOp::Float) => unsafe {
-                    let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
-                    if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                    Py::from_owned_ptr(py, ptr)
-                },
-                Some(BuiltinOp::Bool) => {
-                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                    if r == -1 { return Err(PyErr::fetch(py)); }
-                    PyBool::new(py, r != 0).to_owned().into_any().unbind()
-                }
-                Some(BuiltinOp::Not) => {
-                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                    if r == -1 { return Err(PyErr::fetch(py)); }
-                    PyBool::new(py, r == 0).to_owned().into_any().unbind()
-                }
-                Some(BuiltinOp::Truth) => {
-                    let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                    if r == -1 { return Err(PyErr::fetch(py)); }
-                    PyBool::new(py, r != 0).to_owned().into_any().unbind()
-                }
-                Some(BuiltinOp::ItemGetter(key)) => {
-                    x.bind(py).get_item(key)?.unbind()
-                }
-                Some(BuiltinOp::AttrGetter(attr_name)) => {
-                    x.bind(py).getattr(attr_name)?.unbind()
-                }
-                _ => {
-                    let res = vectorcall1(py, func, &x);
-                    wrap_error(py, res, name, source_location)?
-                }
+            let res: PyResult<Py<PyAny>> = match builtin_op {
+                Some(op) => apply_builtin(py, op, &x),
+                None => vcall1(py, func, &x, cached_vc),
             };
+            let result = wrap_error(py, res, name, source_location)?;
             let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
             if profiling {
                 profiling::record_node(node_id, ft, 1, 1, name, source_location);
@@ -110,34 +280,19 @@ pub(crate) fn apply_logic(
         }
 
         NodeLogic::Filter { predicate } => {
-            let (passes, ft) = match builtin_op {
-                Some(BuiltinOp::IsInstance(type_obj)) => {
-                    let t = prof_start(profiling);
-                    let passes = x.bind(py).is_instance(type_obj.bind(py))?;
-                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
-                    (passes, ft)
+            let t = prof_start(profiling);
+            let passes = match builtin_op {
+                Some(op) => {
+                    let res = apply_builtin_as_filter(py, op, &x);
+                    wrap_error(py, res, name, source_location)?
                 }
-                Some(BuiltinOp::Is(sentinel)) => {
-                    let t = prof_start(profiling);
-                    let passes = x.is(sentinel);
-                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
-                    (passes, ft)
-                }
-                Some(BuiltinOp::IsNot(sentinel)) => {
-                    let t = prof_start(profiling);
-                    let passes = !x.is(sentinel);
-                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
-                    (passes, ft)
-                }
-                _ => {
-                    let t = prof_start(profiling);
-                    let res = vectorcall1(py, predicate, &x);
-                    let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
+                None => {
+                    let res = vcall1(py, predicate, &x, cached_vc);
                     let res = wrap_error(py, res, name, source_location)?;
-                    let passes = res.is_truthy(py)?;
-                    (passes, ft)
+                    res.is_truthy(py)?
                 }
             };
+            let ft = if let Some(t) = t { t.elapsed() } else { Duration::ZERO };
             if profiling {
                 profiling::record_node(node_id, ft, 1, u64::from(passes), name, source_location);
             }
@@ -152,7 +307,7 @@ pub(crate) fn apply_logic(
                     print_fn.call1(py, (&x,))?;
                 }
                 _ => {
-                    let res = vectorcall1(py, func, &x);
+                    let res = vcall1(py, func, &x, cached_vc);
                     wrap_error(py, res, name, source_location)?;
                 }
             }
@@ -224,8 +379,8 @@ pub(crate) fn apply_logic(
             let mut i = 0;
             while i < steps.len() {
                 let step = &mut steps[i];
-                match apply_logic(py, &mut step.logic, &step.builtin_op, &step.name,
-                                  &step.source_location, step.node_id, val, profiling)? {
+                match apply_logic(py, &mut step.logic, &step.builtin_op, &step.cached_vectorcall,
+                                  &step.name, &step.source_location, step.node_id, val, profiling)? {
                     StepResult::Value(v) => { val = v; i += 1; }
                     StepResult::Filtered => return Ok(StepResult::Filtered),
                     StepResult::Terminal => return Ok(StepResult::Terminal),
@@ -234,7 +389,7 @@ pub(crate) fn apply_logic(
                         let mut batch = items;
                         for j in (i + 1)..steps.len() {
                             let s = &mut steps[j];
-                            match apply_logic_batch(py, &mut s.logic, &s.builtin_op,
+                            match apply_logic_batch(py, &mut s.logic, &s.builtin_op, &s.cached_vectorcall,
                                                     &s.name, &s.source_location, s.node_id,
                                                     batch, profiling)? {
                                 BatchStepResult::Items(out) => batch = out,
@@ -263,6 +418,7 @@ pub(crate) fn apply_logic_batch(
     py: Python,
     logic: &mut NodeLogic,
     builtin_op: &Option<BuiltinOp>,
+    cached_vc: &Option<pyo3::ffi::vectorcallfunc>,
     name: &str,
     source_location: &str,
     node_id: usize,
@@ -276,75 +432,16 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = Vec::with_capacity(items.len());
             match builtin_op {
-                Some(BuiltinOp::Len) => {
+                Some(op) => {
                     for x in items {
-                        let len = x.bind(py).len()?;
-                        output.push(len.into_pyobject(py)?.into_any().unbind());
+                        let res = apply_builtin(py, op, &x);
+                        output.push(wrap_error(py, res, name, source_location)?);
                     }
                 }
-                Some(BuiltinOp::Str) => {
+                None => {
                     for x in items {
-                        output.push(x.bind(py).str()?.into_any().unbind());
-                    }
-                }
-                Some(BuiltinOp::Int) => {
-                    for x in items {
-                        let result: Py<PyAny> = unsafe {
-                            let ptr = pyo3::ffi::PyNumber_Long(x.as_ptr());
-                            if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                            Py::from_owned_ptr(py, ptr)
-                        };
-                        output.push(result);
-                    }
-                }
-                Some(BuiltinOp::Float) => {
-                    for x in items {
-                        let result: Py<PyAny> = unsafe {
-                            let ptr = pyo3::ffi::PyNumber_Float(x.as_ptr());
-                            if ptr.is_null() { return Err(PyErr::fetch(py)); }
-                            Py::from_owned_ptr(py, ptr)
-                        };
-                        output.push(result);
-                    }
-                }
-                Some(BuiltinOp::Bool) => {
-                    for x in items {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        output.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
-                    }
-                }
-                Some(BuiltinOp::Not) => {
-                    for x in items {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        output.push(PyBool::new(py, r == 0).to_owned().into_any().unbind());
-                    }
-                }
-                Some(BuiltinOp::Truth) => {
-                    for x in items {
-                        let r = unsafe { pyo3::ffi::PyObject_IsTrue(x.as_ptr()) };
-                        if r == -1 { return Err(PyErr::fetch(py)); }
-                        output.push(PyBool::new(py, r != 0).to_owned().into_any().unbind());
-                    }
-                }
-                Some(BuiltinOp::ItemGetter(key)) => {
-                    for x in items {
-                        let result = x.bind(py).get_item(key)?;
-                        output.push(result.unbind());
-                    }
-                }
-                Some(BuiltinOp::AttrGetter(attr_name)) => {
-                    for x in items {
-                        let result = x.bind(py).getattr(attr_name)?;
-                        output.push(result.unbind());
-                    }
-                }
-                _ => {
-                    for x in items {
-                        let res = vectorcall1(py, func, &x);
-                        let res = wrap_error(py, res, name, source_location)?;
-                        output.push(res);
+                        let res = vcall1(py, func, &x, cached_vc);
+                        output.push(wrap_error(py, res, name, source_location)?);
                     }
                 }
             }
@@ -356,31 +453,17 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = Vec::with_capacity(items.len());
             match builtin_op {
-                Some(BuiltinOp::IsInstance(type_obj)) => {
-                    let type_bound = type_obj.bind(py);
+                Some(op) => {
                     for x in items {
-                        if x.bind(py).is_instance(type_bound)? {
+                        let res = apply_builtin_as_filter(py, op, &x);
+                        if wrap_error(py, res, name, source_location)? {
                             output.push(x);
                         }
                     }
                 }
-                Some(BuiltinOp::Is(sentinel)) => {
+                None => {
                     for x in items {
-                        if x.is(sentinel) {
-                            output.push(x);
-                        }
-                    }
-                }
-                Some(BuiltinOp::IsNot(sentinel)) => {
-                    for x in items {
-                        if !x.is(sentinel) {
-                            output.push(x);
-                        }
-                    }
-                }
-                _ => {
-                    for x in items {
-                        let res = vectorcall1(py, predicate, &x);
+                        let res = vcall1(py, predicate, &x, cached_vc);
                         let res = wrap_error(py, res, name, source_location)?;
                         if res.is_truthy(py)? {
                             output.push(x);
@@ -449,7 +532,7 @@ pub(crate) fn apply_logic_batch(
                 }
                 _ => {
                     for x in items {
-                        let res = vectorcall1(py, func, &x);
+                        let res = vcall1(py, func, &x, cached_vc);
                         wrap_error(py, res, name, source_location)?;
                     }
                 }
@@ -463,7 +546,7 @@ pub(crate) fn apply_logic_batch(
         NodeLogic::Chain { steps } => {
             let mut batch = items;
             for step in steps.iter_mut() {
-                match apply_logic_batch(py, &mut step.logic, &step.builtin_op,
+                match apply_logic_batch(py, &mut step.logic, &step.builtin_op, &step.cached_vectorcall,
                                         &step.name, &step.source_location, step.node_id,
                                         batch, profiling)? {
                     BatchStepResult::Items(out) => batch = out,
@@ -498,8 +581,8 @@ impl Stream {
             | NodeLogic::Accumulate { .. } | NodeLogic::Flatten | NodeLogic::BatchMap { .. }
             | NodeLogic::Chain { .. }
         ) {
-            match apply_logic_batch(py, &mut self.logic, &self.builtin_op, &self.name,
-                                    &self.source_location, node_id, items, profiling_active)? {
+            match apply_logic_batch(py, &mut self.logic, &self.builtin_op, &self.cached_vectorcall,
+                                    &self.name, &self.source_location, node_id, items, profiling_active)? {
                 BatchStepResult::Items(output) => return self.propagate_batch(py, output),
                 BatchStepResult::Terminal => return Ok(None),
             }
@@ -680,8 +763,8 @@ impl Stream {
             && (self.skip_async_check || self.builtin_op.is_some());
 
         if is_chainable || is_chainable_filter {
-            match apply_logic(py, &mut self.logic, &self.builtin_op, &self.name,
-                              &self.source_location, node_id, x, profiling_active)? {
+            match apply_logic(py, &mut self.logic, &self.builtin_op, &self.cached_vectorcall,
+                              &self.name, &self.source_location, node_id, x, profiling_active)? {
                 StepResult::Value(v) => return self.propagate(py, v),
                 StepResult::Filtered => return Ok(None),
                 StepResult::Terminal => return Ok(None),

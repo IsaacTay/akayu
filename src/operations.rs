@@ -40,6 +40,7 @@ impl Stream {
             compiled: false,
             source_location,
             builtin_op: None,
+            cached_vectorcall: None,
         }
     }
 
@@ -126,6 +127,7 @@ impl Stream {
                     compiled: false,
                     source_location,
                     builtin_op: None,
+                cached_vectorcall: None,
                 },
             )?;
 
@@ -147,6 +149,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -186,6 +189,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
         self.downstreams.push(node.clone_ref(py));
@@ -243,6 +247,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -328,6 +333,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -416,6 +422,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -447,6 +454,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -478,6 +486,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -625,6 +634,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 
@@ -684,6 +694,7 @@ impl Stream {
                 compiled: false,
                 source_location,
                 builtin_op: None,
+                cached_vectorcall: None,
             },
         )?;
 

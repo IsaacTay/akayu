@@ -63,6 +63,9 @@ pub struct Stream {
     /// Optional builtin fast-path hint. When set, execution bypasses Python
     /// function dispatch for known builtins. Cleared by fusion.
     pub(crate) builtin_op: Option<BuiltinOp>,
+    /// Cached vectorcall function pointer, extracted at compile time.
+    /// Bypasses per-call type flag check + offset dereference in the hot loop.
+    pub(crate) cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
 }
 
 const HELPERS: &str = include_str!("akayu.py");
