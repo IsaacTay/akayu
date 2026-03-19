@@ -37,24 +37,15 @@ impl Stream {
     pub fn par(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Parallel,
-                downstreams: Vec::new(),
-                name: "par".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Parallel,
+            "par".to_string(),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -83,24 +74,15 @@ impl Stream {
     pub fn seq(&mut self, py: Python) -> PyResult<Py<Self>> {
         check_not_compiled(self.compiled, &self.name)?;
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Source,
-                downstreams: Vec::new(),
-                name: "seq".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Source,
+            "seq".to_string(),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
-
         self.downstreams.push(node.clone_ref(py));
         Ok(node)
     }
@@ -125,22 +107,14 @@ impl Stream {
             }
         }
         let source_location = capture_source_location(py);
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Source,
-                downstreams: Vec::new(),
-                name: "union".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Source,
+            "union".to_string(),
+            source_location,
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
 
         self.downstreams.push(node.clone_ref(py));
@@ -228,25 +202,17 @@ impl Stream {
             Vec::new() // Empty means emit on any
         };
 
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::CombineLatest {
-                    state: (0..total_sources).map(|_| None).collect(),
-                    emit_on_indices,
-                },
-                downstreams: Vec::new(),
-                name: "combine_latest".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location: source_location.clone(),
-                builtin_op: None,
-                cached_vectorcall: None,
+            NodeLogic::CombineLatest {
+                state: (0..total_sources).map(|_| None).collect(),
+                emit_on_indices,
             },
+            "combine_latest".to_string(),
+            source_location.clone(),
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
 
         self.add_tag_node(py, 0, &node, &source_location)?;
@@ -287,24 +253,16 @@ impl Stream {
         }
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
-        let node = Py::new(
+        let node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Zip {
-                    buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
-                },
-                downstreams: Vec::new(),
-                name: "zip".to_string(),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // No user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location: source_location.clone(),
-                builtin_op: None,
-                cached_vectorcall: None,
+            NodeLogic::Zip {
+                buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
             },
+            "zip".to_string(),
+            source_location.clone(),
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
 
         self.add_tag_node(py, 0, &node, &source_location)?;
@@ -334,23 +292,16 @@ impl Stream {
         target: &Py<Self>,
         source_location: &str,
     ) -> PyResult<()> {
-        let tag_node = Py::new(
+        let tag_node = Self::make_node(
             py,
-            Self {
-                logic: NodeLogic::Tag { index },
-                downstreams: vec![target.clone_ref(py)],
-                name: format!("tag({})", index),
-                asynchronous: self.asynchronous,
-                skip_async_check: self.skip_async_check,
-                func_is_sync: true, // Tag has no user function
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location: source_location.to_string(),
-                builtin_op: None,
-                cached_vectorcall: None,
-            },
+            NodeLogic::Tag { index },
+            format!("tag({})", index),
+            source_location.to_string(),
+            self.asynchronous,
+            self.skip_async_check,
+            true,
         )?;
+        tag_node.borrow_mut(py).downstreams.push(target.clone_ref(py));
         self.downstreams.push(tag_node);
         Ok(())
     }
@@ -387,22 +338,14 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     }
 
     let source_location = capture_source_location(py);
-    let node = Py::new(
+    let node = Stream::make_node(
         py,
-        Stream {
-            logic: NodeLogic::Source,
-            downstreams: Vec::new(),
-            name: "union".to_string(),
-            asynchronous: None,
-            skip_async_check: false,
-            func_is_sync: true,
-            frozen: false,
-            needs_lock: false,
-            compiled: false,
-            source_location,
-            builtin_op: None,
-            cached_vectorcall: None,
-        },
+        NodeLogic::Source,
+        "union".to_string(),
+        source_location,
+        None,
+        false,
+        true,
     )?;
 
     for stream in streams {
@@ -486,25 +429,17 @@ pub fn combine_latest(
     };
 
     let total_sources = streams.len();
-    let node = Py::new(
+    let node = Stream::make_node(
         py,
-        Stream {
-            logic: NodeLogic::CombineLatest {
-                state: (0..total_sources).map(|_| None).collect(),
-                emit_on_indices,
-            },
-            downstreams: Vec::new(),
-            name: "combine_latest".to_string(),
-            asynchronous: None,
-            skip_async_check: false,
-            func_is_sync: true,
-            frozen: false,
-            needs_lock: false,
-            compiled: false,
-            source_location: source_location.clone(),
-            builtin_op: None,
-            cached_vectorcall: None,
+        NodeLogic::CombineLatest {
+            state: (0..total_sources).map(|_| None).collect(),
+            emit_on_indices,
         },
+        "combine_latest".to_string(),
+        source_location.clone(),
+        None,
+        false,
+        true,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
@@ -541,24 +476,16 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
 
     let source_location = capture_source_location(py);
     let total_sources = streams.len();
-    let node = Py::new(
+    let node = Stream::make_node(
         py,
-        Stream {
-            logic: NodeLogic::Zip {
-                buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
-            },
-            downstreams: Vec::new(),
-            name: "zip".to_string(),
-            asynchronous: None,
-            skip_async_check: false,
-            func_is_sync: true,
-            frozen: false,
-            needs_lock: false,
-            compiled: false,
-            source_location: source_location.clone(),
-            builtin_op: None,
-            cached_vectorcall: None,
+        NodeLogic::Zip {
+            buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
         },
+        "zip".to_string(),
+        source_location.clone(),
+        None,
+        false,
+        true,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {

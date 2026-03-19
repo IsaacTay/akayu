@@ -199,6 +199,21 @@ pub enum CompareOp {
     Ge,
 }
 
+impl NodeLogic {
+    /// Returns true if this logic variant can be absorbed into a compiled Chain.
+    pub fn is_chainable(&self) -> bool {
+        matches!(
+            self,
+            NodeLogic::Map { .. }
+                | NodeLogic::Filter { .. }
+                | NodeLogic::Flatten
+                | NodeLogic::Accumulate { .. }
+                | NodeLogic::Sink { .. }
+                | NodeLogic::BatchMap { .. }
+        )
+    }
+}
+
 impl CompareOp {
     /// Convert to the C-API `Py_CompareOp` constant for `PyObject_RichCompareBool`.
     pub fn to_ffi(&self) -> std::ffi::c_int {

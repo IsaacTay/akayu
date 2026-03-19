@@ -93,24 +93,19 @@ pub(crate) fn extract_stream_name(
 pub(crate) fn get_func_name(py: Python, func: &Py<PyAny>) -> Option<String> {
     let bound = func.bind(py);
     // Try __name__ first (cleanest for most functions)
-    if let Ok(name) = bound.getattr("__name__") {
-        if let Ok(s) = name.extract::<String>() {
-            return Some(s);
-        }
+    if let Ok(s) = bound.getattr("__name__").and_then(|n| n.extract::<String>()) {
+        return Some(s);
     }
     // Fallback: functools.partial — extract from .func attribute
-    if let Ok(inner) = bound.getattr("func") {
-        if let Ok(name) = inner.getattr("__name__") {
-            if let Ok(s) = name.extract::<String>() {
-                return Some(s);
-            }
-        }
+    if let Ok(s) = bound.getattr("func")
+        .and_then(|inner| inner.getattr("__name__"))
+        .and_then(|n| n.extract::<String>())
+    {
+        return Some(s);
     }
     // Fallback to __qualname__ (works for some edge cases)
-    if let Ok(name) = bound.getattr("__qualname__") {
-        if let Ok(s) = name.extract::<String>() {
-            return Some(s);
-        }
+    if let Ok(s) = bound.getattr("__qualname__").and_then(|n| n.extract::<String>()) {
+        return Some(s);
     }
     None
 }
