@@ -3,10 +3,10 @@
 use pyo3::prelude::*;
 use std::collections::VecDeque;
 
-use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{capture_source_location, check_not_compiled};
 use crate::node::NodeLogic;
+use crate::Stream;
 
 // Stream methods for combinators
 #[pymethods]
@@ -302,7 +302,10 @@ impl Stream {
             self.skip_async_check,
             true,
         )?;
-        tag_node.borrow_mut(py).downstreams.push(target.clone_ref(py));
+        tag_node
+            .borrow_mut(py)
+            .downstreams
+            .push(target.clone_ref(py));
         self.downstreams.push(tag_node);
         Ok(())
     }

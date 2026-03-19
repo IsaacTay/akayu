@@ -4,15 +4,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
 use std::collections::{HashMap, HashSet};
 
-use crate::{Stream, StreamPtr};
 use crate::helpers::{
     get_analyze_lambda, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
-    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list,
-    get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple, get_builtin_type,
-    get_operator_attrgetter, get_operator_is, get_operator_is_not, get_operator_itemgetter,
-    get_operator_not, get_operator_truth,
+    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list, get_builtin_print,
+    get_builtin_set, get_builtin_str, get_builtin_tuple, get_builtin_type, get_operator_attrgetter,
+    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
+    get_operator_truth,
 };
 use crate::node::{BinaryOp, BuiltinOp, ChainNode, CompareOp, NodeLogic};
+use crate::{Stream, StreamPtr};
 
 impl Stream {
     /// Optimize the topology on first emit.
@@ -135,10 +135,14 @@ impl Stream {
         self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
             && (self.skip_async_check || self.builtin_op.is_some());
         // Cache raw pointers to downstream Streams (bypass PyCell borrow checks in propagate)
-        self.compiled_downstream_ptrs = self.downstreams.iter().map(|d| {
-            let mut guard = d.borrow_mut(py);
-            StreamPtr(&mut *guard as *mut Stream)
-        }).collect();
+        self.compiled_downstream_ptrs = self
+            .downstreams
+            .iter()
+            .map(|d| {
+                let mut guard = d.borrow_mut(py);
+                StreamPtr(&mut *guard as *mut Stream)
+            })
+            .collect();
 
         // BFS to freeze all reachable nodes
         let mut to_visit: Vec<Py<Self>> =
@@ -156,12 +160,16 @@ impl Stream {
                 node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
                     && (node.skip_async_check || node.builtin_op.is_some());
                 // Cache raw pointers to downstream Streams
-                let downstream_refs: Vec<Py<Stream>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+                let downstream_refs: Vec<Py<Stream>> =
+                    node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
-                let ptrs: Vec<StreamPtr> = downstream_refs.iter().map(|d| {
-                    let mut guard = d.borrow_mut(py);
-                    StreamPtr(&mut *guard as *mut Stream)
-                }).collect();
+                let ptrs: Vec<StreamPtr> = downstream_refs
+                    .iter()
+                    .map(|d| {
+                        let mut guard = d.borrow_mut(py);
+                        StreamPtr(&mut *guard as *mut Stream)
+                    })
+                    .collect();
                 let mut node = node_py.borrow_mut(py);
                 node.compiled_downstream_ptrs = ptrs;
                 for downstream in &node.downstreams {
@@ -376,13 +384,18 @@ impl Stream {
     /// Try to build a compiled chain starting at the given node.
     /// Walks forward through single-downstream chainable nodes.
     /// Nodes in `multi_parent` have in-degree > 1 and must not be absorbed.
-    fn build_chain_at(py: Python, start_py: &Py<Self>, multi_parent: &std::collections::HashSet<usize>) {
+    fn build_chain_at(
+        py: Python,
+        start_py: &Py<Self>,
+        multi_parent: &std::collections::HashSet<usize>,
+    ) {
         // Check if this node is chainable
         {
             let node = start_py.borrow(py);
             if !node.logic.is_chainable() {
                 // Not chainable — recurse into downstreams
-                let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+                let downstreams: Vec<Py<Self>> =
+                    node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
                 for ds in &downstreams {
                     Self::build_chain_at(py, ds, multi_parent);
@@ -425,7 +438,8 @@ impl Stream {
         // Skip chains of length 1 — no benefit
         if chain_node_refs.len() < 2 {
             let node = start_py.borrow(py);
-            let downstreams: Vec<Py<Self>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let downstreams: Vec<Py<Self>> =
+                node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             drop(node);
             for ds in &downstreams {
                 Self::build_chain_at(py, ds, multi_parent);
@@ -436,7 +450,8 @@ impl Stream {
         // Get tail downstreams before we start mutating
         let last_py = chain_node_refs.last().unwrap();
         let last = last_py.borrow(py);
-        let tail_downstreams: Vec<Py<Self>> = last.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        let tail_downstreams: Vec<Py<Self>> =
+            last.downstreams.iter().map(|d| d.clone_ref(py)).collect();
         drop(last);
 
         // Extract logic from each node into ChainNode structs
@@ -585,7 +600,8 @@ impl Stream {
                     let is_source_child = source_children.contains(&(cur.as_ptr() as usize));
 
                     // Must have exactly one parent (either from parent_map or source)
-                    let parent_count = parents.map_or(0, |p| p.len()) + if is_source_child { 1 } else { 0 };
+                    let parent_count =
+                        parents.map_or(0, |p| p.len()) + if is_source_child { 1 } else { 0 };
                     if parent_count != 1 {
                         break;
                     }
@@ -616,7 +632,8 @@ impl Stream {
             // Constraint: Filter must be a direct downstream of branch point
             let filter_parents = parent_map.get(&(filter_py.as_ptr() as usize));
             let filter_is_source_child = source_children.contains(&(filter_py.as_ptr() as usize));
-            let filter_parent_count = filter_parents.map_or(0, |p| p.len()) + if filter_is_source_child { 1 } else { 0 };
+            let filter_parent_count =
+                filter_parents.map_or(0, |p| p.len()) + if filter_is_source_child { 1 } else { 0 };
             if filter_parent_count != 1 {
                 continue; // Filter has multiple parents, skip
             }
@@ -630,10 +647,17 @@ impl Stream {
             // Find buffer path: from branch point to Collect
             // Walk downstreams of the branch point looking for a linear path to collect_py
             let branch_downstreams = if branch_is_source {
-                self.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>()
+                self.downstreams
+                    .iter()
+                    .map(|d| d.clone_ref(py))
+                    .collect::<Vec<_>>()
             } else {
                 let bp = branch_point_py.as_ref().unwrap().borrow(py);
-                let ds = bp.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>();
+                let ds = bp
+                    .downstreams
+                    .iter()
+                    .map(|d| d.clone_ref(py))
+                    .collect::<Vec<_>>();
                 drop(bp);
                 ds
             };
@@ -738,7 +762,11 @@ impl Stream {
             // Get Collect's downstreams (ChunkBy will inherit them)
             let collect_downstreams = {
                 let collect_node = collect_py.borrow(py);
-                collect_node.downstreams.iter().map(|d| d.clone_ref(py)).collect::<Vec<_>>()
+                collect_node
+                    .downstreams
+                    .iter()
+                    .map(|d| d.clone_ref(py))
+                    .collect::<Vec<_>>()
             };
 
             // Get chunk_by name and source location
@@ -790,11 +818,14 @@ impl Stream {
 
             // Remove Filter from branch point's downstreams
             if branch_is_source {
-                self.downstreams.retain(|d| d.as_ptr() as usize != filter_ptr);
+                self.downstreams
+                    .retain(|d| d.as_ptr() as usize != filter_ptr);
             } else {
                 let bp = branch_point_py.as_ref().unwrap();
                 let mut bp_node = bp.borrow_mut(py);
-                bp_node.downstreams.retain(|d| d.as_ptr() as usize != filter_ptr);
+                bp_node
+                    .downstreams
+                    .retain(|d| d.as_ptr() as usize != filter_ptr);
             }
         }
     }
@@ -812,7 +843,6 @@ impl Stream {
             node.cached_vectorcall = extract_vectorcall_for_logic(py, &node.logic);
         }
     }
-
 }
 
 /// Parse a comparison op string from the Python analyzer into a `CompareOp`.
@@ -976,7 +1006,11 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
     // Simple identity checks: func is exactly the builtin
     macro_rules! check_identity {
         ($getter:ident, $op:expr) => {
-            if let Ok(b) = $getter() { if func.is(b) { return Some($op); } }
+            if let Ok(b) = $getter() {
+                if func.is(b) {
+                    return Some($op);
+                }
+            }
         };
     }
     check_identity!(get_builtin_len, BuiltinOp::Len);
@@ -993,8 +1027,12 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
     check_identity!(get_builtin_frozenset, BuiltinOp::FrozenSet);
 
     // Detect operator.itemgetter instances (e.g., operator.itemgetter("name"))
-    if get_operator_itemgetter().is_ok_and(|ig| func.bind(py).is_instance(ig.bind(py)).unwrap_or(false)) {
-        let key = func.call_method0(py, "__reduce__").ok()
+    if get_operator_itemgetter()
+        .is_ok_and(|ig| func.bind(py).is_instance(ig.bind(py)).unwrap_or(false))
+    {
+        let key = func
+            .call_method0(py, "__reduce__")
+            .ok()
             .and_then(|r| r.bind(py).get_item(1).ok().map(|a| a.unbind()))
             .and_then(|a| a.bind(py).cast::<PyTuple>().ok().map(|t| t.to_owned()))
             .filter(|t| t.len() == 1)
@@ -1004,12 +1042,21 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
         }
     }
     // Detect operator.attrgetter instances (e.g., operator.attrgetter("name"))
-    if get_operator_attrgetter().is_ok_and(|ag| func.bind(py).is_instance(ag.bind(py)).unwrap_or(false)) {
-        let name = func.call_method0(py, "__reduce__").ok()
+    if get_operator_attrgetter()
+        .is_ok_and(|ag| func.bind(py).is_instance(ag.bind(py)).unwrap_or(false))
+    {
+        let name = func
+            .call_method0(py, "__reduce__")
+            .ok()
             .and_then(|r| r.bind(py).get_item(1).ok().map(|a| a.unbind()))
             .and_then(|a| a.bind(py).cast::<PyTuple>().ok().map(|t| t.to_owned()))
             .filter(|t| t.len() == 1)
-            .and_then(|t| t.get_item(0).ok()?.cast_into::<pyo3::types::PyString>().ok());
+            .and_then(|t| {
+                t.get_item(0)
+                    .ok()?
+                    .cast_into::<pyo3::types::PyString>()
+                    .ok()
+            });
         if let Some(name_str) = name {
             return Some(BuiltinOp::AttrGetter(name_str.unbind()));
         }
@@ -1092,7 +1139,9 @@ fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp>
 
 /// Detect builtin fast-path for a Sink function (no extra args).
 fn detect_sink_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
-    if get_builtin_print().is_ok_and(|b| func.is(b)) { return Some(BuiltinOp::Print); }
+    if get_builtin_print().is_ok_and(|b| func.is(b)) {
+        return Some(BuiltinOp::Print);
+    }
     None
 }
 
@@ -1229,7 +1278,9 @@ fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Strea
 ///
 /// Returns `None` if the callable doesn't support vectorcall.
 /// The pointer is valid as long as the callable object is alive.
-unsafe fn extract_vectorcall(callable: *mut pyo3::ffi::PyObject) -> Option<pyo3::ffi::vectorcallfunc> {
+unsafe fn extract_vectorcall(
+    callable: *mut pyo3::ffi::PyObject,
+) -> Option<pyo3::ffi::vectorcallfunc> {
     unsafe {
         let tp = pyo3::ffi::Py_TYPE(callable);
         if (*tp).tp_flags & pyo3::ffi::Py_TPFLAGS_HAVE_VECTORCALL == 0 {
@@ -1246,7 +1297,10 @@ unsafe fn extract_vectorcall(callable: *mut pyo3::ffi::PyObject) -> Option<pyo3:
 }
 
 /// Extract the vectorcall function pointer for the callable in a NodeLogic.
-fn extract_vectorcall_for_logic(_py: Python, logic: &NodeLogic) -> Option<pyo3::ffi::vectorcallfunc> {
+fn extract_vectorcall_for_logic(
+    _py: Python,
+    logic: &NodeLogic,
+) -> Option<pyo3::ffi::vectorcallfunc> {
     let callable_ptr = match logic {
         NodeLogic::Map { func } => func.as_ptr(),
         NodeLogic::Filter { predicate } => predicate.as_ptr(),

@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::Stream;
 use crate::node::NodeLogic;
+use crate::Stream;
 
 // ---------------------------------------------------------------------------
 // Per-node profile data (accumulated in thread-local during execution)
@@ -435,8 +435,7 @@ impl ProfileReport {
 impl ProfileReport {
     fn format_tree(&self) -> String {
         if self.nodes.is_empty() {
-            return "Pipeline Profile (0 emits, 0.00ms wall time)\n(empty)\n"
-                .to_string();
+            return "Pipeline Profile (0 emits, 0.00ms wall time)\n(empty)\n".to_string();
         }
 
         let total_func_ns: u64 = self.nodes.iter().map(|n| n.func_time_ns).sum();
@@ -445,7 +444,11 @@ impl ProfileReport {
         let overhead_ns = self.wall_time_ns.saturating_sub(total_func_ns);
         let overhead_ms = overhead_ns as f64 / 1_000_000.0;
 
-        let emit_label = if self.emit_count == 1 { "emit" } else { "emits" };
+        let emit_label = if self.emit_count == 1 {
+            "emit"
+        } else {
+            "emits"
+        };
 
         let mut out = String::new();
         let _ = writeln!(
@@ -491,7 +494,10 @@ impl ProfileReport {
         // Build prefix
         let mut prefix = String::new();
         if !is_root {
-            for &continues in prefix_parts.iter().take(prefix_parts.len().saturating_sub(1)) {
+            for &continues in prefix_parts
+                .iter()
+                .take(prefix_parts.len().saturating_sub(1))
+            {
                 if continues {
                     prefix.push_str("\u{2502}   "); // │
                 } else {
@@ -552,8 +558,7 @@ impl ProfileReport {
 
     fn format_sorted(&self) -> String {
         if self.nodes.is_empty() {
-            return "Pipeline Profile (0 emits, 0.00ms wall time)\n(empty)\n"
-                .to_string();
+            return "Pipeline Profile (0 emits, 0.00ms wall time)\n(empty)\n".to_string();
         }
 
         let total_func_ns: u64 = self.nodes.iter().map(|n| n.func_time_ns).sum();
@@ -562,7 +567,11 @@ impl ProfileReport {
         let overhead_ns = self.wall_time_ns.saturating_sub(total_func_ns);
         let overhead_ms = overhead_ns as f64 / 1_000_000.0;
 
-        let emit_label = if self.emit_count == 1 { "emit" } else { "emits" };
+        let emit_label = if self.emit_count == 1 {
+            "emit"
+        } else {
+            "emits"
+        };
 
         let mut out = String::new();
         let _ = writeln!(

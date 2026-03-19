@@ -93,18 +93,25 @@ pub(crate) fn extract_stream_name(
 pub(crate) fn get_func_name(py: Python, func: &Py<PyAny>) -> Option<String> {
     let bound = func.bind(py);
     // Try __name__ first (cleanest for most functions)
-    if let Ok(s) = bound.getattr("__name__").and_then(|n| n.extract::<String>()) {
+    if let Ok(s) = bound
+        .getattr("__name__")
+        .and_then(|n| n.extract::<String>())
+    {
         return Some(s);
     }
     // Fallback: functools.partial — extract from .func attribute
-    if let Ok(s) = bound.getattr("func")
+    if let Ok(s) = bound
+        .getattr("func")
         .and_then(|inner| inner.getattr("__name__"))
         .and_then(|n| n.extract::<String>())
     {
         return Some(s);
     }
     // Fallback to __qualname__ (works for some edge cases)
-    if let Ok(s) = bound.getattr("__qualname__").and_then(|n| n.extract::<String>()) {
+    if let Ok(s) = bound
+        .getattr("__qualname__")
+        .and_then(|n| n.extract::<String>())
+    {
         return Some(s);
     }
     None
@@ -127,19 +134,11 @@ pub(crate) fn capture_source_location(py: Python) -> String {
 /// `PyObject_Call`.  Falls back to `PyObject_Call` on builds where vectorcall
 /// is not available.
 #[inline(always)]
-pub(crate) fn vectorcall1(
-    py: Python,
-    func: &Py<PyAny>,
-    arg: &Py<PyAny>,
-) -> PyResult<Py<PyAny>> {
+pub(crate) fn vectorcall1(py: Python, func: &Py<PyAny>, arg: &Py<PyAny>) -> PyResult<Py<PyAny>> {
     unsafe {
         let args = [arg.as_ptr()];
-        let result = pyo3::ffi::PyObject_Vectorcall(
-            func.as_ptr(),
-            args.as_ptr(),
-            1,
-            std::ptr::null_mut(),
-        );
+        let result =
+            pyo3::ffi::PyObject_Vectorcall(func.as_ptr(), args.as_ptr(), 1, std::ptr::null_mut());
         if result.is_null() {
             return Err(PyErr::fetch(py));
         }
@@ -162,12 +161,7 @@ pub(crate) fn cached_vectorcall1(
 ) -> PyResult<Py<PyAny>> {
     unsafe {
         let args = [arg.as_ptr()];
-        let result = func_ptr(
-            func.as_ptr(),
-            args.as_ptr(),
-            1,
-            std::ptr::null_mut(),
-        );
+        let result = func_ptr(func.as_ptr(), args.as_ptr(), 1, std::ptr::null_mut());
         if result.is_null() {
             return Err(PyErr::fetch(py));
         }
@@ -182,9 +176,8 @@ pub(crate) fn wrap_error<T>(
     source_location: &str,
 ) -> PyResult<T> {
     res.map_err(|e| {
-        let mut msg = format!(
-            "Stream operation failed at node '{node_name}' (defined at {source_location})"
-        );
+        let mut msg =
+            format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
         // Try to show source line with ^^^^ pointer
         if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
             msg.push('\n');
@@ -333,7 +326,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             flush_target: None,
             emit_target: None,
             flushing: false,
-            emitting: false,
+            emitting: std::sync::atomic::AtomicBool::new(false),
         },
     )?;
     let stream_clone = stream.clone_ref(py);
