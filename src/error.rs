@@ -29,6 +29,14 @@ pub enum StreamError {
     #[error("zip requires at least two streams")]
     ZipTooFew,
 
+    #[error(
+        "Re-entrant flush detected on node '{0}'. \
+         A downstream callback is calling flush() on a node that is already being flushed. \
+         This creates a cycle in the flush graph — restructure your pipeline so that \
+         flush targets are not ancestors of the flushing sink."
+    )]
+    ReentrantFlush(String),
+
     #[error("akayu not initialized")]
     NotInitialized,
 }

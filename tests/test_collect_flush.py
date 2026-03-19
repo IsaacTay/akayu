@@ -773,3 +773,83 @@ class TestDrain:
 
         assert flush_results == []
         assert drain_results == [((1, 2),)]
+
+
+# ---------------------------------------------------------------------------
+# Re-entrant flush detection
+# ---------------------------------------------------------------------------
+
+class TestReentrantFlush:
+    """Re-entrant flush/drain must raise a clear error, not hang or UB."""
+
+    def test_self_flush_in_sink_errors(self):
+        """collect → sink(c.flush) where sink flushes the SAME collect."""
+        import pytest
+
+        s = Stream()
+        c = s.collect()
+        c.sink(lambda t: c.flush())
+
+        s.emit(1)
+        s.emit(2)
+        # c.flush() → propagate tuple → sink calls c.flush() → re-entrant
+        # PyO3 catches this with "Already borrowed" or our guard catches with "Re-entrant"
+        # Either way, wrap_error wraps it as "Stream operation failed"
+        with pytest.raises(RuntimeError):
+            c.flush()
+
+    def test_self_drain_in_sink_errors(self):
+        """collect → sink(c.drain) where sink drains the SAME collect."""
+        import pytest
+
+        s = Stream()
+        c = s.collect()
+        c.sink(lambda t: c.drain())
+
+        s.emit(1)
+        with pytest.raises(RuntimeError):
+            c.drain()
+
+    def test_mutual_flush_cycle_errors(self):
+        """Two collects flushing each other: c1 → sink(c2.flush), c2 → sink(c1.flush)."""
+        import pytest
+
+        s = Stream()
+        c1 = s.collect()
+        c2 = s.collect()
+        c1.sink(lambda t: c2.flush())
+        c2.sink(lambda t: c1.flush())
+
+        s.emit(1)
+        # c1.flush → propagate → sink calls c2.flush → c2 propagate → sink calls c1.flush
+        # c1 is still borrowed from the outer call → error
+        with pytest.raises(RuntimeError):
+            c1.flush()
+
+    def test_reentrant_flush_does_not_corrupt_state(self):
+        """After a re-entrant error, the collect should still be usable."""
+        import pytest
+
+        s = Stream()
+        results = []
+        c = s.collect()
+
+        call_count = [0]
+        def maybe_reentrant(t):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                c.flush()  # re-entrant on first call
+            results.append(t)
+
+        c.sink(maybe_reentrant)
+
+        s.emit(1)
+        s.emit(2)
+        with pytest.raises(RuntimeError):
+            c.flush()
+
+        # The collect should still be usable after the error
+        s.emit(3)
+        s.emit(4)
+        c.flush()
+        assert results == [(3, 4)]
