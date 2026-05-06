@@ -48,7 +48,7 @@ impl Stream {
 
         // Phase 3: Mark prefetch nodes inside par branches as needing locks
         // These nodes use internal threading which can conflict with par's threading
-        self.mark_prefetch_in_par(py, &all_nodes);
+        self.mark_par_branch_nodes(py, &all_nodes);
     }
 
     /// Full optimization pass, safe because graph is being frozen via compile().
@@ -99,7 +99,10 @@ impl Stream {
         Self::warn_useless_par(py, &all_nodes);
 
         // Phase 4: Mark prefetch nodes inside par branches as needing locks
-        self.mark_prefetch_in_par(py, &all_nodes);
+        self.mark_par_branch_nodes(py, &all_nodes);
+
+        // Phase 5: Mark convergence points and their downstreams with needs_lock
+        self.mark_convergence_nodes(py, all_nodes);
     }
 
     /// Collect all nodes reachable from this node's downstreams.
@@ -201,13 +204,13 @@ impl Stream {
         }
     }
 
-    /// Mark nodes that need locking due to being downstream of a prefetch within a par branch.
-    /// When prefetch is inside par, its internal threading combined with par's threading
-    /// can cause borrow conflicts at any downstream node (especially convergence points like union).
-    /// We mark ALL nodes from the prefetch onwards as needing locks.
-    #[allow(clippy::unused_self)] // Called as method for consistency with other topology methods
-    fn mark_prefetch_in_par(&self, py: Python, all_nodes: &[Py<Self>]) {
-        // Find all Par nodes
+    /// Mark nodes that need per-node locking when inside par() branches.
+    /// When par() dispatches to threads, multiple branches may converge on shared
+    /// downstream nodes. We mark all nodes in par branches so their propagate()
+    /// uses _safe_update (per-node Python locks), preventing concurrent borrow_mut
+    /// on shared PyCells.
+    #[allow(clippy::unused_self)]
+    fn mark_par_branch_nodes(&self, py: Python, all_nodes: &[Py<Self>]) {
         let mut par_nodes: Vec<Py<Self>> = Vec::new();
         for node_py in all_nodes {
             let node = node_py.borrow(py);
@@ -218,7 +221,7 @@ impl Stream {
         }
 
         if par_nodes.is_empty() {
-            return; // No parallel branches, no prefetch locking needed
+            return;
         }
 
         for par_py in par_nodes {
@@ -227,47 +230,10 @@ impl Stream {
             drop(par);
 
             if branches.len() < 2 {
-                continue; // Need at least 2 branches for convergence
+                continue;
             }
 
-            // Check if any branch contains a prefetch
-            let mut has_prefetch = false;
-            for branch_py in &branches {
-                let mut visited: HashSet<usize> = HashSet::new();
-                let mut stack: Vec<Py<Self>> = vec![branch_py.clone_ref(py)];
-
-                while let Some(node_py) = stack.pop() {
-                    let node_ptr = node_py.as_ptr() as usize;
-                    if visited.contains(&node_ptr) {
-                        continue;
-                    }
-                    visited.insert(node_ptr);
-
-                    let node = node_py.borrow(py);
-                    if matches!(
-                        node.logic,
-                        NodeLogic::PrefetchMap { .. }
-                            | NodeLogic::PrefetchFilter { .. }
-                            | NodeLogic::PrefetchBatchMap { .. }
-                    ) {
-                        has_prefetch = true;
-                        break;
-                    }
-                    for downstream in &node.downstreams {
-                        stack.push(downstream.clone_ref(py));
-                    }
-                }
-                if has_prefetch {
-                    break;
-                }
-            }
-
-            if !has_prefetch {
-                continue; // No prefetch in this par, no locking needed
-            }
-
-            // Find convergence points: nodes reachable from multiple branches
-            // Track which branch indices can reach each node
+            // Check if branches actually converge anywhere
             let mut node_branches: HashMap<usize, HashSet<usize>> = HashMap::new();
             let mut node_refs: HashMap<usize, Py<Self>> = HashMap::new();
 
@@ -297,27 +263,27 @@ impl Stream {
                 }
             }
 
-            // Find convergence points (nodes reachable from 2+ branches)
-            let convergence_ids: HashSet<usize> = node_branches
-                .iter()
-                .filter(|(_, branch_set)| branch_set.len() >= 2)
-                .map(|(id, _)| *id)
-                .collect();
+            let has_convergence = node_branches
+                .values()
+                .any(|branch_set| branch_set.len() >= 2);
 
-            if convergence_ids.is_empty() {
-                continue; // No convergence points, no locking needed
+            if !has_convergence {
+                continue;
             }
 
-            // Only mark actual convergence points - nodes before convergence are in
-            // separate branches (never accessed concurrently), and prefetch's internal
-            // lock already protects its own state. Only the merge point needs locking.
-            for conv_id in &convergence_ids {
-                if let Some(conv_py) = node_refs.get(conv_id) {
-                    let mut conv = conv_py.borrow_mut(py);
-                    conv.needs_lock = true;
-                }
+            // Mark ALL nodes in par branches. Each node's propagate() checks
+            // its own needs_lock flag to decide whether to use _safe_update.
+            // We must mark branch nodes (not just convergence points) because
+            // it's the branch node's propagate() that borrow_mut's the shared
+            // downstream — the convergence point's own flag is checked too late.
+            for node_py in node_refs.values() {
+                let mut node = node_py.borrow_mut(py);
+                node.needs_lock = true;
             }
         }
+    }
+
+    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: Vec<Py<Self>>) {
     }
 
     /// Eliminate source passthrough nodes from the graph.

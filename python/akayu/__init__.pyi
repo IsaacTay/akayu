@@ -1,9 +1,22 @@
 """High-performance reactive streams for Python."""
 
-from typing import Any, Callable, Coroutine, Iterable, Optional, TypeVar, List, Union, ContextManager
+from typing import (
+    Any,
+    Callable,
+    ContextManager,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Sequence,
+    TypeVar,
+    Union,
+    overload,
+)
 
 T = TypeVar("T")
 U = TypeVar("U")
+
+_StreamOrMultiStream = Union["Stream", "MultiStream"]
 
 class ProfileReport:
     """Profiling report for a pipeline execution.
@@ -12,7 +25,7 @@ class ProfileReport:
     structure for tree-view display.
     """
 
-    def print(self, sort_by: Optional[str] = None) -> None:
+    def print(self, sort_by: str | None = None) -> None:
         """Print the profiling report.
 
         Args:
@@ -71,7 +84,7 @@ class Stream:
     """
 
     def __init__(
-        self, name: Optional[str] = None, asynchronous: Optional[bool] = None
+        self, name: str | None = None, asynchronous: bool | None = None
     ) -> None:
         """Create a new source Stream.
 
@@ -86,15 +99,7 @@ class Stream:
         """Return string representation of the stream."""
         ...
 
-    def __enter__(self) -> "Stream":
-        """Enter the stream context manager (returns self)."""
-        ...
-
-    def __exit__(self, *args: Any) -> None:
-        """Exit the stream context manager."""
-        ...
-
-    def map(self, func: Callable[..., T], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
+    def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element in the stream.
 
         Args:
@@ -109,8 +114,8 @@ class Stream:
         ...
 
     def filter(
-        self, predicate: Callable[..., bool], *args: Any, stream_name: Optional[str] = None, **kwargs: Any
-    ) -> "Stream":
+        self, predicate: Callable[..., bool], *args: Any, stream_name: str | None = None, **kwargs: Any
+    ) -> Stream:
         """Filter elements based on a predicate function.
 
         Only elements for which the predicate returns a truthy value
@@ -127,7 +132,7 @@ class Stream:
         """
         ...
 
-    def starmap(self, func: Callable[..., T], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
+    def starmap(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element, unpacking the element as arguments.
 
         Similar to map, but each element is unpacked with *element before
@@ -145,8 +150,8 @@ class Stream:
         ...
 
     def batch_map(
-        self, func: Callable[[List[Any]], Iterable[T]], *args: Any, stream_name: Optional[str] = None, **kwargs: Any
-    ) -> "Stream":
+        self, func: Callable[[list[Any]], Iterable[T]], *args: Any, stream_name: str | None = None, **kwargs: Any
+    ) -> Stream:
         """Apply a batch-aware function to process entire batches at once.
 
         Unlike `map()` which calls the function once per item, `batch_map()` calls
@@ -172,7 +177,7 @@ class Stream:
         """
         ...
 
-    def flatten(self) -> "Stream":
+    def flatten(self, *, stream_name: str | None = None) -> Stream:
         """Flatten an iterable element into individual elements.
 
         Each element is expected to be iterable. The items within each
@@ -183,7 +188,7 @@ class Stream:
         """
         ...
 
-    def collect(self) -> "Stream":
+    def collect(self, *, stream_name: str | None = None) -> Stream:
         """Collect elements into a buffer until `flush()` is called.
 
         Elements are accumulated in an internal buffer. When `flush()` is
@@ -195,8 +200,8 @@ class Stream:
         ...
 
     def chunk_by(
-        self, func: Callable[[Any], Any], *, include_delimiter: bool = False
-    ) -> "Stream":
+        self, predicate: Callable[[Any], Any], *, include_delimiter: bool = False, stream_name: str | None = None
+    ) -> Stream:
         """Buffer items until a predicate matches, then emit the buffer as a tuple.
 
         Each item is buffered. When the predicate returns True for an item,
@@ -215,7 +220,7 @@ class Stream:
         """
         ...
 
-    def drain(self, *args: Any, **kwargs: Any) -> Optional[Coroutine[Any, Any, Any]]:
+    def drain(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
         """Recursively flush this node and all downstream nodes.
 
         Unlike `flush()`, which only flushes this node's buffer,
@@ -232,7 +237,7 @@ class Stream:
         """
         ...
 
-    def flush(self, *args: Any, **kwargs: Any) -> Optional[Coroutine[Any, Any, Any]]:
+    def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
         """Flush collected elements downstream.
 
         For `collect()` nodes, emits all buffered elements as a tuple
@@ -247,7 +252,7 @@ class Stream:
         """
         ...
 
-    def sink(self, func: Callable[..., Any], *args: Any, stream_name: Optional[str] = None, **kwargs: Any) -> "Stream":
+    def sink(self, func: Callable[..., Any], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element for side effects.
 
         Similar to map, but the return value of func is discarded.
@@ -300,31 +305,14 @@ class Stream:
         """
         ...
 
-    def collect_context(self) -> "CollectGuard":
-        """Return a context manager that auto-flushes the collect buffer on exit.
-
-        This is a convenience wrapper around collect() that automatically
-        calls flush() when exiting the context manager.
-
-        Returns:
-            A context manager that flushes the collect buffer on exit.
-
-        Example:
-            >>> s = Stream()
-            >>> with s.collect_context() as c:
-            ...     c.sink(print)
-            ...     s.emit(1)
-            ...     s.emit(2)
-            (1, 2)  # printed when context exits
-        """
-        ...
-
     def accumulate(
         self,
         func: Callable[[T, Any], T],
         start: T,
         returns_state: bool = False,
-    ) -> "Stream":
+        *,
+        stream_name: str | None = None,
+    ) -> Stream:
         """Accumulate values using a function, emitting each intermediate state.
 
         Similar to functools.reduce, but emits every intermediate result.
@@ -342,7 +330,7 @@ class Stream:
         """
         ...
 
-    def prefetch(self, n: int) -> "Stream":
+    def prefetch(self, n: int, *, stream_name: str | None = None) -> Stream:
         """Enable prefetching for the next map operation.
 
         When followed by a `.map()`, this causes the map to process up to `n` items
@@ -357,7 +345,7 @@ class Stream:
         """
         ...
 
-    def emit(self, x: Any) -> Optional[Coroutine[Any, Any, Any]]:
+    def emit(self, x: Any) -> Coroutine[Any, Any, Any] | None:
         """Emit a single value into the stream.
 
         This is the primary way to push data into a source stream.
@@ -371,7 +359,7 @@ class Stream:
         """
         ...
 
-    def emit_batch(self, items: List[Any]) -> Optional[Coroutine[Any, Any, Any]]:
+    def emit_batch(self, items: list[Any]) -> Coroutine[Any, Any, Any] | None:
         """Emit multiple values into the stream as a batch.
 
         More efficient than calling `emit()` multiple times when processing
@@ -430,7 +418,7 @@ class Stream:
         """
         ...
 
-    def emit_batch_profiled(self, items: List[Any]) -> ProfileReport:
+    def emit_batch_profiled(self, items: list[Any]) -> ProfileReport:
         """Emit a batch of values and return a profiling report.
 
         Args:
@@ -441,7 +429,7 @@ class Stream:
         """
         ...
 
-    def compile(self) -> "Stream":
+    def compile(self) -> Stream:
         """Freeze and optimize the stream graph.
 
         Triggers topology optimizations (like chain fusion) and prevents
@@ -472,7 +460,7 @@ class Stream:
         """
         ...
 
-    def par(self) -> "Stream":
+    def par(self) -> Stream:
         """Create a parallel branch point that executes all downstreams concurrently.
 
         When values flow through a parallel node, all downstream branches are
@@ -500,11 +488,11 @@ class Stream:
         """
         ...
 
-    def parallel(self) -> "Stream":
+    def parallel(self) -> Stream:
         """Alias for `par()`. Create a parallel branch point."""
         ...
 
-    def seq(self) -> "Stream":
+    def seq(self) -> Stream:
         """Create a sequential branch point (explicit synchronization point).
 
         This is the default behavior for streams, but can be used explicitly
@@ -526,7 +514,7 @@ class Stream:
         """
         ...
 
-    def union(self, *others: "Stream") -> "Stream":
+    def union(self, *others: Stream) -> Stream:
         """Merge multiple streams into one.
 
         Creates a new stream that emits elements from this stream and all
@@ -542,9 +530,9 @@ class Stream:
 
     def combine_latest(
         self,
-        *others: "Stream",
-        emit_on: Optional[Union["Stream", List["Stream"]]] = None,
-    ) -> "Stream":
+        *others: Stream,
+        emit_on: Stream | list[Stream] | None = None,
+    ) -> Stream:
         """Combine the latest values from multiple streams.
 
         Emits a tuple of the most recent values from each stream whenever
@@ -561,7 +549,7 @@ class Stream:
         """
         ...
 
-    def zip(self, *others: "Stream") -> "Stream":
+    def zip(self, *others: Stream) -> Stream:
         """Zip multiple streams together element-by-element.
 
         Emits tuples containing one element from each stream. Waits until
@@ -575,158 +563,227 @@ class Stream:
         """
         ...
 
-class CollectGuard:
-    """Context manager for collect that auto-flushes on exit.
+class MultiStream:
+    """A batch of Stream instances with element-wise operations.
 
-    Returned by Stream.collect_context(). Use as a context manager
-    to automatically flush the collect buffer when exiting.
+    Applies operations to each stream in the batch. Supports broadcasting
+    for combinator operations (union, combine_latest, zip) where a single
+    Stream or length-1 MultiStream is expanded to match the batch size.
+
+    Example:
+        ```python
+        sources = [Stream() for _ in range(3)]
+        results = MultiStream(sources).map(lambda x: x * 2).to_list()
+        ```
     """
 
-    def __enter__(self) -> "CollectGuard":
-        """Enter the context manager (returns self)."""
-        ...
-
-    def __exit__(self, *args: Any) -> None:
-        """Exit the context manager and flush the collect buffer."""
-        ...
-
-    def sink(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> "CollectGuard":
-        """Apply a function to each element for side effects.
-
-        Similar to Stream.sink but returns self for chaining.
+    def __init__(self, streams: Sequence[Stream]) -> None:
+        """Create a MultiStream batch from a sequence of Stream instances.
 
         Args:
-            func: Function to call with each element.
-            *args: Additional positional arguments passed to func.
-            **kwargs: Additional keyword arguments passed to func.
+            streams: List or tuple of Stream instances.
 
-        Returns:
-            self (for chaining).
+        Raises:
+            TypeError: If any element is not a Stream.
         """
         ...
 
-def union(*streams: Stream) -> Stream:
-    """Merge multiple streams into one.
+    def __len__(self) -> int:
+        """Return the number of streams in the batch."""
+        ...
 
-    Creates a new stream that emits elements from all input streams.
-    Elements are emitted in the order they arrive from any source.
+    def __iter__(self) -> Iterator[Stream]:
+        """Iterate over the individual Stream instances."""
+        ...
 
-    ```mermaid
-    gitGraph
-        commit id: " "
-        branch s1
-        branch s2
-        checkout s1
-        commit id: "a"
-        checkout s2
-        commit id: "x"
-        checkout s1
-        commit id: "b"
-        checkout s2
-        commit id: "y"
-        checkout main
-        merge s1
-        merge s2 id: "union" type: HIGHLIGHT
-    ```
+    @overload
+    def __getitem__(self, key: int) -> Stream: ...
+    @overload
+    def __getitem__(self, key: slice) -> MultiStream: ...
+
+    def __repr__(self) -> str:
+        """Return string representation."""
+        ...
+
+    # --- transforms ---
+
+    def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+        """Apply a map to each stream in the batch."""
+        ...
+
+    def filter(
+        self, predicate: Callable[..., bool], *args: Any,
+        stream_name: str | None = None, **kwargs: Any,
+    ) -> MultiStream:
+        """Apply a filter to each stream in the batch."""
+        ...
+
+    def sink(self, func: Callable[..., Any], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+        """Apply a sink to each stream in the batch."""
+        ...
+
+    def starmap(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+        """Apply a starmap to each stream in the batch."""
+        ...
+
+    def accumulate(self, func: Callable[[T, Any], T], start: T, returns_state: bool = False, *, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+        """Apply an accumulate to each stream in the batch."""
+        ...
+
+    def flatten(self, *, stream_name: str | None = None) -> MultiStream:
+        """Flatten each stream in the batch."""
+        ...
+
+    def collect(self, *, stream_name: str | None = None) -> MultiStream:
+        """Apply collect to each stream in the batch."""
+        ...
+
+    def batch_map(
+        self, func: Callable[[list[Any]], Iterable[T]], *args: Any,
+        stream_name: str | None = None, **kwargs: Any,
+    ) -> MultiStream:
+        """Apply a batch_map to each stream in the batch."""
+        ...
+
+    def chunk_by(self, predicate: Callable[[Any], Any], *, include_delimiter: bool = False, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+        """Apply chunk_by to each stream in the batch."""
+        ...
+
+    # --- collectors ---
+
+    def to_list(self) -> list[list[Any]]:
+        """Collect each stream into a list. Returns a list of lists."""
+        ...
+
+    def to_set(self) -> list[set[Any]]:
+        """Collect each stream into a set. Returns a list of sets."""
+        ...
+
+    # --- actions ---
+
+    def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
+        """Flush all streams in the batch."""
+        ...
+
+    def drain(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
+        """Drain all streams in the batch."""
+        ...
+
+    def compile(self) -> MultiStream:
+        """Compile all streams in the batch. Returns self for chaining."""
+        ...
+
+    # --- broadcasting combinators ---
+
+    def union(self, *others: _StreamOrMultiStream) -> MultiStream:
+        """Pairwise union with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to union with.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
+        ...
+
+    def combine_latest(
+        self,
+        *others: _StreamOrMultiStream,
+        emit_on: _StreamOrMultiStream | None = None,
+    ) -> MultiStream:
+        """Pairwise combine_latest with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to combine with.
+            emit_on: Stream or MultiStream that triggers emission.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
+        ...
+
+    def zip(self, *others: _StreamOrMultiStream) -> MultiStream:
+        """Pairwise zip with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to zip with.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
+        ...
+
+@overload
+def union(*streams: Stream) -> Stream: ...
+@overload
+def union(*streams: _StreamOrMultiStream) -> MultiStream: ...
+
+def union(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
+    """Merge multiple streams into one with broadcasting support.
+
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs: returns Stream.
+    - Any MultiStream input: returns MultiStream.
 
     Args:
-        *streams: Two or more streams to merge.
+        *streams: Stream or MultiStream instances to merge.
 
     Returns:
-        A new Stream emitting elements from all input streams.
-
-    Example:
-        ```python
-        s1 = Stream()
-        s2 = Stream()
-        merged = union(s1, s2)
-        ```
+        Stream if all inputs are Stream, otherwise MultiStream.
     """
     ...
 
+@overload
+def combine_latest(*streams: Stream, emit_on: Stream | list[Stream] | None = None) -> Stream: ...
+@overload
 def combine_latest(
-    *streams: Stream, emit_on: Optional[Union[Stream, List[Stream]]] = None
-) -> Stream:
-    """Combine the latest values from multiple streams.
+    *streams: _StreamOrMultiStream,
+    emit_on: _StreamOrMultiStream | list[_StreamOrMultiStream] | None = None,
+) -> MultiStream: ...
 
-    Creates a new stream that emits a tuple of the most recent values
-    from each input stream whenever any stream emits. Only starts
-    emitting after all streams have emitted at least one value.
+def combine_latest(
+    *streams: _StreamOrMultiStream,
+    emit_on: _StreamOrMultiStream | list[_StreamOrMultiStream] | None = None,
+) -> Stream | MultiStream:
+    """Combine the latest values from multiple streams with broadcasting support.
 
-    ```mermaid
-    gitGraph
-        commit id: " "
-        branch s1
-        branch s2
-        checkout s1
-        commit id: "a"
-        checkout s2
-        commit id: "1"
-        checkout main
-        merge s1
-        merge s2 id: "(a,1)" type: HIGHLIGHT
-        checkout s1
-        commit id: "b"
-        checkout main
-        merge s1 id: "(b,1)" type: HIGHLIGHT
-        checkout s2
-        commit id: "2"
-        checkout main
-        merge s2 id: "(b,2)" type: HIGHLIGHT
-    ```
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs (and Stream/no emit_on): returns Stream.
+    - Any MultiStream input: returns MultiStream.
 
     Args:
-        *streams: Two or more streams to combine.
-        emit_on: Stream or list of streams that trigger emission.
+        *streams: Stream or MultiStream instances to combine.
+        emit_on: Stream, MultiStream, or list thereof that triggers emission.
             If None (default), emit on update from any stream.
 
     Returns:
-        A new Stream emitting tuples of latest values.
-
-    Example:
-        ```python
-        s1 = Stream()
-        s2 = Stream()
-        combined = combine_latest(s1, s2)
-        combined_on_s1 = combine_latest(s1, s2, emit_on=s1)
-        ```
+        Stream if all inputs are Stream, otherwise MultiStream.
     """
     ...
 
-def zip(*streams: Stream) -> Stream:
-    """Zip multiple streams together.
+@overload
+def zip(*streams: Stream) -> Stream: ...
+@overload
+def zip(*streams: _StreamOrMultiStream) -> MultiStream: ...
 
-    Creates a new stream that waits for one item from each input stream,
-    then emits them as a tuple. Buffers items until all streams have
-    contributed one value.
+def zip(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
+    """Zip multiple streams together with broadcasting support.
 
-    ```mermaid
-    gitGraph
-        commit id: " "
-        branch s1
-        branch s2
-        checkout s1
-        commit id: "a"
-        checkout s2
-        commit id: "1"
-        checkout main
-        merge s1
-        merge s2 id: "(a,1)" type: HIGHLIGHT
-        checkout s1
-        commit id: "b"
-        commit id: "c"
-        checkout s2
-        commit id: "2"
-        checkout main
-        merge s1
-        merge s2 id: "(b,2)" type: HIGHLIGHT
-    ```
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs: returns Stream.
+    - Any MultiStream input: returns MultiStream.
 
     Args:
-        *streams: Two or more streams to zip together.
+        *streams: Stream or MultiStream instances to zip.
 
     Returns:
-        A new stream that emits tuples of values from all input streams.
+        Stream if all inputs are Stream, otherwise MultiStream.
     """
     ...
 

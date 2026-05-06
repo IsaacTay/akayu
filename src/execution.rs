@@ -429,7 +429,7 @@ pub(crate) fn apply_logic(
                     );
                 }
                 let t = target.borrow(py);
-                if t.emitting.load(std::sync::atomic::Ordering::Relaxed) {
+                if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
                     let name = t.name.clone();
                     drop(t);
                     return Err(crate::error::StreamError::ReentrantEmit(name).into());
@@ -799,7 +799,7 @@ pub(crate) fn apply_logic_batch(
                     );
                 }
                 let t = target.borrow(py);
-                if t.emitting.load(std::sync::atomic::Ordering::Relaxed) {
+                if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
                     let name = t.name.clone();
                     drop(t);
                     return Err(crate::error::StreamError::ReentrantEmit(name).into());
@@ -914,7 +914,7 @@ impl Stream {
                 );
             }
             let t = target.borrow(py);
-            if t.emitting.load(std::sync::atomic::Ordering::Relaxed) {
+            if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
                 let name = t.name.clone();
                 drop(t);
                 return Err(crate::error::StreamError::ReentrantEmit(name).into());
@@ -1304,7 +1304,7 @@ impl Stream {
                 );
             }
             let t = target.borrow(py);
-            if t.emitting.load(std::sync::atomic::Ordering::Relaxed) {
+            if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
                 let name = t.name.clone();
                 drop(t);
                 return Err(crate::error::StreamError::ReentrantEmit(name).into());
@@ -1587,12 +1587,13 @@ impl Stream {
             return Ok(None);
         }
 
-        let n = self.downstreams.len();
+let n = self.downstreams.len();
         if n == 0 {
             return Ok(None);
         }
 
         // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
+        // for all downstream calls to prevent borrow conflicts at convergence points.
         let use_lock = self.needs_lock;
 
         if n == 1 {
@@ -1798,6 +1799,23 @@ impl Stream {
             );
         }
         Ok(())
+    }
+
+    /// Recursively mark all nodes reachable from `node_py` with needs_lock=true.
+    /// This ensures propagate() uses _safe_update (per-node Python locking) for
+    /// all downstream access, preventing concurrent borrow_mut on shared PyCells
+    /// when par() branches converge.
+    pub(crate) fn mark_par_reachable(py: Python, node_py: Py<Stream>) {
+        let mut node = node_py.borrow_mut(py);
+        if node.needs_lock {
+            return;
+        }
+        node.needs_lock = true;
+        let downstreams: Vec<Py<Stream>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        drop(node);
+        for child in downstreams {
+            Self::mark_par_reachable(py, child);
+        }
     }
 
     /// Propagate value to downstreams in parallel using thread pool.

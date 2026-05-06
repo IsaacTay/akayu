@@ -45,7 +45,7 @@ For large datasets (>1000 items), prefer `emit_batch()` with `batch_map()` for o
 
 ```python
 source = akayu.Stream(name="input")
-processed = source.map(process, name="process_step")
+processed = source.map(process, stream_name="process_step")
 ```
 
 ### 2. Skip compile() while debugging

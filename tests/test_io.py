@@ -1,7 +1,8 @@
-from akayu import Stream, to_text_file, from_text_file
+import os
 import tempfile
 import time
-import os
+
+from akayu import Stream, from_text_file, to_text_file
 
 
 def test_write_file_sink():
@@ -17,7 +18,7 @@ def test_write_file_sink():
         s.emit("Line 1")
         s.emit("Line 2")
 
-        with open(path, "r") as f:
+        with open(path) as f:
             content = f.read()
             assert content == "Line 1\nLine 2\n"
 
@@ -75,14 +76,14 @@ def test_write_file_sink_append():
         s.emit("Line 2")
 
         # Verify content after first batch
-        with open(path, "r") as f:
+        with open(path) as f:
             content = f.read()
             assert content == "Line 1\nLine 2\n"
 
         # Continue writing (should append)
         s.emit("Line 3")
 
-        with open(path, "r") as f:
+        with open(path) as f:
             content = f.read()
             assert content == "Line 1\nLine 2\nLine 3\n"
 

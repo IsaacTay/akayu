@@ -2,7 +2,6 @@
 
 import akayu
 
-
 # --- Helpers ---
 
 def _pipeline(func, *, is_filter=False):
@@ -652,7 +651,7 @@ class TestCompoundWithNewVariants:
 
     def test_negate_type_is(self):
         """not (type(x) is str)"""
-        s, r = _pipeline(lambda x: not (type(x) is str), is_filter=True)
+        s, r = _pipeline(lambda x: type(x) is not str, is_filter=True)
         assert _emit_collect(s, r, [1, "hi", 3.14]) == [1, 3.14]
 
     # --- Slice in compounds ---

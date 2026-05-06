@@ -15,7 +15,10 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = []
+dependencies = [
+    "numpy",
+    "scipy",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -26,7 +29,18 @@ dev = [
     "maturin>=1.10,<2.0",
     "streamz>=0.6",
     "psutil>=5.0",
+    "hypothesis>=6.0",
 ]
+[tool.ruff]
+target-version = "py38"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "SIM", "B", "C4", "PERF", "RUF", "ARG", "PLC", "PLE", "PLW", "TCH", "FURB", "PTH", "SLOT", "FLY"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ARG", "PLC0415", "PERF", "RUF001", "RUF002", "B017", "B007", "B011", "C414", "C417", "SIM"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
@@ -42,7 +56,21 @@ cache-keys = [{ file = "Cargo.toml" }, { file = "src/**/*.rs" }]
 
 [dependency-groups]
 dev = [
+    "blosc2>=2.5.1",
+    "hypothesis>=6.113.0",
+    "matplotlib>=3.7.5",
+    "numpy>=1.24.4",
+    "opencv-python-headless>=4.13.0.92",
+    "polars>=1.8.2",
+    "pystackreg>=0.2.8",
     "pytest-codeblocks>=0.17.0",
+    "pyyaml>=6.0.3",
+    "rerun-sdk>=0.22.1",
+    "rich>=14.3.4",
+    "scipy>=1.10.1",
+    "typst>=0.14.8",
+    "zstandard>=0.23.0",
+    "zstd>=1.5.7.3",
 ]
 docs = [
     "mkdocs-shadcn>=0.9.8",

@@ -1,6 +1,8 @@
-import akayu
 import asyncio
+
 import pytest
+
+import akayu
 
 
 @pytest.mark.asyncio

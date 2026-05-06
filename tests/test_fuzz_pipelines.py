@@ -1,5 +1,7 @@
 import random
+
 from akayu import Stream
+
 
 def safe_inc(x):
     if isinstance(x, int):
@@ -17,7 +19,7 @@ def test_fuzz_pipelines():
     Randomly construct complex pipelines with splits and merges to ensure
     stability and absence of crashes (Rust panics).
     """
-    
+
     # Run a fixed number of random fuzz iterations
     for i in range(20):
         print(f"Fuzz iteration {i}")
@@ -25,29 +27,29 @@ def test_fuzz_pipelines():
 
 def run_random_pipeline(seed):
     random.seed(seed)
-    
+
     source = Stream()
     # Keep track of all created streams to potentially branch from or merge
     streams = [source]
-    
+
     # Number of operations to add to the pipeline
     num_ops = random.randint(10, 30)
-    
+
     for _ in range(num_ops):
         op_type = random.choice([
-            "map", "filter", "union", "zip", "combine_latest", 
-            "par", "seq", "collect", "flatten", "accumulate", 
+            "map", "filter", "union", "zip", "combine_latest",
+            "par", "seq", "collect", "flatten", "accumulate",
             "batch_map", "prefetch"
         ])
-        
+
         # Pick a random upstream node to attach to
         upstream = random.choice(streams)
-        
+
         try:
             if op_type == "map":
                 new_stream = upstream.map(safe_inc)
                 streams.append(new_stream)
-                
+
             elif op_type == "filter":
                 new_stream = upstream.filter(safe_filter)
                 streams.append(new_stream)
@@ -55,16 +57,16 @@ def run_random_pipeline(seed):
             elif op_type == "flatten":
                 # Only works if upstream emits iterables, which we can't guarantee for all streams
                 # But safe_inc handles tuples, so maybe we have some.
-                # If it fails at runtime because item is not iterable, that's fine, 
+                # If it fails at runtime because item is not iterable, that's fine,
                 # we just want to ensure no panic if it IS valid or if it errors gracefully.
                 new_stream = upstream.flatten()
                 streams.append(new_stream)
-                
+
             elif op_type == "accumulate":
                 # accumulate(func, start)
                 new_stream = upstream.accumulate(lambda acc, x: acc, start=0)
                 streams.append(new_stream)
-            
+
             elif op_type == "batch_map":
                 # batch_map(func)
                 new_stream = upstream.batch_map(lambda batch: batch)
@@ -74,18 +76,18 @@ def run_random_pipeline(seed):
                 # prefetch(n)
                 new_stream = upstream.prefetch(random.randint(1, 5))
                 streams.append(new_stream)
-                
+
             elif op_type == "union":
                 # Pick 1 or more other streams
                 others = random.sample(streams, k=random.randint(1, min(3, len(streams))))
                 new_stream = upstream.union(*others)
                 streams.append(new_stream)
-            
+
             elif op_type == "zip":
                 others = random.sample(streams, k=random.randint(1, min(3, len(streams))))
                 new_stream = upstream.zip(*others)
                 streams.append(new_stream)
-            
+
             elif op_type == "combine_latest":
                 others = random.sample(streams, k=random.randint(1, min(3, len(streams))))
                 new_stream = upstream.combine_latest(*others)
@@ -104,7 +106,7 @@ def run_random_pipeline(seed):
                 streams.append(new_stream)
 
         except Exception as e:
-            # Some operations might fail (e.g. valid graph construction issues), 
+            # Some operations might fail (e.g. valid graph construction issues),
             # but we are mainly looking for hard crashes or Rust panics.
             print(f"Operation {op_type} failed: {e}")
             pass
@@ -128,7 +130,7 @@ def run_random_pipeline(seed):
         except Exception as e:
             print(f"Emit failed with {e}")
             raise e
-        
+
     # Also flush any collects
     for s in streams:
         try:

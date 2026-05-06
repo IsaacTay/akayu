@@ -14,30 +14,25 @@
       {
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [
-            # Rust toolchain
             cargo
             rustc
             rustfmt
             clippy
-
-            # Python and package management
             python3
             uv
             maturin
-
-            # Development tools
             ruff
             just
             mermaid-cli
-
-            # Build dependencies
             pkg-config
             openssl
+            zlib
+            stdenv.cc.cc.lib
           ];
 
           shellHook = ''
             echo "Environment ready with Cargo, UV, and Python."
-            # Set up venv and sync dependencies
+            export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (with pkgs; [ stdenv.cc.cc zlib ])}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             if [ ! -d ".venv" ]; then
               uv venv
             fi

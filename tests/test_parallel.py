@@ -1,7 +1,8 @@
 """Tests for parallel branch execution."""
 
-import time
 import threading
+import time
+
 from akayu import Stream, union
 
 

@@ -7,8 +7,9 @@ Focus on operations that:
 """
 
 import time
+from operator import itemgetter
+
 import akayu
-from operator import itemgetter, attrgetter
 
 N = 500_000
 
@@ -368,7 +369,8 @@ if __name__ == "__main__":
 
     def _python_noop():
         def make():
-            noop = lambda x: None
+            def noop(x):
+                pass
             for i in range(N):
                 noop(i)
         return make

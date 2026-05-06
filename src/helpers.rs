@@ -1,7 +1,7 @@
 //! Python FFI helpers and utility functions.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::PyString;
 use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
@@ -66,23 +66,17 @@ define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
 define_py_helper!(ANALYZE_LAMBDA, get_analyze_lambda);
 
-pub(crate) fn extract_stream_name(
-    py: Python,
-    kwargs: &Option<Py<PyDict>>,
+pub(crate) fn resolve_stream_name(
+    stream_name: Option<String>,
     default_suffix: &str,
     func_name: Option<&str>,
-) -> PyResult<String> {
-    if let Some(k) = kwargs {
-        let k_bound = k.bind(py);
-        if let Some(item) = k_bound.get_item("stream_name")? {
-            let name = item.extract::<String>()?;
-            k_bound.del_item("stream_name")?;
-            return Ok(name);
-        }
-    }
-    match func_name {
-        Some(name) => Ok(format!("{default_suffix}({name})")),
-        None => Ok(default_suffix.to_string()),
+) -> String {
+    match stream_name {
+        Some(name) => name,
+        None => match func_name {
+            Some(name) => format!("{default_suffix}({name})"),
+            None => default_suffix.to_string(),
+        },
     }
 }
 
@@ -356,6 +350,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             func_is_sync: true,
             frozen: false,
             needs_lock: false,
+            par_branches_marked: false,
             compiled: false,
             source_location,
             builtin_op: None,
@@ -367,6 +362,8 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             emit_target: None,
             flushing: false,
             emitting: std::sync::atomic::AtomicBool::new(false),
+            emit_lock: py.import("threading").unwrap().getattr("RLock").unwrap().call0().unwrap().unbind(),
+            convergence_checked: false,
         },
     )?;
     let stream_clone = stream.clone_ref(py);

@@ -5,6 +5,7 @@ propagate through multiple nodes with borrow_mut/update/propagate per branch.
 """
 
 import time
+
 import akayu
 
 N = 200_000
@@ -62,10 +63,11 @@ if __name__ == "__main__":
         def _python(fan=fan):
             def make():
                 count = 0
-                noop = lambda x: x
+                def noop(x):
+                    return x
                 for i in range(N):
                     for _ in range(fan):
-                        x = noop(i)
+                        noop(i)
                         count += 1
                 assert count == N * fan
             return make
@@ -93,7 +95,7 @@ if __name__ == "__main__":
                 count = 0
                 for i in range(N):
                     for _ in range(fan):
-                        x = bool(i)
+                        bool(i)
                         count += 1
             return make
 
@@ -125,7 +127,7 @@ if __name__ == "__main__":
                 count = 0
                 for i in range(N):
                     for k in range(fan):
-                        x = i + k
+                        i + k
                         count += 1
                 assert count == N * fan
             return make
@@ -224,7 +226,7 @@ if __name__ == "__main__":
                 for i in range(N):
                     for k in range(fan):
                         if i % fan == k:
-                            x = i * 2
+                            i * 2
                             count += 1
             return make
 
@@ -253,7 +255,7 @@ if __name__ == "__main__":
                 count = 0
                 for i in range(N):
                     for k in range(fan):
-                        x = i + k
+                        i + k
                         count += 1
             return make
 
