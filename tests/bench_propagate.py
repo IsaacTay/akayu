@@ -5,6 +5,7 @@ Uses identity-like operations so per-node work is near zero.
 """
 
 import time
+
 import akayu
 
 N = 200_000
@@ -70,7 +71,7 @@ if __name__ == "__main__":
 
         def _python(fan=fan):
             def make():
-                noop = lambda x: None
+                def noop(x): pass
                 for i in range(N):
                     for _ in range(fan):
                         noop(i)
@@ -106,7 +107,7 @@ if __name__ == "__main__":
 
         def _python_bool(fan=fan):
             def make():
-                noop = lambda x: None
+                def noop(x): pass
                 for i in range(N):
                     for _ in range(fan):
                         noop(bool(i))
@@ -146,7 +147,7 @@ if __name__ == "__main__":
 
         def _python_chain(depth=depth):
             def make():
-                noop = lambda x: None
+                def noop(x): pass
                 for i in range(N):
                     x = i
                     for _ in range(depth):
@@ -190,7 +191,7 @@ if __name__ == "__main__":
 
         def _python_diamond(fan=fan):
             def make():
-                noop = lambda x: None
+                def noop(x): pass
                 for i in range(N):
                     for _ in range(fan):
                         noop(bool(i))

@@ -1,7 +1,9 @@
-import akayu
 import asyncio
-import pytest
 import time
+
+import pytest
+
+import akayu
 
 
 @pytest.mark.asyncio

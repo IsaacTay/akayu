@@ -233,8 +233,9 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
 
+        let slf_ptr = slf.as_ptr();
         let find_stream_index = |stream: &Py<Self>| -> Option<usize> {
-            if stream.try_borrow(py).is_err() {
+            if stream.as_ptr() == slf_ptr {
                 return Some(0);
             }
             for (i, other) in others.iter().enumerate() {
@@ -466,9 +467,15 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     for stream in &streams {
         let stream_py: Py<Stream> = stream.clone_ref(py);
         let mut stream_ref = stream.borrow_mut(py);
+        stream_ref.needs_lock = true;
         stream_ref.downstreams.push(node.clone_ref(py));
         drop(stream_ref);
         node.borrow(py).parents.lock().unwrap().push(stream_py);
+    }
+
+    {
+        let mut node_ref = node.borrow_mut(py);
+        node_ref.needs_lock = true;
     }
 
     Ok(node)

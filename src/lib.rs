@@ -77,6 +77,8 @@ pub struct Stream {
     pub(crate) frozen: bool,
     /// True if this node needs thread-safe locking (convergence point from parallel branches)
     pub(crate) needs_lock: bool,
+    /// True if par() downstreams have been marked with needs_lock (lazy, one-time)
+    pub(crate) par_branches_marked: bool,
     /// True if compile() was explicitly called (prevents modifications)
     pub(crate) compiled: bool,
     /// Source location where this node was created (e.g., "pipeline.py:42")
@@ -112,6 +114,9 @@ pub struct Stream {
     /// Guard against re-entrant emit calls. True while this node is
     /// actively propagating from an emit(). Prevents cycles in the data graph.
     pub(crate) emitting: std::sync::atomic::AtomicBool,
+    pub(crate) emit_lock: Py<PyAny>,
+    /// True if convergence point check has been performed (lazy, one-time).
+    pub(crate) convergence_checked: bool,
 }
 
 const HELPERS: &str = include_str!("akayu.py");
@@ -120,7 +125,6 @@ const HELPERS: &str = include_str!("akayu.py");
 fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
     m.add_class::<profiling::ProfileReport>()?;
-    m.add_class::<operations::CollectGuard>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(from_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(union, m)?)?;

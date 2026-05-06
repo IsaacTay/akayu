@@ -53,7 +53,7 @@ source.emit_batch(data)
 
 **streamz** allows emitting to any node in simple cases.
 
-**akayu** only allows emit to **source nodes** (created with `Stream()`). This is a intentional design choice for clarity.
+**akayu** only allows emit to **source nodes** (created with `Stream()`). This is an intentional design choice for clarity.
 
 ```python
 # streamz: may work in simple cases

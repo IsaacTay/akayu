@@ -1,8 +1,8 @@
 import functools
 
 import pytest
-import akayu
 
+import akayu
 
 # ---------------------------------------------------------------------------
 # wrap_error: node name + cause chaining
@@ -323,7 +323,7 @@ def test_invalid_prefetch_size():
 
 def test_union_empty():
     """akayu.union() with no streams raises ValueError."""
-    with pytest.raises(ValueError, match="at least one stream"):
+    with pytest.raises(ValueError, match="at least two streams"):
         akayu.union()
 
 

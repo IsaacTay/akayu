@@ -1,8 +1,10 @@
-import akayu
-import psutil
-import os
 import gc
+import os
 import time
+
+import psutil
+
+import akayu
 
 
 def get_process_memory_mb():

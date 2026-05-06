@@ -126,7 +126,7 @@ source.emit_batch(data)
 ### Emitting to a non-source node
 
 ```python
-source = akaku.Stream()
+source = akayu.Stream()
 mapped = source.map(lambda x: x * 2)
 
 mapped.emit(5)  # ❌ RuntimeError: Cannot emit to non-source node
@@ -143,6 +143,27 @@ RuntimeError: Cannot emit to non-source node. Only source nodes (created with St
 source.emit(5)  # ✅ Correct
 ```
 
+## Naming Streams for Debugging
+
+Every operation accepts an optional `stream_name` parameter. Names appear in error messages, making it easy to trace problems in complex pipelines.
+
+```python
+source = akayu.Stream(name="input")
+doubled = source.map(lambda x: x * 2, stream_name="double")
+filtered = doubled.filter(lambda x: x > 10, stream_name="filter_gt_10")
+```
+
+If an error occurs, the name is included:
+
+```
+RuntimeError: Emit called on non-source node 'double'. ...
+```
+
+All transform methods support `stream_name`: `map`, `filter`, `sink`, `flatten`,
+`collect`, `prefetch`, `accumulate`, `chunk_by`, `starmap`, `batch_map`.
+
+If not provided, a default name is generated from the function name (e.g. `"map(my_func)"`).
+
 ## Available Operations
 
 ### Transformations
@@ -152,7 +173,17 @@ source.emit(5)  # ✅ Correct
 - [`#!python flatten()`](api.md#akayu.Stream.flatten) — Expand iterables into individual items
 - [`#!python accumulate(func, start)`](api.md#akayu.Stream.accumulate) — Running aggregation
 - [`#!python batch_map(func)`](api.md#akayu.Stream.batch_map) — Vectorized batch transformation
+- [`#!python starmap(func)`](api.md#akayu.Stream.starmap) — Map with argument unpacking
+- [`#!python chunk_by(predicate)`](api.md#akayu.Stream.chunk_by) — Buffer until delimiter, emit as tuple
+- [`#!python prefetch(n)`](api.md#akayu.Stream.prefetch) — Enable concurrent processing for next map
 - [`#!python sink(func)`](api.md#akayu.Stream.sink) — Terminal side-effect operation
+
+### Collecting
+
+- [`#!python collect()`](api.md#akayu.Stream.collect) — Buffer elements until `flush()`
+- [`#!python to_list()`](api.md#akayu.Stream.to_list) — Collect into a Python list
+- [`#!python to_set()`](api.md#akayu.Stream.to_set) — Collect into a Python set
+- [`#!python drain()`](api.md#akayu.Stream.drain) — Discard all elements
 
 ### Combining Streams
 

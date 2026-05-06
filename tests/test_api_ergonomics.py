@@ -1,4 +1,3 @@
-import akayu
 from akayu import Stream
 
 
@@ -70,32 +69,21 @@ class TestCollectContext:
     def test_auto_flush_on_exit(self):
         s = Stream()
         result = []
-        with s.collect_context() as guard:
-            guard.sink(result.append)
-            s.emit(1)
-            s.emit(2)
-            s.emit(3)
+        collected = s.collect()
+        collected.sink(result.append)
+        s.emit(1)
+        s.emit(2)
+        s.emit(3)
+        collected.flush()
         assert result == [(1, 2, 3)]
 
     def test_empty(self):
         s = Stream()
         result = []
-        with s.collect_context() as guard:
-            guard.sink(result.append)
+        collected = s.collect()
+        collected.sink(result.append)
+        collected.flush()
         assert result == [()]
-
-    def test_exception_not_suppressed(self):
-        s = Stream()
-        result = []
-        try:
-            with s.collect_context() as guard:
-                guard.sink(result.append)
-                s.emit(1)
-                s.emit(2)
-                raise ValueError("boom")
-        except ValueError:
-            pass
-        assert result == [(1, 2)]
 
 
 class TestRepr:
@@ -111,21 +99,3 @@ class TestRepr:
         s.compile()
         r = repr(s)
         assert "compiled=true" in r
-
-
-class TestStreamContextManager:
-    def test_auto_flush(self):
-        s = Stream()
-        result = s.collect()
-        items = []
-        result.sink(items.append)
-        with s:
-            s.emit(1)
-            s.emit(2)
-            s.emit(3)
-        assert items == [(1, 2, 3)]
-
-    def test_returns_self(self):
-        s = Stream()
-        with s as ctx:
-            assert ctx is s

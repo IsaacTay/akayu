@@ -8,9 +8,7 @@ import asyncio
 
 import pytest
 
-import akayu
 from akayu import Stream
-
 
 # ============================================================
 # a) Prefetch functional tests

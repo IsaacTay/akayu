@@ -17,6 +17,10 @@ members:
 \- emit
 \- emit_batch
 \- compile
+\- chunk_by
+\- drain
+\- to_list
+\- to_set
 \- par
 \- parallel
 \- seq

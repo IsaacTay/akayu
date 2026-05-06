@@ -5,8 +5,9 @@ Reports akayu ns/step vs python ns/step and ratio.
 """
 
 import time
+from operator import itemgetter
+
 import akayu
-from operator import itemgetter, attrgetter
 
 N = 500_000
 STEPS = 10
@@ -56,15 +57,6 @@ def make_akayu(step_fn):
 
 cases = []
 
-# --- Arithmetic (specialized in CPython) ---
-
-cases.append(("x + 1 (Add)",
-    make_akayu(lambda n: n.map(lambda x: x + 1)),
-    lambda steps: (lambda: [None for _ in [None] if not (
-        exec_loop(steps, lambda x: x + 1)
-    )])
-))
-
 def make_python_arith(op_fn):
     def builder(steps):
         def fn():
@@ -74,6 +66,13 @@ def make_python_arith(op_fn):
                     x = op_fn(x)
         return fn
     return builder
+
+# --- Arithmetic (specialized in CPython) ---
+
+cases.append(("x + 1 (Add)",
+    make_akayu(lambda n: n.map(lambda x: x + 1)),
+    make_python_arith(lambda x: x + 1)
+))
 
 cases_data = [
     # (name, akayu_step, python_op)
@@ -200,7 +199,7 @@ if __name__ == "__main__":
     def make_len_python_1():
         def fn():
             for lst in list_inputs:
-                x = len(lst)
+                len(lst)
         return fn
 
     a_ns = bench(make_len_akayu_1()) / N * 1e9
@@ -281,7 +280,7 @@ if __name__ == "__main__":
         def make_dict_python_1(op=py_op):
             def fn():
                 for d in dict_inputs:
-                    x = op(d)
+                    op(d)
             return fn
 
         a_ns = bench(make_dict_akayu_1()) / N * 1e9

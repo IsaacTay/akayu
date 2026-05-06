@@ -130,7 +130,7 @@ class TestEmitTargetEdgeCases:
         s2 = Stream()
         results = []
 
-        m = s2.map(lambda x: x)
+        _m = s2.map(lambda x: x)
         # This sink calls emit on a map node, which will fail at runtime
         # but should NOT be optimized (target is not Source)
         s1.sink(results.append)

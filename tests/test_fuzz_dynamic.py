@@ -1,6 +1,9 @@
 import random
+
 import pytest
+
 from akayu import Stream
+
 
 def test_fuzz_dynamic_topology():
     """
@@ -12,13 +15,13 @@ def test_fuzz_dynamic_topology():
 def run_dynamic_fuzz(seed):
     random.seed(seed)
     source = Stream()
-    
+
     # We maintain a list of active nodes to extend
     nodes = [source]
-    
+
     for i in range(50):
         action = random.choice(["add_node", "emit"])
-        
+
         if action == "add_node":
             parent = random.choice(nodes)
             op = random.choice(["map", "filter"])
@@ -27,11 +30,11 @@ def run_dynamic_fuzz(seed):
             else:
                 child = parent.filter(lambda x: True)
             nodes.append(child)
-            
+
             # Optional: add a sink to verify data flow
             if random.random() < 0.2:
                 child.sink(lambda x: None)
-                
+
         elif action == "emit":
             val = i
             try:

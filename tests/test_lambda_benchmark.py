@@ -1,6 +1,7 @@
 """Benchmark: lambda decompilation vs direct builtin vs unoptimized."""
 
 import pytest
+
 import akayu
 
 N = 1_000_000

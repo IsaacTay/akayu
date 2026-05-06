@@ -1,5 +1,6 @@
 import akayu
 
+
 def test_benchmark_no_compile(benchmark):
     """
     Benchmark a pipeline WITHOUT explicit .compile().
@@ -23,11 +24,11 @@ def test_benchmark_no_compile(benchmark):
 
         for i in range(500_000):
             s.emit(i)
-        
+
         return count
 
     result = benchmark(run_pipeline)
-    assert result == 250_000  # Half of them match? 
+    assert result == 250_000  # Half of them match?
     # 0 -> 1 -> 2 (even, not div 4) -> X
     # 1 -> 2 -> 4 (even, div 4) -> KEEP
     # So every other item.

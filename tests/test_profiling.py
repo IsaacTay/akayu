@@ -3,8 +3,8 @@
 import time
 
 import pytest
-from akayu import Stream, ProfileReport
 
+from akayu import ProfileReport, Stream
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -77,7 +77,7 @@ class TestEmitProfiled:
 
         report = s.emit_profiled(5)
         d = report.to_dict()
-        source = next(n for n in d["nodes"] if n["name"] == "source")
+        _source = next(n for n in d["nodes"] if n["name"] == "source")
         # Source doesn't go through update, so items_in/out may be 0
         map_node = next(n for n in d["nodes"] if "map" in n["name"])
         assert map_node["items_in"] == 1

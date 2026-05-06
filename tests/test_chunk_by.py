@@ -1,8 +1,6 @@
 """Tests for collect/flush optimization (Tier 1: direct Rust flush) and ChunkBy (Tier 2)."""
 
-import akayu
 from akayu import Stream
-
 
 # ---------------------------------------------------------------------------
 # Tier 1: Direct Rust flush (flush_target bypass)
@@ -89,7 +87,7 @@ class TestChunkByDirect:
     def test_basic(self):
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).sink(results.append)
 
         for c in "hello\nworld\n":
             s.emit(c)
@@ -116,7 +114,7 @@ class TestChunkByDirect:
         """flush() emits remaining buffer."""
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).sink(results.append)
 
         for c in "hello\npartial":
             s.emit(c)
@@ -130,7 +128,7 @@ class TestChunkByDirect:
     def test_emit_batch(self):
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).sink(results.append)
 
         s.emit_batch(list("hello\nworld\n"))
 
@@ -143,7 +141,7 @@ class TestChunkByDirect:
         """chunk_by → map → sink pipeline."""
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").map(lambda t: "".join(t)).sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).map(lambda t: "".join(t)).sink(results.append)
 
         for c in "hello\nworld\n":
             s.emit(c)
@@ -154,7 +152,7 @@ class TestChunkByDirect:
         """chunk_by with compile() still works."""
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").map(lambda t: "".join(t)).sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).map(lambda t: "".join(t)).sink(results.append)
         s.compile()
 
         for c in "hello\nworld\n":
@@ -166,7 +164,7 @@ class TestChunkByDirect:
         """Consecutive delimiters produce no empty chunks (buffer is empty)."""
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x == "\n").sink(results.append)
+        s.chunk_by(lambda x: x == "\n", include_delimiter=True).sink(results.append)
 
         for c in "\n\n":
             s.emit(c)
@@ -191,7 +189,7 @@ class TestChunkByDirect:
         """chunk_by works with non-char predicates."""
         s = Stream()
         results = []
-        s.chunk_by(lambda x: x > 10).sink(results.append)
+        s.chunk_by(lambda x: x > 10, include_delimiter=True).sink(results.append)
 
         for v in [1, 2, 3, 100, 4, 5, 200]:
             s.emit(v)

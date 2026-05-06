@@ -1,5 +1,7 @@
 import pytest
+
 import akayu
+
 
 def test_modify_after_compile_map():
     s = akayu.Stream()

@@ -5,6 +5,7 @@ so the gap between akayu and Python is purely dispatch/framework overhead.
 """
 
 import time
+
 import akayu
 
 N = 500_000
@@ -246,7 +247,7 @@ if __name__ == "__main__":
 
     # ── Per-step marginal costs ──
     print(f"\n{'='*70}")
-    print(f"  Per-step marginal cost (1→20 avg, ns/item/step)")
+    print("  Per-step marginal cost (1→20 avg, ns/item/step)")
     print(f"{'='*70}")
     print(f"  {'pipeline':<20s}  {'batch':>8s}  {'emit':>8s}  {'python':>8s}  {'gap':>8s}")
 
@@ -262,7 +263,7 @@ if __name__ == "__main__":
 
     # ── Fixed overhead (1-step baseline) ──
     print(f"\n{'='*70}")
-    print(f"  Fixed overhead at 1 step (ns/item)")
+    print("  Fixed overhead at 1 step (ns/item)")
     print(f"{'='*70}")
     print(f"  {'pipeline':<20s}  {'batch':>8s}  {'python':>8s}  {'overhead':>10s}")
     for name, _, _, _ in pipelines:
