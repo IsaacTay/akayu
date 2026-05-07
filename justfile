@@ -60,29 +60,83 @@ clean-all: clean
 rebuild: sync
     uv pip install -e . --reinstall-package akayu
 
-# Build and upload wheel to copyparty
-publish: build-wheels
-    #!/usr/bin/env bash
-    wheel=$(ls -t dist/*.whl | head -1)
-    name=$(basename "$wheel")
-    url="https://files.example.invalid/share/akayu_wheels/$name"
-    echo "Uploading $name ..."
-    status=$(curl -s -o /dev/null -w '%{http_code}' -T "$wheel" "$url")
-    if [ "$status" = "201" ]; then
-        echo "Uploaded"
-        echo "Install: uv add 'akayu @ $url'"
-    else
-        echo "Upload failed (HTTP $status)"
-        exit 1
-    fi
-
-# Build wheels for Python 3.13
+# Build wheels for Python 3.13 (host arch). Used for testing on this machine.
 build-wheels:
     mkdir -p dist
     rm -f dist/*.whl
     maturin build --release --interpreter python3.13 --out dist
     @echo "Wheels built:"
     @ls -la dist/*.whl
+
+# Build all target wheels (host + aarch64) and upload each one to the
+# configured copyparty share. Each wheel uploads under its own native filename
+# so different arches coexist on the server (no clobbering).
+#
+# Auto-enters the aarch64 nix dev shell (`nix develop .#aarch64-linux`) if
+# maturin isn't on PATH already. The cross-build script handles staging the
+# cross gcc wrapper to bypass a known /nix/store path-resolution quirk on this
+# host.
+publish:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # If maturin isn't on PATH, re-exec into the aarch64 dev shell. `exec`
+    # replaces this process so we don't keep going in an under-equipped env.
+    if ! command -v maturin >/dev/null 2>&1; then
+        echo "maturin not on PATH — entering nix develop .#aarch64-linux ..."
+        exec env -u PATH nix develop .#aarch64-linux --command just publish
+    fi
+
+    # --- Build host (x86_64) wheel ---------------------------------------
+    # The aarch64 dev shell sets PYO3_CROSS_* + _PYTHON_HOST_PLATFORM, which
+    # would mislead maturin into tagging the host wheel as aarch64. Strip them
+    # for this build only.
+    env -u PYO3_CROSS_INCLUDE_DIR \
+        -u PYO3_CROSS_LIB_DIR \
+        -u PYO3_CROSS_PYTHON_VERSION \
+        -u PYO3_CROSS_PYTHON_IMPLEMENTATION \
+        -u _PYTHON_HOST_PLATFORM \
+        -u AKAYU_CROSS_GCC_WRAPPER \
+        -u AKAYU_CROSS_PYTHON \
+        -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER \
+        just build-wheels
+
+    # --- Build aarch64 wheel ---------------------------------------------
+    ./scripts/cross-build-aarch64.sh
+
+    echo ""
+    echo "All wheels built:"
+    ls -la dist/*.whl
+
+    # --- Upload every wheel ----------------------------------------------
+    url="https://files.example.invalid/share/akayu_wheels/?replace"
+    # Enumerate wheels via find — glob expansion in `dist/*.whl` is unreliable
+    # under the bash 5.2 sandbox that `just` shells out to on some hosts.
+    wheels=()
+    while IFS= read -r -d '' w; do
+        wheels+=("$w")
+    done < <(find dist -maxdepth 1 -name "*.whl" -print0)
+    if [ "${#wheels[@]}" -eq 0 ]; then
+        echo "No wheels found in dist/. Build steps above failed?" >&2
+        exit 1
+    fi
+    echo "Uploading ${#wheels[@]} wheel(s) to copyparty ..."
+    for wheel in "${wheels[@]}"; do
+        name=$(basename "$wheel")
+        printf "  %-55s " "$name"
+        status=$(curl -s -o /dev/null -w '%{http_code}' -F "f=@$wheel" "$url")
+        if [ "$status" = "201" ]; then
+            echo "OK"
+        else
+            echo "FAIL (HTTP $status)" >&2
+            exit 1
+        fi
+    done
+    echo ""
+    echo "Install (pick the wheel for your arch):"
+    for wheel in "${wheels[@]}"; do
+        echo "  uv add 'akayu @ https://files.example.invalid/share/akayu_wheels/$(basename "$wheel")'"
+    done
 
 # Sync docs dependencies and build module for mkdocstrings
 sync-docs:
