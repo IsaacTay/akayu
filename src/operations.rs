@@ -1239,11 +1239,9 @@ impl Stream {
             return Err(StreamError::AlreadyCompiled(this.name.clone()).into());
         }
 
-        // Run full optimization (including chain fusion)
-        this.optimize_topology_full(py, source_py_ptr);
+        let all_nodes = this.optimize_topology_full(py, source_py_ptr);
 
-        // Mark this node and all reachable nodes as frozen and compiled
-        this.freeze_all(py);
+        this.freeze_all(py, &all_nodes);
 
         drop(this);
         Ok(slf.clone().unbind())

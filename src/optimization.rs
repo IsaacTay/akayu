@@ -39,51 +39,38 @@ impl Stream {
     ///
     /// This enables all optimizations including chain compilation, which is only safe
     /// when the topology is guaranteed not to change after optimization.
-    pub fn optimize_topology_full(&mut self, py: Python, source_py_ptr: usize) {
-        // Phase 1: Eliminate source passthroughs
+    pub fn optimize_topology_full(&mut self, py: Python, source_py_ptr: usize) -> Vec<Py<Self>> {
         self.eliminate_source_passthroughs(py);
 
-        // Phase 1.5: Fuse collect+filter→sink(flush) into ChunkBy
-        self.fuse_chunk_by(py, source_py_ptr);
-
-        // Phase 2: Detect flush targets (Sink → Collect direct Rust call)
-        self.detect_flush_targets(py);
-
-        // Phase 2.5: Detect emit targets (Sink → Source direct Rust call)
-        self.detect_emit_targets(py);
-
-        // Phase 3: Detect builtin fast-paths before chain building
-        // (chain building moves builtin_op into ChainNode structs)
-        self.detect_builtins(py);
-
-        // Phase 4: Cache vectorcall function pointers before chain building
-        // (chain building moves cached_vectorcall into ChainNode structs)
-        self.cache_vectorcall_ptrs(py);
-
-        // Phase 5: Build compiled chains for linear segments
-        self.build_compiled_chains(py);
-
-        // Phase 3: Collect all nodes
         let all_nodes = self.collect_all_nodes(py);
 
-        // Phase 3: Warn about par() nodes without splits (useless overhead)
+        self.fuse_chunk_by(py, source_py_ptr, &all_nodes);
+        self.detect_flush_targets(py, &all_nodes);
+        self.detect_emit_targets(py, &all_nodes);
+        self.detect_builtins(py, &all_nodes);
+        self.cache_vectorcall_ptrs(py, &all_nodes);
+
+        self.build_compiled_chains(py);
+
         Self::warn_useless_par(py, &all_nodes);
-
-        // Phase 4: Mark prefetch nodes inside par branches as needing locks
         self.mark_par_branch_nodes(py, &all_nodes);
+        self.mark_convergence_nodes(py, &all_nodes);
 
-        // Phase 5: Mark convergence points and their downstreams with needs_lock
-        self.mark_convergence_nodes(py, all_nodes);
+        all_nodes
     }
 
     /// Collect all nodes reachable from this node's downstreams.
     fn collect_all_nodes(&self, py: Python) -> Vec<Py<Self>> {
         let mut all_nodes: Vec<Py<Self>> = Vec::new();
+        let mut visited: HashSet<usize> = HashSet::new();
         let mut to_visit: Vec<Py<Self>> =
             self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
 
-        // BFS traversal
         while let Some(node_py) = to_visit.pop() {
+            let node_ptr = node_py.as_ptr() as usize;
+            if !visited.insert(node_ptr) {
+                continue;
+            }
             let node = node_py.borrow(py);
             for downstream in &node.downstreams {
                 to_visit.push(downstream.clone_ref(py));
@@ -99,16 +86,14 @@ impl Stream {
     ///
     /// This is called by compile() to prevent any further modifications
     /// to the stream graph after optimization.
-    pub fn freeze_all(&mut self, py: Python) {
+    pub fn freeze_all(&mut self, py: Python, all_nodes: &[Py<Self>]) {
         self.frozen = true;
         self.compiled = true;
-        // Cache chainability for the source node
         self.compiled_chainable = (self.logic.is_chainable()
             && !matches!(&self.logic, NodeLogic::Filter { .. }))
             || matches!(&self.logic, NodeLogic::Chain { .. });
         self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
             && self.builtin_op.is_some();
-        // Cache raw pointers to downstream Streams (bypass PyCell borrow checks in propagate)
         self.compiled_downstream_ptrs = self
             .downstreams
             .iter()
@@ -118,22 +103,16 @@ impl Stream {
             })
             .collect();
 
-        // BFS to freeze all reachable nodes
-        let mut to_visit: Vec<Py<Self>> =
-            self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-
-        while let Some(node_py) = to_visit.pop() {
+        for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
             if !node.frozen {
                 node.frozen = true;
                 node.compiled = true;
-                // Cache chainability so update() doesn't re-derive it per item
                 node.compiled_chainable = (node.logic.is_chainable()
                     && !matches!(&node.logic, NodeLogic::Filter { .. }))
                     || matches!(&node.logic, NodeLogic::Chain { .. });
                 node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
                     && node.builtin_op.is_some();
-                // Cache raw pointers to downstream Streams
                 let downstream_refs: Vec<Py<Stream>> =
                     node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
@@ -146,9 +125,6 @@ impl Stream {
                     .collect();
                 let mut node = node_py.borrow_mut(py);
                 node.compiled_downstream_ptrs = ptrs;
-                for downstream in &node.downstreams {
-                    to_visit.push(downstream.clone_ref(py));
-                }
             }
         }
     }
@@ -254,7 +230,7 @@ impl Stream {
         }
     }
 
-    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: Vec<Py<Self>>) {
+    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: &[Py<Self>]) {
     }
 
     /// Eliminate source passthrough nodes from the graph.
@@ -406,9 +382,8 @@ impl Stream {
     ///
     /// Called during compile() to populate `builtin_op` on nodes that use
     /// known builtins (len, str, int, isinstance, etc.) for faster execution.
-    fn detect_builtins(&mut self, py: Python) {
-        let all_nodes = self.collect_all_nodes(py);
-        for node_py in &all_nodes {
+    fn detect_builtins(&self, py: Python, all_nodes: &[Py<Self>]) {
+        for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
             node.builtin_op = detect_builtin_for_logic(py, &mut node.logic);
         }
@@ -416,9 +391,8 @@ impl Stream {
 
     /// Detect Sink nodes whose function calls .flush() on a Collect node in the same graph.
     /// Sets `flush_target` on those Sink nodes so execution can bypass Python dispatch.
-    fn detect_flush_targets(&mut self, py: Python) {
-        let all_nodes = self.collect_all_nodes(py);
-        for node_py in &all_nodes {
+    fn detect_flush_targets(&self, py: Python, all_nodes: &[Py<Self>]) {
+        for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
             if let NodeLogic::Sink { ref func } = node.logic {
                 if let Some(target) = detect_flush_target_from_func(py, func) {
@@ -430,9 +404,8 @@ impl Stream {
 
     /// Detect Sink nodes whose function calls .emit() on a Source node in the same graph.
     /// Sets `emit_target` on those Sink nodes so execution can bypass Python dispatch.
-    fn detect_emit_targets(&mut self, py: Python) {
-        let all_nodes = self.collect_all_nodes(py);
-        for node_py in &all_nodes {
+    fn detect_emit_targets(&self, py: Python, all_nodes: &[Py<Self>]) {
+        for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
             if let NodeLogic::Sink { ref func } = node.logic {
                 if let Some(target) = detect_emit_target_from_func(py, func) {
@@ -448,13 +421,11 @@ impl Stream {
     /// Then traces back to find the Filter providing the predicate and the branch point
     /// where both paths originate. Extracts any intermediate transforms between the
     /// branch point and the Collect into `pre_buffer_chain`.
-    fn fuse_chunk_by(&mut self, py: Python, source_py_ptr: usize) {
-        let all_nodes = self.collect_all_nodes(py);
-
+    fn fuse_chunk_by(&mut self, py: Python, source_py_ptr: usize, all_nodes: &[Py<Self>]) {
         let source_ptr = source_py_ptr;
 
         let mut flush_pairs: Vec<(Py<Self>, Py<Self>)> = Vec::new();
-        for node_py in &all_nodes {
+        for node_py in all_nodes {
             let node = node_py.borrow(py);
             if let NodeLogic::Sink { ref func } = node.logic {
                 if let Some(target) = detect_flush_target_from_func(py, func) {
@@ -464,6 +435,7 @@ impl Stream {
             }
         }
         if flush_pairs.is_empty() {
+            return;
         }
 
         // Phase 2: For each pair, try to fuse
@@ -705,11 +677,10 @@ impl Stream {
     ///
     /// Extracts the raw `vectorcallfunc` pointer from each node's callable
     /// so the hot loop can skip the per-call type flag check and offset dereference.
-    fn cache_vectorcall_ptrs(&mut self, py: Python) {
+    fn cache_vectorcall_ptrs(&mut self, py: Python, all_nodes: &[Py<Self>]) {
         self.cached_vectorcall = extract_vectorcall_for_logic(py, &self.logic);
 
-        let all_nodes = self.collect_all_nodes(py);
-        for node_py in &all_nodes {
+        for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
             node.cached_vectorcall = extract_vectorcall_for_logic(py, &node.logic);
         }

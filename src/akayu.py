@@ -612,14 +612,32 @@ def _parallel_execute(val, downstreams):
 def _gather(futures):
     pass
 
+_INTERNAL_NAMES = frozenset(('_safe_update', '_safe_update_batch', '_strip_internal_frames'))
+
+def _strip_internal_frames(exc):
+    tb = exc.__traceback__
+    if tb is None:
+        return
+    frames = []
+    while tb is not None:
+        code = tb.tb_frame.f_code
+        if code.co_name not in _INTERNAL_NAMES:
+            frames.append((tb.tb_frame, tb.tb_lasti, tb.tb_lineno))
+        tb = tb.tb_next
+    if not frames:
+        return
+    import types as _types
+    new_tb = None
+    for frame, lasti, lineno in reversed(frames):
+        new_tb = _types.TracebackType(new_tb, frame, lasti, lineno)
+    exc.__traceback__ = new_tb
+
 def _safe_update(node, val):
-    """Call node.update(val) with per-node locking to prevent concurrent borrows."""
     lock = _get_node_lock(node)
     with lock:
         return node.update(val)
 
 def _safe_update_batch(node, items):
-    """Call node.update_batch(items) with per-node locking to prevent concurrent borrows."""
     lock = _get_node_lock(node)
     with lock:
         return node.update_batch(items)

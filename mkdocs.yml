@@ -18,6 +18,7 @@ nav:
     - Compile Optimizations: features/compile-optimizations.md
     - Concurrency: features/concurrency.md
     - Batch Processing: features/batch-processing.md
+    - MultiStream: features/multistream.md
   - Patterns & Best Practices: patterns.md
   - API Reference: api.md
   - Benchmarks: benchmarks.md

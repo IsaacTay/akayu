@@ -101,10 +101,10 @@ class MultiStream:
             keys = []
             stream_list = []
             for k, v in streams.items():
-                if not isinstance(v, Stream):
+                if not isinstance(v, (Stream, MultiStream)):
                     raise TypeError(
-                        f"Value for key '{k}' is not a Stream (got {type(v).__name__}). "
-                        f"All values must be Stream instances."
+                        f"Value for key '{k}' is not a Stream or MultiStream (got {type(v).__name__}). "
+                        f"All values must be Stream or MultiStream instances."
                     )
                 keys.append(k)
                 stream_list.append(v)
@@ -112,10 +112,10 @@ class MultiStream:
             self._streams = stream_list
         elif isinstance(streams, (list, tuple)):
             for i, s in enumerate(streams):
-                if not isinstance(s, Stream):
+                if not isinstance(s, (Stream, MultiStream)):
                     raise TypeError(
-                        f"Element {i} is not a Stream (got {type(s).__name__}). "
-                        f"All elements must be Stream instances."
+                        f"Element {i} is not a Stream or MultiStream (got {type(s).__name__}). "
+                        f"All elements must be Stream or MultiStream instances."
                     )
             self._keys = None
             self._streams = list(streams)
@@ -320,6 +320,11 @@ class MultiStream:
                 "union() needs at least one other stream to merge with. "
                 "Usage: ms.union(other) or ms.union(a, b, ...)"
             )
+        if any(isinstance(s, MultiStream) for s in self._streams):
+            raise TypeError(
+                "union() on nested MultiStream is not yet supported. "
+                "Iterate and call union on each inner MultiStream individually."
+            )
         args = [_as_streams(self)] + [_as_streams(o) for o in others]
         keys = _check_keys(args)
         if keys is not None:
@@ -338,6 +343,11 @@ class MultiStream:
             raise ValueError(
                 "combine_latest() needs at least one other stream. "
                 "Usage: ms.combine_latest(other) or ms.combine_latest(a, b, emit_on=c)"
+            )
+        if any(isinstance(s, MultiStream) for s in self._streams):
+            raise TypeError(
+                "combine_latest() on nested MultiStream is not yet supported. "
+                "Iterate and call combine_latest on each inner MultiStream individually."
             )
         args = [_as_streams(self)] + [_as_streams(o) for o in others]
         keys = _check_keys(args)
@@ -387,6 +397,11 @@ class MultiStream:
             raise ValueError(
                 "zip() needs at least one other stream to pair with. "
                 "Usage: ms.zip(other) or ms.zip(a, b, ...)"
+            )
+        if any(isinstance(s, MultiStream) for s in self._streams):
+            raise TypeError(
+                "zip() on nested MultiStream is not yet supported. "
+                "Iterate and call zip on each inner MultiStream individually."
             )
         args = [_as_streams(self)] + [_as_streams(o) for o in others]
         keys = _check_keys(args)
