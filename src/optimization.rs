@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::builtin::{
-    detect_builtin_for_logic, detect_emit_target_from_func, detect_flush_target_from_func,
-    extract_vectorcall_for_logic,
+    cache_secondary_vectorcalls, detect_builtin_for_logic, detect_emit_target_from_func,
+    detect_flush_target_from_func, extract_vectorcall_for_logic,
 };
 use crate::node::{ChainNode, NodeLogic};
 use crate::{Stream, StreamPtr};
@@ -409,6 +409,7 @@ impl Stream {
 
             // 4. Cache vectorcall pointer (must come after builtin detection for unwrap)
             node.cached_vectorcall = extract_vectorcall_for_logic(py, &node.logic);
+            cache_secondary_vectorcalls(&mut node.logic);
         }
     }
 

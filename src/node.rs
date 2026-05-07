@@ -89,6 +89,19 @@ pub enum NodeLogic {
         /// Empty when Collect was a direct downstream of the branch point.
         pre_buffer_chain: Vec<ChainNode>,
     },
+    /// Extracts items between two delimiter predicates.
+    /// State machine: Outside state waits for `open` predicate, Inside state
+    /// buffers items until `close` predicate, then emits buffer as a tuple.
+    /// Flush discards an incomplete chunk and returns to the Outside state.
+    ExtractBetween {
+        buffer: Vec<Py<PyAny>>,
+        open: Py<PyAny>,
+        close: Py<PyAny>,
+        inside: bool,
+        /// Vectorcall pointer for `close`. The node's `cached_vectorcall`
+        /// belongs to `open`, and the two may be different callable types.
+        close_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
+    },
 }
 
 /// A single step in a compiled chain, holding the extracted NodeLogic

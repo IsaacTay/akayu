@@ -163,6 +163,27 @@ class MultiStream:
             return MultiStream(result)
         return result
 
+    def __setitem__(self, key, value):
+        if not isinstance(value, (Stream, MultiStream)):
+            raise TypeError(
+                f"Cannot assign {type(value).__name__} to MultiStream. "
+                f"Expected Stream or MultiStream."
+            )
+        if isinstance(key, str):
+            if self._keys is None:
+                raise TypeError(
+                    f"Cannot use string key '{key}' on a list-backed MultiStream."
+                )
+            try:
+                idx = self._keys.index(key)
+            except ValueError:
+                self._keys = self._keys + (key,)
+                self._streams.append(value)
+            else:
+                self._streams[idx] = value
+        else:
+            self._streams[key] = value
+
     def __repr__(self):
         if self._keys is not None:
             return f"MultiStream({{{', '.join(repr(k) for k in self._keys)}}})"
@@ -266,6 +287,12 @@ class MultiStream:
     def chunk_by(self, predicate, *, include_delimiter=False, stream_name=None, **kwargs):
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [s.chunk_by(predicate, include_delimiter=include_delimiter, stream_name=stream_name, **kwargs) for s in self._streams]
+        ms._keys = self._keys
+        return ms
+
+    def chunks_between(self, open, close, *, stream_name=None, **kwargs):
+        ms = MultiStream.__new__(MultiStream)
+        ms._streams = [s.chunks_between(open, close, stream_name=stream_name, **kwargs) for s in self._streams]
         ms._keys = self._keys
         return ms
 

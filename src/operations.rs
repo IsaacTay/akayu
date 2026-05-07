@@ -706,6 +706,90 @@ impl Stream {
         Ok(node)
     }
 
+    /// Extract items between two delimiter predicates.
+    ///
+    /// State machine that buffers items between `open` and `close` delimiters.
+    /// When `open` returns True, transitions to Inside state and starts buffering.
+    /// When `close` returns True in Inside state, emits the buffer as a tuple
+    /// and transitions back to Outside state. The delimiters themselves are
+    /// NOT included in the emitted tuple.
+    ///
+    /// Only `open` is called while Outside and only `close` while Inside, so
+    /// a stray `close` Outside or a stray `open` Inside is ignored, and the
+    /// same predicate can serve as both delimiters (e.g. quotes).
+    ///
+    /// `flush()`/`drain()` discard an incomplete chunk, return to the Outside
+    /// state, and continue on to downstream nodes.
+    ///
+    /// # Arguments
+    ///
+    /// * `open` - Predicate that returns True for the opening delimiter.
+    /// * `close` - Predicate that returns True for the closing delimiter.
+    ///
+    /// # Returns
+    ///
+    /// A new Stream emitting tuples of extracted items.
+    ///
+    /// # Examples
+    ///
+    /// Extract content between `[` and `]`:
+    ///
+    /// ```python
+    /// import akayu
+    /// source = akayu.Stream()
+    /// content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    /// results = []
+    /// content.sink(results.append)
+    /// for ch in "abc[def]ghi[jkl]mno":
+    ///     source.emit(ch)
+    /// source.flush()
+    /// # results == [('d', 'e', 'f'), ('j', 'k', 'l')]
+    /// ```
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` - If the stream graph is already compiled.
+    #[pyo3(signature = (open, close, *, stream_name=None))]
+    pub fn chunks_between(
+        slf: &Bound<'_, Self>,
+        py: Python,
+        open: Py<PyAny>,
+        close: Py<PyAny>,
+        stream_name: Option<String>,
+    ) -> PyResult<Py<Self>> {
+        let mut this = slf.borrow_mut();
+        check_not_compiled(this.compiled, &this.name)?;
+        let open_name = get_func_name(py, &open);
+        let close_name = get_func_name(py, &close);
+        let source_location = capture_source_location(py);
+        let func_is_sync = true;
+
+        let name = resolve_stream_name(
+            stream_name,
+            "chunks_between",
+            Some(&format!("{}, {}", open_name.as_deref().unwrap_or("?"), close_name.as_deref().unwrap_or("?"))),
+        );
+
+        let node = Self::make_node(
+            py,
+            NodeLogic::ExtractBetween {
+                buffer: Vec::new(),
+                open,
+                close,
+                inside: false,
+                close_vectorcall: None,
+            },
+            name,
+            source_location,
+            func_is_sync,
+        )?;
+        this.downstreams.push(node.clone_ref(py));
+        let self_py = slf.clone().unbind();
+        drop(this);
+        node.borrow(py).parents.lock().unwrap().push(self_py);
+        Ok(node)
+    }
+
     /// Flush collected elements downstream.
     ///
     /// For `collect()` nodes, emits all buffered elements as a tuple
@@ -761,6 +845,7 @@ impl Stream {
             self.logic,
             NodeLogic::Collect { .. }
                 | NodeLogic::ChunkBy { .. }
+                | NodeLogic::ExtractBetween { .. }
                 | NodeLogic::PrefetchMap { .. }
                 | NodeLogic::PrefetchFilter { .. }
                 | NodeLogic::PrefetchBatchMap { .. }
@@ -793,6 +878,11 @@ impl Stream {
                     }
                 }
             }
+            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+                // Discard the incomplete chunk and return to the outside state
+                buffer.clear();
+                *inside = false;
+            }
             NodeLogic::PrefetchMap { state, .. }
             | NodeLogic::PrefetchFilter { state, .. }
             | NodeLogic::PrefetchBatchMap { state, .. } => {
@@ -816,6 +906,8 @@ impl Stream {
         // flush would prematurely drain downstream collects before they've had
         // a chance to accumulate items from multiple flushes.
         // Prefetch nodes DO propagate so their drained results flow onward.
+        // ExtractBetween also propagates: it discards rather than emits on
+        // flush, so stopping here would silently swallow the flush.
         let should_propagate = !matches!(
             self.logic,
             NodeLogic::Collect { .. } | NodeLogic::ChunkBy { .. }
@@ -907,6 +999,11 @@ impl Stream {
                         futures.push(f);
                     }
                 }
+            }
+            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+                // Discard the incomplete chunk and return to the outside state
+                buffer.clear();
+                *inside = false;
             }
             NodeLogic::PrefetchMap { state, .. }
             | NodeLogic::PrefetchFilter { state, .. }
