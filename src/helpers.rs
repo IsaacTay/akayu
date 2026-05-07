@@ -168,7 +168,7 @@ pub(crate) fn wrap_error<T>(
 ) -> PyResult<T> {
     res.map_err(|e| {
         let is_akayu_err = e.get_type(py).is_subclass_of::<pyo3::exceptions::PyRuntimeError>().unwrap_or(false)
-            && e.value(py).repr().ok().map_or(false, |r| {
+            && e.value(py).repr().ok().is_some_and(|r| {
                 r.to_string().contains("Stream operation failed at node")
             });
         if is_akayu_err {
@@ -395,7 +395,7 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
                     Ok(0) | Err(_) => break, // EOF or error
                     Ok(_) => {
                         let text = line_buf.trim_end_matches('\n');
-                        if let Ok(mut s) = stream_clone.try_borrow_mut(py) {
+                        if let Ok(s) = stream_clone.try_borrow_mut(py) {
                             let py_str = PyString::new(py, text);
                             let _ = s.emit(py, py_str.into());
                         }
