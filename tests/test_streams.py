@@ -25,11 +25,11 @@ class TestMultiStreamConstruction:
             MultiStream([Stream(), 42])
 
     def test_rejects_non_sequence(self):
-        with pytest.raises(TypeError, match="list or tuple"):
+        with pytest.raises(TypeError, match="dict, list, or tuple"):
             MultiStream(42)
 
     def test_rejects_single_stream(self):
-        with pytest.raises(TypeError, match="list or tuple"):
+        with pytest.raises(TypeError, match="dict, list, or tuple"):
             MultiStream(Stream())
 
 
@@ -343,15 +343,17 @@ class TestUnsupported:
         with pytest.raises(AttributeError, match="does not support"):
             ss.emit(1)
 
-    def test_prefetch_raises(self):
+    def test_prefetch_works(self):
         ss = MultiStream(_sources(1))
-        with pytest.raises(AttributeError, match="does not support"):
-            ss.prefetch(10)
+        result = ss.prefetch(4)
+        assert isinstance(result, MultiStream)
+        assert len(result) == 1
 
-    def test_par_raises(self):
+    def test_par_works(self):
         ss = MultiStream(_sources(1))
-        with pytest.raises(AttributeError, match="does not support"):
-            ss.par()
+        result = ss.par()
+        assert isinstance(result, MultiStream)
+        assert len(result) == 1
 
     def test_unknown_attr_raises(self):
         ss = MultiStream(_sources(1))
@@ -519,4 +521,448 @@ class TestMultiStreamStreamName:
         ms = MultiStream(srcs)
         result = ms.map(boom, stream_name="solo")
         self._check_names_via_error(result, "solo")
+
+
+def _dict_sources(keys):
+    return {k: Stream() for k in keys}
+
+
+class TestDictModeConstruction:
+    def test_from_dict(self):
+        sources = _dict_sources(["a", "b", "c"])
+        ms = MultiStream(sources)
+        assert len(ms) == 3
+        assert ms.keyed
+
+    def test_empty_dict(self):
+        ms = MultiStream({})
+        assert len(ms) == 0
+        assert ms.keyed
+
+    def test_single_entry(self):
+        ms = MultiStream({"x": Stream()})
+        assert len(ms) == 1
+
+    def test_rejects_non_stream_value(self):
+        with pytest.raises(TypeError, match="Value for key 'bad'"):
+            MultiStream({"good": Stream(), "bad": 42})
+
+    def test_list_mode_not_keyed(self):
+        ms = MultiStream([Stream(), Stream()])
+        assert not ms.keyed
+
+
+class TestDictModeAccess:
+    def test_getitem_string_key(self):
+        sources = _dict_sources(["temp", "humid"])
+        ms = MultiStream(sources)
+        assert ms["temp"] is sources["temp"]
+        assert ms["humid"] is sources["humid"]
+
+    def test_getitem_missing_key(self):
+        ms = MultiStream(_dict_sources(["a"]))
+        with pytest.raises(KeyError):
+            ms["z"]
+
+    def test_string_key_on_list_mode_raises(self):
+        ms = MultiStream([Stream()])
+        with pytest.raises(TypeError, match="string key"):
+            ms["a"]
+
+    def test_getitem_int_still_works(self):
+        sources = _dict_sources(["x", "y"])
+        ms = MultiStream(sources)
+        assert ms[0] is sources["x"]
+        assert ms[1] is sources["y"]
+
+    def test_repr_dict_mode(self):
+        ms = MultiStream({"a": Stream(), "b": Stream()})
+        assert repr(ms) == "MultiStream({'a', 'b'})"
+
+    def test_repr_list_mode(self):
+        ms = MultiStream([Stream(), Stream()])
+        assert repr(ms) == "MultiStream(2)"
+
+
+class TestDictModeDictLike:
+    def test_keys(self):
+        ms = MultiStream(_dict_sources(["a", "b", "c"]))
+        assert list(ms.keys()) == ["a", "b", "c"]
+
+    def test_values(self):
+        sources = _dict_sources(["x", "y"])
+        ms = MultiStream(sources)
+        assert list(ms.values()) == [sources["x"], sources["y"]]
+
+    def test_items(self):
+        sources = _dict_sources(["p", "q"])
+        ms = MultiStream(sources)
+        assert list(ms.items()) == [("p", sources["p"]), ("q", sources["q"])]
+
+    def test_to_dict(self):
+        sources = _dict_sources(["a", "b"])
+        ms = MultiStream(sources)
+        assert ms.to_dict() == sources
+
+    def test_keys_on_list_mode_raises(self):
+        ms = MultiStream([Stream()])
+        with pytest.raises(TypeError, match="dict-backed"):
+            ms.keys()
+
+    def test_items_on_list_mode_raises(self):
+        ms = MultiStream([Stream()])
+        with pytest.raises(TypeError, match="dict-backed"):
+            ms.items()
+
+    def test_to_dict_on_list_mode_raises(self):
+        ms = MultiStream([Stream()])
+        with pytest.raises(TypeError, match="dict-backed"):
+            ms.to_dict()
+
+    def test_iter_yields_streams(self):
+        sources = _dict_sources(["a", "b"])
+        ms = MultiStream(sources)
+        assert list(ms) == [sources["a"], sources["b"]]
+
+
+class TestDictModeTransforms:
+    def test_map(self):
+        sources = _dict_sources(["a", "b"])
+        ms = MultiStream(sources)
+        result = ms.map(lambda x: x * 2)
+        assert result.keyed
+        lists = result.to_list()
+        sources["a"].emit(1)
+        sources["b"].emit(10)
+        sources["a"].flush()
+        sources["b"].flush()
+        assert list(lists["a"]) == [2]
+        assert list(lists["b"]) == [20]
+
+    def test_filter(self):
+        sources = _dict_sources(["x", "y"])
+        ms = MultiStream(sources)
+        result = ms.filter(lambda x: x > 0)
+        assert result.keyed
+        lists = result.to_list()
+        sources["x"].emit(-1)
+        sources["x"].emit(5)
+        sources["y"].emit(0)
+        sources["y"].emit(10)
+        sources["x"].flush()
+        sources["y"].flush()
+        assert list(lists["x"]) == [5]
+        assert list(lists["y"]) == [10]
+
+    def test_chaining_preserves_keys(self):
+        sources = _dict_sources(["a", "b", "c"])
+        result = (
+            MultiStream(sources)
+            .map(lambda x: x * 2)
+            .filter(lambda x: x > 5)
+        )
+        assert result.keyed
+        assert list(result.keys()) == ["a", "b", "c"]
+
+    def test_accumulate(self):
+        sources = _dict_sources(["s"])
+        ms = MultiStream(sources)
+        result = ms.accumulate(lambda acc, x: acc + x, start=0)
+        assert result.keyed
+        lists = result.to_list()
+        sources["s"].emit(1)
+        sources["s"].emit(2)
+        sources["s"].emit(3)
+        sources["s"].flush()
+        assert list(lists["s"]) == [1, 3, 6]
+
+    def test_collect(self):
+        sources = _dict_sources(["a", "b"])
+        ms = MultiStream(sources)
+        collected = ms.collect()
+        assert collected.keyed
+        lists = collected.to_list()
+        sources["a"].emit(1)
+        sources["a"].emit(2)
+        sources["b"].emit(10)
+        ms.flush()
+        assert list(lists["a"]) == [(1, 2)]
+        assert list(lists["b"]) == [(10,)]
+
+    def test_flatten(self):
+        sources = _dict_sources(["a"])
+        ms = MultiStream(sources)
+        result = ms.flatten()
+        assert result.keyed
+        lists = result.to_list()
+        sources["a"].emit([1, 2, 3])
+        sources["a"].flush()
+        assert list(lists["a"]) == [1, 2, 3]
+
+
+class TestDictModeCollectors:
+    def test_to_list_returns_dict(self):
+        sources = _dict_sources(["x", "y"])
+        ms = MultiStream(sources)
+        result = ms.map(lambda x: x + 1).to_list()
+        assert isinstance(result, dict)
+        assert "x" in result
+        assert "y" in result
+
+    def test_to_set_returns_dict(self):
+        sources = _dict_sources(["a"])
+        ms = MultiStream(sources)
+        result = ms.to_set()
+        assert isinstance(result, dict)
+        sources["a"].emit(1)
+        sources["a"].emit(2)
+        sources["a"].emit(1)
+        sources["a"].flush()
+        assert result["a"] == {1, 2}
+
+    def test_list_mode_to_list_returns_list(self):
+        ms = MultiStream([Stream(), Stream()])
+        result = ms.to_list()
+        assert isinstance(result, list)
+
+
+class TestDictModeActions:
+    def test_compile_returns_self(self):
+        sources = _dict_sources(["a", "b"])
+        ms = MultiStream(sources).map(lambda x: x).sink(lambda _: None)
+        compiled = MultiStream(sources).map(lambda x: x).sink(lambda _: None).compile()
+        assert isinstance(compiled, MultiStream)
+        assert compiled.keyed
+
+    def test_flush(self):
+        sources = _dict_sources(["a"])
+        collected = MultiStream(sources).collect()
+        lists = collected.to_list()
+        sources["a"].emit(1)
+        sources["a"].emit(2)
+        collected.flush()
+        assert list(lists["a"]) == [(1, 2)]
+
+    def test_drain(self):
+        sources = _dict_sources(["a"])
+        collected = MultiStream(sources).collect()
+        lists = collected.to_list()
+        sources["a"].emit(1)
+        collected.drain()
+        assert list(lists["a"]) == [(1,)]
+
+
+class TestDictModeSlicing:
+    def test_slice_preserves_keys(self):
+        sources = _dict_sources(["a", "b", "c", "d"])
+        ms = MultiStream(sources)
+        sliced = ms[1:3]
+        assert isinstance(sliced, MultiStream)
+        assert sliced.keyed
+        assert list(sliced.keys()) == ["b", "c"]
+        assert len(sliced) == 2
+
+    def test_step_slice(self):
+        sources = _dict_sources(["a", "b", "c", "d", "e"])
+        ms = MultiStream(sources)
+        stepped = ms[::2]
+        assert isinstance(stepped, MultiStream)
+        assert stepped.keyed
+        assert list(stepped.keys()) == ["a", "c", "e"]
+
+
+class TestDictModeCombinators:
+    def test_union_preserves_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = a.union(b)
+        assert isinstance(result, MultiStream)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_combine_latest_preserves_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = a.combine_latest(b)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_zip_preserves_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = a.zip(b)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_union_mismatched_keys_raises(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["a", "b"]))
+        with pytest.raises(ValueError, match="Key mismatch"):
+            a.union(b)
+
+    def test_union_list_mode_stays_list(self):
+        a = MultiStream([Stream(), Stream()])
+        b = MultiStream([Stream(), Stream()])
+        result = a.union(b)
+        assert not result.keyed
+
+    def test_union_mixed_dict_list_raises(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream([Stream(), Stream()])
+        with pytest.raises(TypeError, match="dict-backed.*list-backed"):
+            a.union(b)
+
+    def test_union_dict_with_plain_stream_broadcasts(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = Stream()
+        result = a.union(b)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_combine_latest_emit_on_preserves_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = a.combine_latest(b, emit_on=a)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_combine_latest_emit_on_mismatched_raises(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        c = MultiStream(_dict_sources(["p", "q"]))
+        with pytest.raises(ValueError, match="Key mismatch"):
+            a.combine_latest(b, emit_on=c)
+
+    def test_union_produces_correct_data(self):
+        a_src = _dict_sources(["x", "y"])
+        b_src = _dict_sources(["x", "y"])
+        a = MultiStream(a_src).map(lambda v: f"a{v}")
+        b = MultiStream(b_src).map(lambda v: f"b{v}")
+        result = a.union(b)
+        assert result.keyed
+        lists = result.to_list()
+        a_src["x"].emit(1)
+        a_src["y"].emit(2)
+        b_src["x"].emit(10)
+        b_src["y"].emit(20)
+        assert sorted(list(lists["x"])) == ["a1", "b10"]
+        assert sorted(list(lists["y"])) == ["a2", "b20"]
+
+    def test_zip_produces_correct_data(self):
+        a_src = _dict_sources(["temp", "humid"])
+        b_src = _dict_sources(["temp", "humid"])
+        a = MultiStream(a_src).map(lambda v: ("A", v))
+        b = MultiStream(b_src).map(lambda v: ("B", v))
+        result = a.zip(b)
+        assert result.keyed
+        lists = result.to_list()
+        a_src["temp"].emit(22)
+        b_src["temp"].emit(65)
+        a_src["humid"].emit(30)
+        b_src["humid"].emit(70)
+        assert list(lists["temp"]) == [(("A", 22), ("B", 65))]
+        assert list(lists["humid"]) == [(("A", 30), ("B", 70))]
+
+
+class TestDictModeExpand:
+    def test_expand_dict_mode_loses_keys(self):
+        ms = MultiStream({"a": Stream()})
+        expanded = ms._expand(3)
+        assert not expanded.keyed
+        assert len(expanded) == 3
+
+
+class TestDictModeRealWorld:
+    def test_sensor_pipeline(self):
+        sensors = {"temp": Stream(), "humid": Stream(), "pressure": Stream()}
+        ms = MultiStream(sensors)
+
+        alarms = ms.filter(lambda v: v > 100).to_list()
+
+        sensors["temp"].emit(50)
+        sensors["humid"].emit(150)
+        sensors["pressure"].emit(200)
+        sensors["temp"].emit(120)
+
+        assert list(alarms["temp"]) == [120]
+        assert list(alarms["humid"]) == [150]
+        assert list(alarms["pressure"]) == [200]
+
+    def test_collect_flush_dict(self):
+        sources = {"a": Stream(), "b": Stream()}
+        ms = MultiStream(sources)
+        collected = ms.collect()
+        results = collected.to_list()
+
+        sources["a"].emit(1)
+        sources["a"].emit(2)
+        sources["b"].emit(10)
+        ms.flush()
+
+        assert isinstance(results, dict)
+        assert list(results["a"]) == [(1, 2)]
+        assert list(results["b"]) == [(10,)]
+
+    def test_large_dict(self):
+        keys = [f"s{i}" for i in range(50)]
+        sources = {k: Stream() for k in keys}
+        ms = MultiStream(sources)
+        results = ms.map(lambda x: x + 1).to_list()
+
+        for k in keys:
+            sources[k].emit(int(k[1:]))
+
+        for k in keys:
+            assert list(results[k]) == [int(k[1:]) + 1]
+
+
+class TestModuleLevelDictCombinators:
+    def test_union_dict_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = akayu.union(a, b)
+        assert result.keyed
+        assert list(result.keys()) == ["x", "y"]
+
+    def test_combine_latest_dict_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = akayu.combine_latest(a, b)
+        assert result.keyed
+
+    def test_zip_dict_keys(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["x", "y"]))
+        result = akayu.zip(a, b)
+        assert result.keyed
+
+    def test_union_dict_mismatched_raises(self):
+        a = MultiStream(_dict_sources(["x", "y"]))
+        b = MultiStream(_dict_sources(["a", "b"]))
+        with pytest.raises(ValueError, match="Key mismatch"):
+            akayu.union(a, b)
+
+
+class TestMultiStreamProfile:
+    def test_profile_list_mode(self):
+        a = Stream()
+        b = Stream()
+        a.map(lambda x: x * 2).sink(lambda x: None)
+        b.map(lambda x: x + 1).sink(lambda x: None)
+        ms = MultiStream([a, b])
+        profilers = ms.profile()
+        assert isinstance(profilers, list)
+        assert len(profilers) == 2
+
+    def test_profile_dict_mode(self):
+        sources = _dict_sources(["temp", "humid"])
+        ms = MultiStream(sources)
+        for s in ms:
+            s.map(lambda x: x).sink(lambda x: None)
+        profilers = ms.profile()
+        assert isinstance(profilers, dict)
+        assert set(profilers.keys()) == {"temp", "humid"}
+        with profilers["temp"]:
+            sources["temp"].emit(42)
+        assert profilers["temp"].report is not None
 
