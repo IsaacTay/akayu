@@ -12,6 +12,76 @@ _NOISE_OPCODES = frozenset({
     'RESUME', 'COPY_FREE_VARS', 'NOP', 'CACHE', 'PUSH_NULL', 'PRECALL', 'TO_BOOL',
 })
 
+# --- Fast bytecode extractor ---
+# Pre-built lookup tables for custom bytecode parsing.
+# Replaces dis.get_instructions() (~35µs) with direct byte reading (~2µs)
+# by avoiding Instruction namedtuple creation and inline cache traversal overhead.
+
+_OP_NAME = {v: k for k, v in dis.opmap.items()}  # opcode int -> name string
+_OP_CACHE = {}  # opcode int -> inline cache entry count
+for _on, _oc in dis._inline_cache_entries.items():
+    if _on in dis.opmap:
+        _OP_CACHE[dis.opmap[_on]] = _oc
+
+try:
+    import _opcode as _opcode_mod
+    _NB_OPS = _opcode_mod.get_nb_ops()  # [(name, symbol), ...]
+except (ImportError, AttributeError):
+    _NB_OPS = []
+
+_CMP_OP = dis.cmp_op  # ('<', '<=', '==', '!=', '>', '>=')
+
+
+def _fast_extract(co):
+    """Extract (opname, argval) pairs from a code object, ~19x faster than dis.
+
+    Reads raw co_code bytes directly, resolves argvals inline, filters noise
+    opcodes and RETURN_VALUE. Returns a list of (opname_str, argval) tuples
+    suitable for _analyze_simple/_analyze_compound pattern matching.
+    """
+    raw = co.co_code
+    consts = co.co_consts
+    names = co.co_names
+    varnames = co.co_varnames
+    result = []
+    j = 0
+    n = len(raw)
+    while j < n:
+        op = raw[j]
+        arg = raw[j + 1]
+        offset = j  # byte offset of this instruction
+        j += 2
+        name = _OP_NAME.get(op)
+        caches = _OP_CACHE.get(op, 0)
+        j += caches * 2  # skip inline cache entries
+        if name is None or name in _NOISE_OPCODES or name == 'RETURN_VALUE':
+            continue
+        # Resolve argval based on opcode
+        if name == 'LOAD_CONST':
+            av = consts[arg]
+        elif name in ('LOAD_ATTR', 'LOAD_GLOBAL'):
+            av = names[arg >> 1]
+        elif name == 'COMPARE_OP':
+            av = _CMP_OP[arg >> 5]
+        elif name == 'BINARY_OP':
+            av = _NB_OPS[arg][1] if arg < len(_NB_OPS) else arg
+        elif name in ('CONTAINS_OP', 'IS_OP'):
+            av = arg
+        elif name == 'LOAD_FAST':
+            av = varnames[arg]
+        elif name == 'LOAD_DEREF':
+            # Free variable — resolve name from combined locals table
+            # In 3.13, LOAD_DEREF arg indexes into co_varnames + co_cellvars + co_freevars
+            all_names = co.co_varnames + co.co_cellvars + co.co_freevars
+            av = all_names[arg] if arg < len(all_names) else arg
+        elif name == 'POP_JUMP_IF_FALSE' or name == 'POP_JUMP_IF_TRUE':
+            # Jump target resolution: offset + 2 + arg*2 + cache_size*2
+            av = offset + 2 + arg * 2 + caches * 2
+        else:
+            av = arg
+        result.append((name, av))
+    return result
+
 _EXCEPTION_OPCODES = frozenset({
     'SETUP_FINALLY', 'POP_EXCEPT', 'SETUP_WITH', 'BEFORE_WITH',
     'SETUP_ASYNC_WITH', 'RERAISE', 'PUSH_EXC_INFO',
@@ -32,11 +102,12 @@ _UNRESOLVABLE = object()  # sentinel
 def _resolve_value(instr, func):
     """Resolve a value from an instruction + function context.
 
+    instr is a (opname, argval) tuple from _fast_extract.
     Returns the resolved Python object, or _UNRESOLVABLE sentinel.
     """
-    op = instr.opname
+    op = instr[0]
     if op == 'LOAD_CONST':
-        return instr.argval
+        return instr[1]
     if op == 'LOAD_DEREF':
         # Closure variable — snapshot at compile time
         closure = getattr(func, '__closure__', None)
@@ -45,7 +116,7 @@ def _resolve_value(instr, func):
         # Find the index of this free var
         code = func.__code__
         free = code.co_cellvars + code.co_freevars
-        name = instr.argval
+        name = instr[1]
         if name in free:
             idx = free.index(name)
             if idx < len(closure):
@@ -55,7 +126,7 @@ def _resolve_value(instr, func):
                     return _UNRESOLVABLE
         return _UNRESOLVABLE
     if op == 'LOAD_GLOBAL':
-        name = instr.argval
+        name = instr[1]
         if name in _KNOWN_BUILTINS:
             return _KNOWN_BUILTINS[name]
         # Try resolving from func's globals for non-builtins (arbitrary callables)
@@ -67,16 +138,28 @@ def _resolve_value(instr, func):
 
 
 def _clean_instructions(func):
-    """Get cleaned instruction list: no noise opcodes, no RETURN_VALUE suffix."""
-    try:
-        instrs = list(dis.get_instructions(func))
-    except TypeError:
+    """Get cleaned instruction list: no noise opcodes, no RETURN_VALUE suffix.
+
+    Uses _fast_extract for ~19x faster bytecode reading than dis.get_instructions.
+    Returns a list of (opname, argval) tuples instead of Instruction namedtuples.
+    Falls back to dis.get_instructions() if _fast_extract fails.
+    """
+    code = getattr(func, '__code__', None)
+    if code is None:
         return None
-    clean = [i for i in instrs if i.opname not in _NOISE_OPCODES]
-    # Strip trailing RETURN_VALUE(s)
-    while clean and clean[-1].opname == 'RETURN_VALUE':
-        clean.pop()
-    return clean
+    try:
+        return _fast_extract(code)
+    except Exception:
+        # Fallback for edge cases (e.g. unusual code objects)
+        try:
+            instrs = list(dis.get_instructions(func))
+        except TypeError:
+            return None
+        clean = [i for i in instrs if i.opname not in _NOISE_OPCODES]
+        while clean and clean[-1].opname == 'RETURN_VALUE':
+            clean.pop()
+        # Convert to tuple format for compatibility
+        return [(i.opname, i.argval) for i in clean]
 
 
 def _analyze_simple(instrs, func):
@@ -93,8 +176,8 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x.attr  (AttrGetter)
     # LOAD_FAST, LOAD_ATTR(name), where LOAD_ATTR is NOT a method load
-    if n == 2 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'LOAD_ATTR':
-        attr_name = instrs[1].argval
+    if n == 2 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR':
+        attr_name = instrs[1][1]
         # In 3.12+, LOAD_ATTR can be used for method lookup (argval may have extra info)
         # If it's a method load, the next instruction would be CALL — but we only have 2 instrs
         # so this is a plain attribute access
@@ -102,20 +185,20 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x[k]  (ItemGetter)
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(k), BINARY_SUBSCR
-    if n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'BINARY_SUBSCR':
+    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_SUBSCR':
         key = _resolve_value(instrs[1], func)
         if key is not _UNRESOLVABLE:
             return ("itemgetter", key)
 
     # lambda x: not x
     # LOAD_FAST, UNARY_NOT
-    if n == 2 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'UNARY_NOT':
+    if n == 2 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'UNARY_NOT':
         return ("not",)
 
     # lambda x: <builtin>(x) — len, str, int, float, bool
     # LOAD_GLOBAL(name), LOAD_FAST, CALL 1
-    if (n == 3 and instrs[0].opname == 'LOAD_GLOBAL' and instrs[1].opname == 'LOAD_FAST'
-            and instrs[2].opname == 'CALL'):
+    if (n == 3 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
+            and instrs[2][0] == 'CALL'):
         resolved = _resolve_value(instrs[0], func)
         if resolved is _builtins.len:
             return ("len",)
@@ -143,8 +226,8 @@ def _analyze_simple(instrs, func):
 
     # lambda x: isinstance(x, T)
     # LOAD_GLOBAL(isinstance), LOAD_FAST, LOAD_GLOBAL/LOAD_DEREF/LOAD_CONST(T), CALL 2
-    if (n == 4 and instrs[0].opname == 'LOAD_GLOBAL' and instrs[1].opname == 'LOAD_FAST'
-            and instrs[3].opname == 'CALL'):
+    if (n == 4 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
+            and instrs[3][0] == 'CALL'):
         resolved_func = _resolve_value(instrs[0], func)
         if resolved_func is _builtins.isinstance:
             type_obj = _resolve_value(instrs[2], func)
@@ -157,63 +240,63 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x is <value>
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), IS_OP(0)
-    if n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'IS_OP':
+    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'IS_OP':
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
-            if instrs[2].argval == 0:  # is
+            if instrs[2][1] == 0:  # is
                 return ("is", val)
             else:  # is not
                 return ("is_not", val)
 
     # --- Comparison: lambda x: x > 0 ---
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), COMPARE_OP(op)
-    if n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'COMPARE_OP':
+    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'COMPARE_OP':
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
-            op_name = instrs[2].argval
+            op_name = instrs[2][1]
             if op_name in ('==', '!=', '<', '>', '<=', '>='):
                 return ("compare", op_name, val)
 
     # --- BinOp: lambda x: x + 1 ---
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), BINARY_OP(op)
-    if n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'BINARY_OP':
+    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_OP':
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
-            op_name = instrs[2].argval
+            op_name = instrs[2][1]
             if op_name in ('+', '-', '*', '/', '//', '%', '**'):
                 return ("binop", op_name, val)
 
     # --- Contains: lambda x: x in collection ---
     # LOAD_FAST, LOAD_DEREF/LOAD_CONST/LOAD_GLOBAL(coll), CONTAINS_OP
-    if n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'CONTAINS_OP':
+    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'CONTAINS_OP':
         coll = _resolve_value(instrs[1], func)
         if coll is not _UNRESOLVABLE:
-            if instrs[2].argval == 0:
+            if instrs[2][1] == 0:
                 return ("contains", coll)
             else:
                 return ("not_contains", coll)
 
     # --- Method call with 0 args: lambda x: x.strip() ---
     # LOAD_FAST, LOAD_ATTR(method), CALL 0
-    if (n == 3 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'LOAD_ATTR'
-            and instrs[2].opname == 'CALL'):
-        method_name = instrs[1].argval
+    if (n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
+            and instrs[2][0] == 'CALL'):
+        method_name = instrs[1][1]
         return ("method0", method_name)
 
     # --- Method call with 1 arg: lambda x: x.startswith('foo') ---
     # LOAD_FAST, LOAD_ATTR(method), LOAD_CONST/LOAD_DEREF(arg), CALL 1
-    if (n == 4 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'LOAD_ATTR'
-            and instrs[3].opname == 'CALL'):
-        method_name = instrs[1].argval
+    if (n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
+            and instrs[3][0] == 'CALL'):
+        method_name = instrs[1][1]
         arg = _resolve_value(instrs[2], func)
         if arg is not _UNRESOLVABLE:
             return ("method1", method_name, arg)
 
     # --- Method call with 2 args: lambda x: x.replace('a', 'b') ---
     # LOAD_FAST, LOAD_ATTR(method), LOAD_CONST/LOAD_DEREF(arg1), LOAD_CONST/LOAD_DEREF(arg2), CALL 2
-    if (n == 5 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'LOAD_ATTR'
-            and instrs[4].opname == 'CALL'):
-        method_name = instrs[1].argval
+    if (n == 5 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
+            and instrs[4][0] == 'CALL'):
+        method_name = instrs[1][1]
         arg1 = _resolve_value(instrs[2], func)
         arg2 = _resolve_value(instrs[3], func)
         if arg1 is not _UNRESOLVABLE and arg2 is not _UNRESOLVABLE:
@@ -222,26 +305,26 @@ def _analyze_simple(instrs, func):
     # --- Side-effect method call on closure/global: lambda _: obj.method() ---
     # LOAD_DEREF/LOAD_GLOBAL(obj), LOAD_ATTR(method), CALL 0
     # x (LOAD_FAST) is never referenced — the lambda ignores its argument.
-    if (n == 3 and instrs[0].opname in ('LOAD_DEREF', 'LOAD_GLOBAL')
-            and instrs[1].opname == 'LOAD_ATTR' and instrs[2].opname == 'CALL'):
+    if (n == 3 and instrs[0][0] in ('LOAD_DEREF', 'LOAD_GLOBAL')
+            and instrs[1][0] == 'LOAD_ATTR' and instrs[2][0] == 'CALL'):
         obj = _resolve_value(instrs[0], func)
         if obj is not _UNRESOLVABLE:
-            return ("call_method0", obj, instrs[1].argval)
+            return ("call_method0", obj, instrs[1][1])
 
     # --- Side-effect method call passing x: lambda x: obj.method(x) ---
     # LOAD_DEREF/LOAD_GLOBAL(obj), LOAD_ATTR(method), LOAD_FAST(x), CALL 1
     # The lambda's argument is passed directly to the method.
-    if (n == 4 and instrs[0].opname in ('LOAD_DEREF', 'LOAD_GLOBAL')
-            and instrs[1].opname == 'LOAD_ATTR'
-            and instrs[2].opname == 'LOAD_FAST'
-            and instrs[3].opname == 'CALL'):
+    if (n == 4 and instrs[0][0] in ('LOAD_DEREF', 'LOAD_GLOBAL')
+            and instrs[1][0] == 'LOAD_ATTR'
+            and instrs[2][0] == 'LOAD_FAST'
+            and instrs[3][0] == 'CALL'):
         obj = _resolve_value(instrs[0], func)
         if obj is not _UNRESOLVABLE:
-            return ("call_method1", obj, instrs[1].argval)
+            return ("call_method1", obj, instrs[1][1])
 
     # --- Slice: lambda x: x[start:stop] ---
     # LOAD_FAST, LOAD_CONST(start), LOAD_CONST(stop), BINARY_SLICE
-    if n == 4 and instrs[0].opname == 'LOAD_FAST' and instrs[3].opname == 'BINARY_SLICE':
+    if n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[3][0] == 'BINARY_SLICE':
         start = _resolve_value(instrs[1], func)
         stop = _resolve_value(instrs[2], func)
         if start is not _UNRESOLVABLE and stop is not _UNRESOLVABLE:
@@ -252,58 +335,58 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x.attr <op> val  (Chain: AttrGetter → Compare/BinOp/Contains)
     # LOAD_FAST, LOAD_ATTR(name), LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/BINARY_OP/CONTAINS_OP/IS_OP
-    if n == 4 and instrs[0].opname == 'LOAD_FAST' and instrs[1].opname == 'LOAD_ATTR':
-        attr_name = instrs[1].argval
+    if n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR':
+        attr_name = instrs[1][1]
         val = _resolve_value(instrs[2], func)
         if val is not _UNRESOLVABLE:
-            if instrs[3].opname == 'COMPARE_OP':
-                op_name = instrs[3].argval
+            if instrs[3][0] == 'COMPARE_OP':
+                op_name = instrs[3][1]
                 if op_name in ('==', '!=', '<', '>', '<=', '>='):
                     return ("chain", ("attrgetter", attr_name), ("compare", op_name, val))
-            if instrs[3].opname == 'BINARY_OP':
-                op_name = instrs[3].argval
+            if instrs[3][0] == 'BINARY_OP':
+                op_name = instrs[3][1]
                 if op_name in ('+', '-', '*', '/', '//', '%', '**'):
                     return ("chain", ("attrgetter", attr_name), ("binop", op_name, val))
-            if instrs[3].opname == 'CONTAINS_OP':
-                if instrs[3].argval == 0:
+            if instrs[3][0] == 'CONTAINS_OP':
+                if instrs[3][1] == 0:
                     return ("chain", ("attrgetter", attr_name), ("contains", val))
                 else:
                     return ("chain", ("attrgetter", attr_name), ("not_contains", val))
-            if instrs[3].opname == 'IS_OP':
-                if instrs[3].argval == 0:
+            if instrs[3][0] == 'IS_OP':
+                if instrs[3][1] == 0:
                     return ("chain", ("attrgetter", attr_name), ("is", val))
                 else:
                     return ("chain", ("attrgetter", attr_name), ("is_not", val))
 
     # lambda x: x[k] <op> val  (Chain: ItemGetter → Compare/etc.)
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(k), BINARY_SUBSCR, LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/etc.
-    if n == 5 and instrs[0].opname == 'LOAD_FAST' and instrs[2].opname == 'BINARY_SUBSCR':
+    if n == 5 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_SUBSCR':
         key = _resolve_value(instrs[1], func)
         val = _resolve_value(instrs[3], func)
         if key is not _UNRESOLVABLE and val is not _UNRESOLVABLE:
-            if instrs[4].opname == 'COMPARE_OP':
-                op_name = instrs[4].argval
+            if instrs[4][0] == 'COMPARE_OP':
+                op_name = instrs[4][1]
                 if op_name in ('==', '!=', '<', '>', '<=', '>='):
                     return ("chain", ("itemgetter", key), ("compare", op_name, val))
-            if instrs[4].opname == 'BINARY_OP':
-                op_name = instrs[4].argval
+            if instrs[4][0] == 'BINARY_OP':
+                op_name = instrs[4][1]
                 if op_name in ('+', '-', '*', '/', '//', '%', '**'):
                     return ("chain", ("itemgetter", key), ("binop", op_name, val))
-            if instrs[4].opname == 'CONTAINS_OP':
-                if instrs[4].argval == 0:
+            if instrs[4][0] == 'CONTAINS_OP':
+                if instrs[4][1] == 0:
                     return ("chain", ("itemgetter", key), ("contains", val))
                 else:
                     return ("chain", ("itemgetter", key), ("not_contains", val))
-            if instrs[4].opname == 'IS_OP':
-                if instrs[4].argval == 0:
+            if instrs[4][0] == 'IS_OP':
+                if instrs[4][1] == 0:
                     return ("chain", ("itemgetter", key), ("is", val))
                 else:
                     return ("chain", ("itemgetter", key), ("is_not", val))
 
     # lambda x: len(x) > 0 etc.  (Chain: Len → Compare)
     # LOAD_GLOBAL(len), LOAD_FAST, CALL 1, LOAD_CONST(val), COMPARE_OP
-    if (n == 5 and instrs[0].opname == 'LOAD_GLOBAL' and instrs[1].opname == 'LOAD_FAST'
-            and instrs[2].opname == 'CALL'):
+    if (n == 5 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
+            and instrs[2][0] == 'CALL'):
         resolved_func = _resolve_value(instrs[0], func)
         if resolved_func in (
             _builtins.len, _builtins.str, _builtins.int, _builtins.float, _builtins.bool,
@@ -316,34 +399,34 @@ def _analyze_simple(instrs, func):
                     _builtins.float: "float", _builtins.bool: "bool",
                     _builtins.type: "type",
                 }[resolved_func]
-                if instrs[4].opname == 'COMPARE_OP':
-                    op_name = instrs[4].argval
+                if instrs[4][0] == 'COMPARE_OP':
+                    op_name = instrs[4][1]
                     if op_name in ('==', '!=', '<', '>', '<=', '>='):
                         return ("chain", (first_op,), ("compare", op_name, val))
-                if instrs[4].opname == 'BINARY_OP':
-                    op_name = instrs[4].argval
+                if instrs[4][0] == 'BINARY_OP':
+                    op_name = instrs[4][1]
                     if op_name in ('+', '-', '*', '/', '//', '%', '**'):
                         return ("chain", (first_op,), ("binop", op_name, val))
 
     # --- Negate: lambda x: not <expr> ---
     # <expr instrs> + UNARY_NOT
-    if n >= 2 and instrs[-1].opname == 'UNARY_NOT':
+    if n >= 2 and instrs[-1][0] == 'UNARY_NOT':
         inner = _analyze_simple(instrs[:-1], func)
         if inner is not None:
             return ("negate", inner)
 
     # --- Tuple/list construction: (x["a"], x["b"]) or [x.name, x.age] ---
     # Multiple LOAD_FAST + sub-op groups ending with BUILD_TUPLE/BUILD_LIST
-    if n >= 3 and instrs[-1].opname in ('BUILD_TUPLE', 'BUILD_LIST'):
-        count = instrs[-1].argval
+    if n >= 3 and instrs[-1][0] in ('BUILD_TUPLE', 'BUILD_LIST'):
+        count = instrs[-1][1]
         remaining = instrs[:-1]
         groups = []
         pos = 0
         for _ in range(count):
-            if pos >= len(remaining) or remaining[pos].opname != 'LOAD_FAST':
+            if pos >= len(remaining) or remaining[pos][0] != 'LOAD_FAST':
                 break
             end = pos + 1
-            while end < len(remaining) and remaining[end].opname != 'LOAD_FAST':
+            while end < len(remaining) and remaining[end][0] != 'LOAD_FAST':
                 end += 1
             sub = _analyze_simple(remaining[pos:end], func)
             if sub is None:
@@ -351,7 +434,7 @@ def _analyze_simple(instrs, func):
             groups.append(sub)
             pos = end
         if len(groups) == count and pos == len(remaining):
-            tag = "build_tuple" if instrs[-1].opname == 'BUILD_TUPLE' else "build_list"
+            tag = "build_tuple" if instrs[-1][0] == 'BUILD_TUPLE' else "build_list"
             return (tag, *groups)
 
     return None
@@ -371,11 +454,11 @@ def _find_jump_split(instrs):
     best = None
     best_target = -1
     for i, instr in enumerate(instrs):
-        if instr.opname == 'POP_JUMP_IF_FALSE' and instr.argval > best_target:
-            best_target = instr.argval
+        if instr[0] == 'POP_JUMP_IF_FALSE' and instr[1] > best_target:
+            best_target = instr[1]
             best = (i, True)  # `and` short-circuits on False
-        elif instr.opname == 'POP_JUMP_IF_TRUE' and instr.argval > best_target:
-            best_target = instr.argval
+        elif instr[0] == 'POP_JUMP_IF_TRUE' and instr[1] > best_target:
+            best_target = instr[1]
             best = (i, False)  # `or` short-circuits on True
     return best
 
@@ -398,7 +481,7 @@ def _analyze_compound(instrs, func):
     # Find COPY before the jump
     copy_idx = None
     for i in range(jump_idx - 1, -1, -1):
-        if instrs[i].opname == 'COPY':
+        if instrs[i][0] == 'COPY':
             copy_idx = i
             break
     if copy_idx is None:
@@ -408,7 +491,7 @@ def _analyze_compound(instrs, func):
 
     # Right side: everything after POP_TOP (which follows the jump)
     pop_idx = jump_idx + 1
-    if pop_idx >= len(instrs) or instrs[pop_idx].opname != 'POP_TOP':
+    if pop_idx >= len(instrs) or instrs[pop_idx][0] != 'POP_TOP':
         return None
     right_instrs = instrs[pop_idx + 1:]
 
@@ -442,6 +525,17 @@ _CO_ASYNC_GENERATOR = 0x200
 _CO_VARARGS = 0x04
 _CO_VARKEYWORDS = 0x08
 
+# Cache for _analyze_lambda results. Keyed by id(func) — same function object
+# always produces the same result. Entries persist for the process lifetime;
+# in practice this is bounded by the number of unique lambda functions used in
+# stream graphs (typically a few hundred).
+_analysis_cache = {}
+
+# Maximum bytecode length for analyzable patterns.
+# The most complex analyzable pattern (compound and/or with chained sub-expressions)
+# is ~80 bytes. Anything longer is definitely too complex for our pattern matcher.
+_MAX_BYTECODE_LEN = 80
+
 
 def _analyze_lambda(func):
     """Analyze bytecode of a single-arg function to detect optimizable patterns.
@@ -458,40 +552,60 @@ def _analyze_lambda(func):
       ("and", left_tuple, right_tuple), ("or", left_tuple, right_tuple),
       ("unwrap", resolved_callable)
     """
+    # Fast path: return cached result for previously analyzed functions
+    fid = id(func)
+    cached = _analysis_cache.get(fid)
+    if cached is not None:
+        return cached
+
     # Early bail-out: must have __code__
     code = getattr(func, '__code__', None)
     if code is None:
+        _analysis_cache[fid] = None
         return None
 
     # Must be single-arg, no *args/**kwargs
     if code.co_argcount != 1:
+        _analysis_cache[fid] = None
         return None
     flags = code.co_flags
     if flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
+        _analysis_cache[fid] = None
+        return None
+
+    # Pre-filter: reject obviously complex bytecodes before expensive disassembly
+    if len(code.co_code) > _MAX_BYTECODE_LEN:
+        _analysis_cache[fid] = None
         return None
 
     # Get cleaned instructions
     clean = _clean_instructions(func)
     if clean is None:
+        _analysis_cache[fid] = None
         return None
 
     # Complexity guard
     if len(clean) > 25:
+        _analysis_cache[fid] = None
         return None
 
     # Reject multi-statement functions
-    if any(i.opname == 'STORE_FAST' for i in clean):
+    if any(i[0] == 'STORE_FAST' for i in clean):
+        _analysis_cache[fid] = None
         return None
 
     # Reject exception handling
-    if any(i.opname in _EXCEPTION_OPCODES for i in clean):
+    if any(i[0] in _EXCEPTION_OPCODES for i in clean):
+        _analysis_cache[fid] = None
         return None
 
     # Reject multiple LOAD_FAST (references x more than once in non-compound)
     # For compound expressions, each sub-expression can reference x once
     # We'll let the recursive analyzer handle this naturally
 
-    return _analyze_expr(clean, func)
+    result = _analyze_expr(clean, func)
+    _analysis_cache[fid] = result
+    return result
 
 
 def _get_caller_location():
