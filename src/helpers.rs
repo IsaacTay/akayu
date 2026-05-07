@@ -39,6 +39,7 @@ define_py_helper!(
 );
 define_py_helper!(SAFE_UPDATE, get_safe_update);
 define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
+define_py_helper!(STRIP_INTERNAL_FRAMES, get_strip_internal_frames);
 define_py_helper!(CALLER_LOCATION, get_caller_location);
 define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
 define_py_helper!(BUILTIN_LEN, get_builtin_len);
@@ -166,9 +167,18 @@ pub(crate) fn wrap_error<T>(
     source_location: &str,
 ) -> PyResult<T> {
     res.map_err(|e| {
+        let is_akayu_err = e.get_type(py).is_subclass_of::<pyo3::exceptions::PyRuntimeError>().unwrap_or(false)
+            && e.value(py).repr().ok().map_or(false, |r| {
+                r.to_string().contains("Stream operation failed at node")
+            });
+        if is_akayu_err {
+            return e;
+        }
+        if let Ok(strip_fn) = get_strip_internal_frames() {
+            let _ = strip_fn.call1(py, (e.value(py),));
+        }
         let mut msg =
             format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
-        // Try to show source line with ^^^^ pointer
         if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
             msg.push('\n');
             msg.push_str(&pointer);
@@ -419,6 +429,7 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let prefetch_batch_map_state_class = helpers_module.getattr("_PrefetchBatchMapState")?;
     let safe_update = helpers_module.getattr("_safe_update")?;
     let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
+    let strip_internal_frames = helpers_module.getattr("_strip_internal_frames")?;
 
     let _ = GATHER.set(gather.unbind());
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
@@ -426,6 +437,7 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
     let _ = SAFE_UPDATE.set(safe_update.unbind());
     let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
+    let _ = STRIP_INTERNAL_FRAMES.set(strip_internal_frames.unbind());
     let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
     let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
     let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
