@@ -78,3 +78,8 @@ site/
 .ruff_cache/
 .envrc
 .direnv/
+
+# Profiling output and uv temp locks
+*.speedscope.json
+profile_*.raw
+uv-*.lock
