@@ -71,25 +71,9 @@ import cProfile
 cProfile.run('source.emit_batch(data)', 'profile.stats')
 ```
 
-## Can I use async functions?
+## How does akayu handle concurrency?
 
-Yes! akayu supports async functions throughout the pipeline:
-
-```python
-import asyncio
-import akayu
-
-async def fetch_url(url):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            return await response.text()
-
-source = akayu.Stream()
-source.map(fetch_url).sink(print)
-
-source.compile()
-source.emit_batch(urls)
-```
+akayu uses thread-based concurrency via `par()` and `prefetch()` for parallel execution. There is no asyncio support — `par()` manages its own thread pool to execute operations in parallel without blocking the GIL.
 
 ## Is it thread-safe?
 
@@ -146,7 +130,7 @@ source.emit_batch(large_chunk)  # instead of loop + emit()
 
 ## What does "partially vibed" mean?
 
-It's a playful nod to the project's origin — akayu was initially developed for internal use, so not every feature has been battle-tested in production environments. The core stream processing is solid; some advanced features (like certain async patterns) may need more real-world testing.
+It's a playful nod to the project's origin — akayu was initially developed for internal use, so not every feature has been battle-tested in production environments. The core stream processing is solid; some advanced features may need more real-world testing.
 
 > "Partially vibed" = the author's team used it and it worked, but you might find edge cases. Report them!
 

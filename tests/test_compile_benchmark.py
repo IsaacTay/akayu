@@ -8,7 +8,7 @@ def test_benchmark_no_compile(benchmark):
     Linear fusion (Map+Map) is DISABLED.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -40,7 +40,7 @@ def test_benchmark_with_compile(benchmark):
     Map+Map and Filter+Filter should merge.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -71,7 +71,7 @@ def test_benchmark_batch_map_no_compile(benchmark):
     No fusion occurs - intermediate lists are created between batch_maps.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Pipeline with fusable batch_map nodes
@@ -93,7 +93,7 @@ def test_benchmark_batch_map_with_compile(benchmark):
     BatchMap fusion should compose all batch_maps into one.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Same pipeline
@@ -116,7 +116,7 @@ def test_benchmark_filter_map_no_compile(benchmark):
     Map runs on all items, filter runs on all items.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Pipeline: filter then map - without fusion, map runs even on filtered items
@@ -140,7 +140,7 @@ def test_benchmark_filter_map_with_compile(benchmark):
     Maps fuse, async check elimination enabled.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Same pipeline
@@ -165,7 +165,7 @@ def test_benchmark_passthrough_no_compile(benchmark):
     seq() nodes add propagation overhead.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Pipeline with seq() nodes (Source nodes that just pass through)
@@ -190,7 +190,7 @@ def test_benchmark_passthrough_with_compile(benchmark):
     Passthrough elimination should bypass seq() nodes entirely.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Same pipeline
@@ -216,7 +216,7 @@ def test_benchmark_map_sink_no_compile(benchmark):
     Propagation overhead between map and sink.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -241,7 +241,7 @@ def test_benchmark_map_sink_with_compile(benchmark):
     MapSink fusion eliminates propagation overhead.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -267,7 +267,7 @@ def test_benchmark_filter_sink_no_compile(benchmark):
     Sink called for every item that passes filter.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -291,7 +291,7 @@ def test_benchmark_filter_sink_with_compile(benchmark):
     Async check elimination enabled.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -316,7 +316,7 @@ def test_benchmark_filter_map_sink_no_compile(benchmark):
     Full propagation overhead at each step.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -341,7 +341,7 @@ def test_benchmark_filter_map_sink_with_compile(benchmark):
     Maps fuse, async check elimination enabled.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc_count(x):
             nonlocal count
@@ -367,7 +367,7 @@ def test_benchmark_starmap_fusion_with_compile(benchmark):
     Starmap should be treated like Map for fusion purposes.
     """
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
 
         # Pipeline: map produces tuple, starmap unpacks it, map processes result

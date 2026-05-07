@@ -49,7 +49,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10, 20]:
         def _akayu(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 counts = [0]
                 def inc(x):
                     counts[0] += 1
@@ -80,7 +80,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10, 20]:
         def _akayu_builtin(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 counts = [0]
                 def inc(x):
                     counts[0] += 1
@@ -107,7 +107,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10, 20]:
         def _akayu_diamond(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count
@@ -142,7 +142,7 @@ if __name__ == "__main__":
     for depth in [2, 5, 10, 20]:
         def _akayu_deep(depth=depth):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count
@@ -177,7 +177,7 @@ if __name__ == "__main__":
     for depth in [2, 5, 10, 20]:
         def _akayu_compiled(depth=depth):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     for fan in [5, 10, 20]:
         def _akayu_filter_fan(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 counts = [0]
                 def inc(x):
                     counts[0] += 1
@@ -238,7 +238,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10]:
         def _akayu_unfused_fan(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 counts = [0]
                 def inc(x):
                     counts[0] += 1

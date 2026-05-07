@@ -30,22 +30,6 @@ impl Stream {
         // Phase 2: Collect all nodes and check sync status
         let all_nodes = self.collect_all_nodes(py);
 
-        // If all nodes are sync and asynchronous flag wasn't explicitly set,
-        // enable skip_async_check for all nodes
-        // DISABLED: Unsafe if async nodes are added later to a "sync" optimized graph
-        /*
-        let all_sync = self.func_is_sync && all_nodes.iter().all(|n| n.borrow(py).func_is_sync);
-        if all_sync && self.asynchronous.is_none() {
-            self.skip_async_check = true;
-            for node_py in &all_nodes {
-                let mut node = node_py.borrow_mut(py);
-                if node.asynchronous.is_none() {
-                    node.skip_async_check = true;
-                }
-            }
-        }
-        */
-
         // Phase 3: Mark prefetch nodes inside par branches as needing locks
         // These nodes use internal threading which can conflict with par's threading
         self.mark_par_branch_nodes(py, &all_nodes);
@@ -79,21 +63,8 @@ impl Stream {
         // Phase 5: Build compiled chains for linear segments
         self.build_compiled_chains(py);
 
-        // Phase 3: Collect all nodes and check sync status
+        // Phase 3: Collect all nodes
         let all_nodes = self.collect_all_nodes(py);
-
-        // If all nodes are sync and asynchronous flag wasn't explicitly set,
-        // enable skip_async_check for all nodes
-        let all_sync = self.func_is_sync && all_nodes.iter().all(|n| n.borrow(py).func_is_sync);
-        if all_sync && self.asynchronous.is_none() {
-            self.skip_async_check = true;
-            for node_py in &all_nodes {
-                let mut node = node_py.borrow_mut(py);
-                if node.asynchronous.is_none() {
-                    node.skip_async_check = true;
-                }
-            }
-        }
 
         // Phase 3: Warn about par() nodes without splits (useless overhead)
         Self::warn_useless_par(py, &all_nodes);
@@ -136,7 +107,7 @@ impl Stream {
             && !matches!(&self.logic, NodeLogic::Filter { .. }))
             || matches!(&self.logic, NodeLogic::Chain { .. });
         self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
-            && (self.skip_async_check || self.builtin_op.is_some());
+            && self.builtin_op.is_some();
         // Cache raw pointers to downstream Streams (bypass PyCell borrow checks in propagate)
         self.compiled_downstream_ptrs = self
             .downstreams
@@ -161,7 +132,7 @@ impl Stream {
                     && !matches!(&node.logic, NodeLogic::Filter { .. }))
                     || matches!(&node.logic, NodeLogic::Chain { .. });
                 node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
-                    && (node.skip_async_check || node.builtin_op.is_some());
+                    && node.builtin_op.is_some();
                 // Cache raw pointers to downstream Streams
                 let downstream_refs: Vec<Py<Stream>> =
                     node.downstreams.iter().map(|d| d.clone_ref(py)).collect();

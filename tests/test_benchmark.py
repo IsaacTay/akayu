@@ -31,12 +31,10 @@ def test_benchmark_throughput(benchmark):
 
 def test_benchmark_throughput_sync_flag(benchmark):
     """
-    Benchmarks passing 500,000 items through a simple map pipeline (asynchronous=False).
     """
 
     def run_pipeline():
-        # Set asynchronous=False to enable sync-only optimization
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         # Create a pipeline: map -> filter -> sink
         count = 0
 
@@ -63,8 +61,7 @@ def test_benchmark_batch_throughput(benchmark):
     """
 
     def run_pipeline():
-        # Set asynchronous=False to enable sync-only optimization + batching
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         # Create a pipeline: map -> filter -> sink
         count = 0
 
@@ -119,7 +116,7 @@ def test_benchmark_expansion_emit(benchmark):
     """
 
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
 
         def inc_count(x):
@@ -149,7 +146,7 @@ def test_benchmark_expansion_batch(benchmark):
     """
 
     def run_pipeline():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
 
         def inc_count(x):

@@ -15,7 +15,7 @@ N = 1_000_000
 def test_benchmark_noop_map_no_compile(benchmark):
     """Map with noop, no compile — measures per-item Rust overhead."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.map(noop).sink(results.append)
         for i in range(N):
@@ -29,7 +29,7 @@ def test_benchmark_noop_map_no_compile(benchmark):
 def test_benchmark_noop_map_compiled(benchmark):
     """Map with noop, compiled — measures fused overhead."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.map(noop).sink(results.append)
         s.compile()
@@ -44,7 +44,7 @@ def test_benchmark_noop_map_compiled(benchmark):
 def test_benchmark_noop_sink_only_no_compile(benchmark):
     """Sink-only with noop — baseline Rust call overhead."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         s.sink(noop)
         for i in range(N):
             s.emit(i)
@@ -55,7 +55,7 @@ def test_benchmark_noop_sink_only_no_compile(benchmark):
 def test_benchmark_noop_sink_only_compiled(benchmark):
     """Sink-only with noop, compiled."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         s.sink(noop)
         s.compile()
         for i in range(N):
@@ -70,7 +70,7 @@ def test_benchmark_noop_filter_no_compile(benchmark):
         return True
 
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.filter(always_true).sink(results.append)
         for i in range(N):
@@ -87,7 +87,7 @@ def test_benchmark_noop_filter_compiled(benchmark):
         return True
 
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.filter(always_true).sink(results.append)
         s.compile()
@@ -102,7 +102,7 @@ def test_benchmark_noop_filter_compiled(benchmark):
 def test_benchmark_noop_3map_chain_no_compile(benchmark):
     """3 noops chained — measures per-node transition overhead."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.map(noop).map(noop).map(noop).sink(results.append)
         for i in range(N):
@@ -116,7 +116,7 @@ def test_benchmark_noop_3map_chain_no_compile(benchmark):
 def test_benchmark_noop_3map_chain_compiled(benchmark):
     """3 noops chained, compiled — fusion eliminates transitions."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.map(noop).map(noop).map(noop).sink(results.append)
         s.compile()
@@ -131,7 +131,7 @@ def test_benchmark_noop_3map_chain_compiled(benchmark):
 def test_benchmark_noop_batch_emit(benchmark):
     """Batch emit with noop — single borrow for entire batch."""
     def run():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         s.map(noop).sink(results.append)
         s.compile()

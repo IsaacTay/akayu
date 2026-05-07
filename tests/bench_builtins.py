@@ -38,7 +38,7 @@ def make_akayu(step_fn):
     """Generic akayu batch builder."""
     def builder(steps):
         def fn():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             count = 0
             def inc(x):
                 nonlocal count
@@ -144,7 +144,7 @@ if __name__ == "__main__":
         # akayu
         def make_akayu_fn(steps, step=akayu_step):
             def fn():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count
@@ -185,7 +185,7 @@ if __name__ == "__main__":
 
     def make_len_akayu_1():
         def fn():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             count = 0
             def inc(x):
                 nonlocal count
@@ -215,7 +215,7 @@ if __name__ == "__main__":
     for name, akayu_step, py_pred in filter_cases:
         def make_filter_akayu(steps, step=akayu_step):
             def fn():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count
@@ -266,7 +266,7 @@ if __name__ == "__main__":
     ]:
         def make_dict_akayu_1(step=akayu_step_fn):
             def fn():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 count = 0
                 def inc(x):
                     nonlocal count

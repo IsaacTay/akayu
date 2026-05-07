@@ -6,8 +6,8 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::helpers::{
-    cached_vectorcall1, get_filter_async, get_gather, get_is_awaitable, get_parallel_execute,
-    get_process_async, get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
+    cached_vectorcall1, get_gather, get_parallel_execute,
+    get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
 };
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
 use crate::profiling;
@@ -1226,39 +1226,6 @@ impl Stream {
                 }
                 return Ok(None);
             }
-            NodeLogic::AsyncMap { func, state } => {
-                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
-                let t = prof_start(profiling_active);
-                for x in items {
-                    let coro = func.call1(py, (x,));
-                    let coro = wrap_error(py, coro, &self.name, &self.source_location)?;
-                    let results = wrap_error(
-                        py,
-                        state.call_method1(py, "submit", (coro,)),
-                        &self.name,
-                        &self.source_location,
-                    )?;
-                    let results_list = results.bind(py);
-                    for result in results_list.try_iter()? {
-                        to_propagate.push(result?.into());
-                    }
-                }
-                let items_out = to_propagate.len() as u64;
-                if let Some(t) = t {
-                    profiling::record_node(
-                        node_id,
-                        t.elapsed(),
-                        items_in,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
-                }
-                for val in to_propagate {
-                    self.propagate(py, val)?;
-                }
-                return Ok(None);
-            }
 
             // Chainable variants handled above
             _ => unreachable!("chainable variant should have been handled by apply_logic_batch"),
@@ -1339,26 +1306,14 @@ impl Stream {
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
 
-            // Filter: async-check path (generic predicate, !skip_async_check)
+            // Filter: generic predicate path
             NodeLogic::Filter { predicate } => {
-                // This path only runs when !skip_async_check && builtin_op.is_none()
-                // (builtin ops and skip_async_check cases handled above via apply_logic)
                 let t = prof_start(profiling_active);
                 let res = vectorcall1(py, predicate, &x);
                 if let Some(t) = t {
                     ft = t.elapsed();
                 }
                 let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                let is_awaitable_fn = get_is_awaitable()?;
-                let is_awaitable = is_awaitable_fn.call1(py, (&res,))?.is_truthy(py)?;
-                if is_awaitable {
-                    let filter_async = get_filter_async()?;
-                    let downstreams_list: Vec<Py<Self>> =
-                        self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
-                    let dl = PyList::new(py, downstreams_list)?;
-                    let coro = filter_async.call1(py, (res, x, dl))?;
-                    return Ok(Some(coro));
-                }
                 let passes = res.is_truthy(py)?;
                 if passes {
                     Some(x)
@@ -1535,22 +1490,6 @@ impl Stream {
                 self.dispatch_state_results(py, results, profiling_active, node_id, ft, 1)?;
                 return Ok(None);
             }
-            NodeLogic::AsyncMap { func, state } => {
-                let t = prof_start(profiling_active);
-                let coro = func.call1(py, (x,));
-                if let Some(t) = t {
-                    ft = t.elapsed();
-                }
-                let coro = wrap_error(py, coro, &self.name, &self.source_location)?;
-                let results = wrap_error(
-                    py,
-                    state.call_method1(py, "submit", (coro,)),
-                    &self.name,
-                    &self.source_location,
-                )?;
-                self.dispatch_state_results(py, results, profiling_active, node_id, ft, 1)?;
-                return Ok(None);
-            }
 
             // Chainable variants handled above
             _ => unreachable!("chainable variant should have been handled by apply_logic"),
@@ -1672,19 +1611,6 @@ let n = self.downstreams.len();
     }
 
     pub fn propagate(&self, py: Python, val: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
-        if !self.skip_async_check {
-            let is_awaitable_fn = get_is_awaitable()?;
-            let is_awaitable = is_awaitable_fn.call1(py, (&val,))?.is_truthy(py)?;
-            if is_awaitable {
-                let process_async = get_process_async()?;
-                let downstreams_list: Vec<Py<Self>> =
-                    self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
-                let dl = PyList::new(py, downstreams_list)?;
-                let coro = process_async.call1(py, (val, dl))?;
-                return Ok(Some(coro));
-            }
-        }
-
         let n = self.downstreams.len();
         if n == 0 {
             return Ok(None);
@@ -1772,7 +1698,7 @@ let n = self.downstreams.len();
         Ok(None)
     }
 
-    /// Iterate results from a stateful node (Prefetch*/AsyncMap), propagate each,
+    /// Iterate results from a stateful node (Prefetch*), propagate each,
     /// and record profiling if active.
     fn dispatch_state_results(
         &self,

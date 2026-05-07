@@ -4,8 +4,6 @@ Covers: prefetch, combine_latest/zip edges, error recovery,
 empty/minimal streams, union, flush behavior, async dispatch.
 """
 
-import asyncio
-
 import pytest
 
 from akayu import Stream
@@ -16,7 +14,7 @@ from akayu import Stream
 
 
 def test_prefetch_map_basic():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     s.prefetch(2).map(lambda x: x * 2).sink(results.append)
@@ -29,7 +27,7 @@ def test_prefetch_map_basic():
 
 
 def test_prefetch_filter_basic():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     s.prefetch(2).filter(lambda x: x % 2 == 0).sink(results.append)
@@ -42,7 +40,7 @@ def test_prefetch_filter_basic():
 
 
 def test_prefetch_flush():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     s.prefetch(2).map(lambda x: x * 2).sink(results.append)
@@ -60,9 +58,9 @@ def test_prefetch_flush():
 
 
 def test_combine_latest_single_item():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
-    s3 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
+    s3 = Stream()
     results = []
 
     s1.combine_latest(s2, s3).sink(results.append)
@@ -77,8 +75,8 @@ def test_combine_latest_single_item():
 
 
 def test_combine_latest_emit_batch():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
     results = []
 
     s1.combine_latest(s2).sink(results.append)
@@ -93,9 +91,9 @@ def test_combine_latest_emit_batch():
 
 
 def test_zip_single_item():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
-    s3 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
+    s3 = Stream()
     results = []
 
     s1.zip(s2, s3).sink(results.append)
@@ -109,8 +107,8 @@ def test_zip_single_item():
 
 
 def test_zip_emit_batch():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
     results = []
 
     s1.zip(s2).sink(results.append)
@@ -127,7 +125,7 @@ def test_zip_emit_batch():
 
 
 def test_emit_after_error_in_map():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     call_count = [0]
 
@@ -151,7 +149,7 @@ def test_emit_after_error_in_map():
 
 
 def test_emit_after_error_in_filter():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     def maybe_fail(x):
@@ -172,7 +170,7 @@ def test_emit_after_error_in_filter():
 
 
 def test_emit_after_error_in_sink():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     def maybe_fail(x):
@@ -198,7 +196,7 @@ def test_batch_partial_error():
     Note: emit_batch may or may not process items before the error,
     depending on implementation. We just verify it raises.
     """
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
 
     def maybe_fail(x):
@@ -218,7 +216,7 @@ def test_batch_partial_error():
 
 
 def test_emit_batch_empty():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     s.map(lambda x: x + 1).sink(results.append)
     s.emit_batch([])
@@ -226,7 +224,7 @@ def test_emit_batch_empty():
 
 
 def test_emit_batch_single_item():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     s.map(lambda x: x * 2).sink(results.append)
     s.emit_batch([5])
@@ -234,26 +232,26 @@ def test_emit_batch_single_item():
 
 
 def test_emit_no_downstreams():
-    s = Stream(asynchronous=False)
+    s = Stream()
     # Should not crash
     s.emit(1)
     s.emit(2)
 
 
 def test_compile_empty_stream():
-    s = Stream(asynchronous=False)
+    s = Stream()
     # Compiling with no downstreams should not crash
     s.compile()
 
 
 def test_compile_source_only():
-    s = Stream(asynchronous=False)
+    s = Stream()
     s.compile()
     s.emit(1)  # Should not crash
 
 
 def test_compile_source_sink_only():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     s.sink(results.append)
     s.compile()
@@ -268,8 +266,8 @@ def test_compile_source_sink_only():
 
 
 def test_union_two_streams():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
     results = []
 
     s1.union(s2).sink(results.append)
@@ -282,8 +280,8 @@ def test_union_two_streams():
 
 
 def test_union_emit_batch():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
     results = []
 
     s1.union(s2).sink(results.append)
@@ -295,8 +293,8 @@ def test_union_emit_batch():
 
 
 def test_union_error_propagation():
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
 
     def fail(x):
         raise ValueError("union error")
@@ -316,7 +314,7 @@ def test_union_error_propagation():
 
 
 def test_flush_collect():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     c = s.collect()
     c.sink(results.append)
@@ -332,7 +330,7 @@ def test_flush_collect():
 
 
 def test_flush_propagates_downstream():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     c = s.collect()
     c.map(lambda t: sum(t)).sink(results.append)
@@ -347,7 +345,7 @@ def test_flush_propagates_downstream():
 
 
 def test_flush_empty_pipeline():
-    s = Stream(asynchronous=False)
+    s = Stream()
     results = []
     s.map(lambda x: x).sink(results.append)
     # Flush with nothing buffered should not crash
@@ -355,41 +353,4 @@ def test_flush_empty_pipeline():
     assert results == []
 
 
-# ============================================================
-# g) Async single + batch dispatch
-# ============================================================
-
-
-@pytest.mark.asyncio
-async def test_async_map_multiple_emits():
-    s = Stream()
-    results = []
-
-    async def double(x):
-        await asyncio.sleep(0.001)
-        return x * 2
-
-    s.map(double).sink(results.append)
-
-    await s.emit(1)
-    await s.emit(2)
-    await s.emit(3)
-
-    assert sorted(results) == [2, 4, 6]
-
-
-@pytest.mark.asyncio
-async def test_async_map_emit_batch():
-    s = Stream()
-    results = []
-
-    async def double(x):
-        await asyncio.sleep(0.001)
-        return x * 2
-
-    s.map(double).sink(results.append)
-
-    await s.emit(1)
-    await s.emit(2)
-
-    assert sorted(results) == [2, 4]
+#

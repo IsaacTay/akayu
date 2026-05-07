@@ -69,14 +69,6 @@ pub enum NodeLogic {
         size: usize,
         state: Py<PyAny>, // Python _PrefetchBatchMapState object
     },
-    /// Async map: non-blocking emit with buffered results for async functions
-    /// When asynchronous=True is set on a map, coroutines are submitted to a background
-    /// event loop and results are returned in order when ready or on flush()
-    AsyncMap {
-        #[allow(dead_code)] // Stored for debugging/inspection
-        func: Py<PyAny>,
-        state: Py<PyAny>, // Python _AsyncState object
-    },
     /// Compiled chain: a linear segment of chainable nodes extracted at compile time.
     /// Eliminates per-node borrow_mut/drop/propagate overhead by processing all steps
     /// in a flat loop via apply_logic().

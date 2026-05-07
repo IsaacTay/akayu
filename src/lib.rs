@@ -68,9 +68,6 @@ pub struct Stream {
     pub(crate) downstreams: Vec<Py<Stream>>,
     pub(crate) parents: std::sync::Mutex<Vec<Py<Stream>>>,
     pub(crate) name: String,
-    pub(crate) asynchronous: Option<bool>,
-    /// Pre-computed flag: true if async check can be skipped (asynchronous == Some(false))
-    pub(crate) skip_async_check: bool,
     /// True if this node's function is definitely synchronous (not a coroutine function)
     pub(crate) func_is_sync: bool,
     /// True if topology has been frozen/optimized on first emit
@@ -93,7 +90,7 @@ pub struct Stream {
     /// (non-filter chainable: Map/Flatten/Accumulate/Sink/BatchMap, or compiled Chain).
     pub(crate) compiled_chainable: bool,
     /// Set at freeze time. True if this is a Filter whose predicate can skip the
-    /// async check (has builtin_op or skip_async_check), so update() routes through apply_logic.
+    /// async check (has builtin_op), so update() routes through apply_logic.
     pub(crate) compiled_filter_fast: bool,
     /// Cached raw pointers to downstream `Stream` objects, set at freeze time.
     /// Bypasses PyCell's atomic borrow check (~10ns/downstream/item) in propagate().

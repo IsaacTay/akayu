@@ -53,8 +53,6 @@ impl Stream {
             NodeLogic::Parallel,
             "par".to_string(),
             source_location,
-            this.asynchronous,
-            this.skip_async_check,
             true,
         )?;
         this.downstreams.push(node.clone_ref(py));
@@ -105,8 +103,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             NodeLogic::Source,
             "seq".to_string(),
             source_location,
-            this.asynchronous,
-            this.skip_async_check,
             true,
         )?;
         this.downstreams.push(node.clone_ref(py));
@@ -160,8 +156,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             NodeLogic::Source,
             "union".to_string(),
             source_location,
-            this.asynchronous,
-            this.skip_async_check,
             true,
         )?;
 
@@ -270,10 +264,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             Vec::new()
         };
 
-        let (asynchronous, skip_async_check) = {
-            let this = slf.borrow();
-            (this.asynchronous, this.skip_async_check)
-        };
         let node = Self::make_node(
             py,
             NodeLogic::CombineLatest {
@@ -282,8 +272,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             },
             "combine_latest".to_string(),
             source_location.clone(),
-            asynchronous,
-            skip_async_check,
             true,
         )?;
 
@@ -347,10 +335,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
 
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
-        let (asynchronous, skip_async_check) = {
-            let this = slf.borrow();
-            (this.asynchronous, this.skip_async_check)
-        };
         let node = Self::make_node(
             py,
             NodeLogic::Zip {
@@ -358,8 +342,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             },
             "zip".to_string(),
             source_location.clone(),
-            asynchronous,
-            skip_async_check,
             true,
         )?;
 
@@ -395,8 +377,6 @@ impl Stream {
             NodeLogic::Tag { index },
             format!("tag({})", index),
             source_location.to_string(),
-            self.asynchronous,
-            self.skip_async_check,
             true,
         )?;
         tag_node
@@ -459,9 +439,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         NodeLogic::Source,
         "union".to_string(),
         source_location,
-        None,
         false,
-        true,
     )?;
 
     for stream in &streams {
@@ -576,9 +554,7 @@ pub fn combine_latest(
         },
         "combine_latest".to_string(),
         source_location.clone(),
-        None,
         false,
-        true,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
@@ -635,8 +611,6 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         let stream_ref = stream.borrow(py);
         check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
         let source_location = capture_source_location(py);
-        let asynchronous = stream_ref.asynchronous;
-        let skip_async_check = stream_ref.skip_async_check;
         let stream_py: Py<Stream> = stream.clone_ref(py);
         drop(stream_ref);
         let node = Stream::make_node(
@@ -644,8 +618,6 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             NodeLogic::Source,
             "zip".to_string(),
             source_location,
-            asynchronous,
-            skip_async_check,
             true,
         )?;
         stream.borrow_mut(py).downstreams.push(node.clone_ref(py));
@@ -667,9 +639,7 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         },
         "zip".to_string(),
         source_location.clone(),
-        None,
         false,
-        true,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
