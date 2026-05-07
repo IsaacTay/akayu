@@ -145,7 +145,7 @@ class TestStarmapErrors:
 
 class TestBatchMapErrors:
     def test_batch_map_callback_raises_mid_batch(self):
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         def bad_batch(items):
             raise RuntimeError("batch fail")
         s.batch_map(bad_batch).sink(lambda x: x)
@@ -153,7 +153,7 @@ class TestBatchMapErrors:
             s.emit_batch([1, 2, 3])
 
     def test_batch_map_callback_returns_non_iterable(self):
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         def bad_return(items):
             return 42
         s.batch_map(bad_return).sink(lambda x: x)
@@ -161,7 +161,7 @@ class TestBatchMapErrors:
             s.emit_batch([1])
 
     def test_batch_map_callback_returns_wrong_count(self):
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         results = []
         def uneven_return(items):
             return [items[0]]
@@ -241,7 +241,7 @@ class TestPrefetchErrors:
             s.prefetch(0)
 
     def test_prefetch_callback_errors_sync(self):
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         s.prefetch(2).map(lambda x: 1/0).sink(lambda x: x)
         s.compile()
         s.emit(1)

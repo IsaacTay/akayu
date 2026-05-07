@@ -54,7 +54,7 @@ if __name__ == "__main__":
     # closure over mutable state
     def _akayu_closure():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             offset = 42
             s.map(lambda x: x + offset).sink(results.append)
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     # multi-expression lambda
     def _akayu_multi():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: (x * 2 + 1) % 100).sink(results.append)
             s.compile()
@@ -94,7 +94,7 @@ if __name__ == "__main__":
     # conditional expression
     def _akayu_ternary():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: x * 2 if x > 100 else x + 1).sink(results.append)
             s.compile()
@@ -118,7 +118,7 @@ if __name__ == "__main__":
     # dict subscript
     def _akayu_dict_sub():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: x["a"]).sink(results.append)
             s.compile()
@@ -137,7 +137,7 @@ if __name__ == "__main__":
     # itemgetter
     def _akayu_itemgetter():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(itemgetter("a")).sink(results.append)
             s.compile()
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     # dict multi-key access
     def _akayu_dict_multi():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: (x["a"], x["b"])).sink(results.append)
             s.compile()
@@ -172,7 +172,7 @@ if __name__ == "__main__":
 
     def _akayu_str_strip():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: x.strip()).sink(results.append)
             s.compile()
@@ -190,7 +190,7 @@ if __name__ == "__main__":
 
     def _akayu_str_upper():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: x.upper()).sink(results.append)
             s.compile()
@@ -208,7 +208,7 @@ if __name__ == "__main__":
 
     def _akayu_str_split():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: x.split()).sink(results.append)
             s.compile()
@@ -229,7 +229,7 @@ if __name__ == "__main__":
 
     def _akayu_tuple_pack():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: (x, x + 1, x + 2)).sink(results.append)
             s.compile()
@@ -247,7 +247,7 @@ if __name__ == "__main__":
 
     def _akayu_list_comp():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.map(lambda x: [x * i for i in range(5)]).sink(results.append)
             s.compile()
@@ -269,7 +269,7 @@ if __name__ == "__main__":
     # Simple ETL: parse → transform → filter → output
     def _akayu_etl():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             (s.map(lambda x: x * 2 + 1)
               .filter(lambda x: x % 3 == 0)
@@ -293,7 +293,7 @@ if __name__ == "__main__":
     # Dict ETL: extract → transform → filter
     def _akayu_dict_etl():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             (s.map(lambda x: x["a"])
               .filter(lambda x: x > 100)
@@ -319,7 +319,7 @@ if __name__ == "__main__":
 
     def _akayu_accum():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.accumulate(lambda a, b: a + b, start=0).sink(results.append)
             s.compile()
@@ -342,7 +342,7 @@ if __name__ == "__main__":
 
     def _akayu_identity_sink():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             results = []
             s.sink(results.append)
             s.compile()
@@ -361,7 +361,7 @@ if __name__ == "__main__":
     # noop sink
     def _akayu_noop():
         def make():
-            s = akayu.Stream(asynchronous=False)
+            s = akayu.Stream()
             s.sink(lambda x: None)
             s.compile()
             s.emit_batch(int_inputs)

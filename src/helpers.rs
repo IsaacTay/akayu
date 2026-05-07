@@ -26,10 +26,7 @@ macro_rules! define_py_helper {
 }
 
 // Python function references initialized at module load
-define_py_helper!(IS_AWAITABLE, get_is_awaitable);
-define_py_helper!(PROCESS_ASYNC, get_process_async);
 define_py_helper!(GATHER, get_gather);
-define_py_helper!(FILTER_ASYNC, get_filter_async);
 define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(IS_SYNC_CALLABLE, get_is_sync_callable);
@@ -42,7 +39,6 @@ define_py_helper!(
 );
 define_py_helper!(SAFE_UPDATE, get_safe_update);
 define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
-define_py_helper!(ASYNC_STATE_CLASS, get_async_state_class);
 define_py_helper!(CALLER_LOCATION, get_caller_location);
 define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
 define_py_helper!(BUILTIN_LEN, get_builtin_len);
@@ -345,8 +341,6 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             downstreams: Vec::new(),
             parents: std::sync::Mutex::new(Vec::new()),
             name: "file_source".to_string(),
-            asynchronous: None,
-            skip_async_check: false,
             func_is_sync: true,
             frozen: false,
             needs_lock: false,
@@ -416,33 +410,25 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let mname = CString::new("helpers").unwrap();
     let helpers_module = PyModule::from_code(py, &code, &fname, &mname)?;
 
-    let process_async = helpers_module.getattr("_process_async")?;
     let gather = helpers_module.getattr("_gather")?;
-    let filter_async = helpers_module.getattr("_filter_async")?;
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
-    let is_sync_callable = helpers_module.getattr("_is_sync_callable")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
     let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
     let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
     let prefetch_batch_map_state_class = helpers_module.getattr("_PrefetchBatchMapState")?;
     let safe_update = helpers_module.getattr("_safe_update")?;
     let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
-    let async_state_class = helpers_module.getattr("_AsyncState")?;
 
-    let _ = PROCESS_ASYNC.set(process_async.unbind());
     let _ = GATHER.set(gather.unbind());
-    let _ = FILTER_ASYNC.set(filter_async.unbind());
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
-    let _ = IS_SYNC_CALLABLE.set(is_sync_callable.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
     let _ = SAFE_UPDATE.set(safe_update.unbind());
     let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
     let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
     let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
     let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
-    let _ = ASYNC_STATE_CLASS.set(async_state_class.unbind());
 
     let caller_location = helpers_module.getattr("_get_caller_location")?;
     let _ = CALLER_LOCATION.set(caller_location.unbind());
@@ -452,10 +438,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let analyze_lambda = helpers_module.getattr("_analyze_lambda")?;
     let _ = ANALYZE_LAMBDA.set(analyze_lambda.unbind());
-
-    let inspect = py.import("inspect")?;
-    let is_awaitable = inspect.getattr("isawaitable")?;
-    let _ = IS_AWAITABLE.set(is_awaitable.unbind());
 
     // Cache builtin references for fast-path detection
     let builtins = py.import("builtins")?;

@@ -28,7 +28,7 @@ def test_ordering_split_union_scalar_vs_batch():
     """
 
     # 1. Scalar Reference
-    s_scalar = akayu.Stream(asynchronous=False)
+    s_scalar = akayu.Stream()
     out_scalar = []
 
     b1_s = s_scalar.map(lambda x: x * 10)
@@ -42,7 +42,7 @@ def test_ordering_split_union_scalar_vs_batch():
     assert out_scalar == expected_order, f"Scalar reference failed: {out_scalar}"
 
     # 2. Batch Verification
-    s_batch = akayu.Stream(asynchronous=False)
+    s_batch = akayu.Stream()
     out_batch = []
 
     b1_b = s_batch.map(lambda x: x * 10)
@@ -60,7 +60,7 @@ def test_ordering_complex_split():
     """
     More complex nested splits.
     """
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     out = []
 
     #      /-> x*2

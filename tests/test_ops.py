@@ -56,7 +56,7 @@ def test_flatten():
 
 def test_flatten_batch():
     L = []
-    s = Stream(asynchronous=False)
+    s = Stream()
     s.flatten().sink(L.append)
 
     s.emit_batch([[1, 2], [3], [], [4, 5]])
@@ -96,7 +96,7 @@ def test_collect():
 
 def test_collect_batch():
     L = []
-    s = Stream(asynchronous=False)
+    s = Stream()
     c = s.collect()
     c.sink(L.append)
 
@@ -127,8 +127,8 @@ def test_zip():
 
 def test_zip_batch():
     L = []
-    s1 = Stream(asynchronous=False)
-    s2 = Stream(asynchronous=False)
+    s1 = Stream()
+    s2 = Stream()
 
     s1.zip(s2).sink(L.append)
 
@@ -142,7 +142,7 @@ def test_zip_batch():
 
 def test_batch_map():
     """Test batch_map processes entire batch at once."""
-    s = Stream(asynchronous=False)
+    s = Stream()
     L = []
 
     def process_batch(batch):
@@ -156,7 +156,7 @@ def test_batch_map():
 
 def test_batch_map_single_emit():
     """Test batch_map with single emit wraps in list."""
-    s = Stream(asynchronous=False)
+    s = Stream()
     L = []
 
     def process_batch(batch):

@@ -30,7 +30,7 @@ def bench(name, fn, rounds=7):
 def make_isinstance_batch(steps):
     """filter(lambda x: isinstance(x, int)) × steps → BuiltinOp::IsInstance"""
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -47,7 +47,7 @@ def make_isinstance_batch(steps):
 
 def make_isinstance_emit(steps):
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -84,7 +84,7 @@ def make_isinstance_python(steps):
 def make_bool_batch(steps):
     """map(bool) × steps → BuiltinOp::Bool (PyObject_IsTrue + singleton)"""
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -101,7 +101,7 @@ def make_bool_batch(steps):
 
 def make_bool_emit(steps):
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -133,7 +133,7 @@ def make_bool_python(steps):
 
 def make_type_batch(steps):
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -150,7 +150,7 @@ def make_type_batch(steps):
 
 def make_type_emit(steps):
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count
@@ -182,7 +182,7 @@ def make_type_python(steps):
 
 def make_add_batch(steps):
     def fn():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
         def inc(x):
             nonlocal count

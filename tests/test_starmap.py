@@ -19,7 +19,7 @@ def test_starmap():
 
 def test_starmap_batch():
     """Test starmap with emit_batch."""
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     L = []
     s.starmap(lambda a, b: a + b).sink(L.append)
     s.emit_batch([(1, 2), (3, 4), (5, 6)])

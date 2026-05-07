@@ -1,4 +1,3 @@
-import asyncio
 import concurrent.futures
 import queue
 import threading
@@ -403,89 +402,6 @@ class TestWebServerSimulation:
         t1.join()
 
         assert len(success_results) >= 0
-
-
-class TestAsyncIntegration:
-    @pytest.mark.asyncio
-    async def test_emit_from_async_function(self):
-        results = []
-
-        async def async_map(x):
-            return x * 2
-
-        s = akayu.Stream()
-        s.map(async_map).sink(results.append)
-
-        for i in range(100):
-            await s.emit(i)
-
-        assert len(results) == 100
-        assert sorted(results) == [x * 2 for x in range(100)]
-
-    @pytest.mark.asyncio
-    async def test_par_within_async_context(self):
-        results1 = []
-        results2 = []
-
-        async def async_map1(x):
-            return x * 2
-
-        async def async_map2(x):
-            return x * 3
-
-        s = akayu.Stream()
-        p = s.par()
-        p.map(async_map1).sink(results1.append)
-        p.map(async_map2).sink(results2.append)
-
-        await s.emit(10)
-        await s.emit(20)
-
-        assert sorted(results1) == [20, 40]
-        assert sorted(results2) == [30, 60]
-
-    @pytest.mark.asyncio
-    async def test_async_callback_in_stream(self):
-        results = []
-        s = akayu.Stream()
-
-        async def async_map(x):
-            await asyncio.sleep(0.001)
-            return x * 2
-
-        s.map(async_map).sink(results.append)
-
-        await s.emit(1)
-        await s.emit(2)
-        await s.emit(3)
-
-        assert sorted(results) == [2, 4, 6]
-
-    def test_concurrent_async_and_sync_emit(self):
-        results = []
-
-        async def async_map(x):
-            return x * 2
-
-        s = akayu.Stream()
-        s.map(async_map).sink(results.append)
-
-        def sync_emit():
-            for i in range(50):
-                s.emit(i)
-
-        async def async_emit():
-            for i in range(50, 100):
-                await s.emit(i)
-
-        sync_thread = threading.Thread(target=sync_emit)
-        sync_thread.start()
-
-        asyncio.run(async_emit())
-
-        sync_thread.join()
-
-        assert len(results) >= 50
 
 
 class TestThreadPoolContention:

@@ -52,7 +52,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10, 20]:
         def _compiled(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 for _ in range(fan):
                     s.sink(lambda x: None)
                 s.compile()
@@ -61,7 +61,7 @@ if __name__ == "__main__":
 
         def _uncompiled(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 for _ in range(fan):
                     s.sink(lambda x: None)
                 # no compile
@@ -89,7 +89,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10]:
         def _compiled_bool(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 for _ in range(fan):
                     s.map(bool).sink(lambda x: None)
                 s.compile()
@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
         def _uncompiled_bool(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 for _ in range(fan):
                     s.map(bool).sink(lambda x: None)
                 for i in int_inputs:
@@ -125,7 +125,7 @@ if __name__ == "__main__":
     for depth in [2, 5, 10, 20]:
         def _compiled_chain(depth=depth):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 node = s
                 for _ in range(depth):
                     node = node.map(bool)
@@ -136,7 +136,7 @@ if __name__ == "__main__":
 
         def _uncompiled_chain(depth=depth):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 node = s
                 for _ in range(depth):
                     node = node.map(bool)
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     for fan in [2, 5, 10]:
         def _compiled_diamond(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 branches = [s.map(bool) for _ in range(fan)]
                 node = branches[0]
                 for b in branches[1:]:
@@ -179,7 +179,7 @@ if __name__ == "__main__":
 
         def _uncompiled_diamond(fan=fan):
             def make():
-                s = akayu.Stream(asynchronous=False)
+                s = akayu.Stream()
                 branches = [s.map(bool) for _ in range(fan)]
                 node = branches[0]
                 for b in branches[1:]:

@@ -9,7 +9,7 @@ def test_benchmark_split_expansion(benchmark):
 
     def run_pipeline():
         # asynchronous=False enables the Sync Fast Path
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         count = 0
 
         def inc_count(x):

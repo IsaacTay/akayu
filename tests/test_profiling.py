@@ -33,7 +33,7 @@ def slow_fn(x):
 
 class TestEmitProfiled:
     def test_linear_pipeline(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).filter(is_even).sink(noop)
 
         report = s.emit_profiled(5)
@@ -42,7 +42,7 @@ class TestEmitProfiled:
         assert report.total_time_ms > 0
 
     def test_report_has_all_nodes(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).filter(is_even).sink(noop)
 
         report = s.emit_profiled(5)
@@ -54,7 +54,7 @@ class TestEmitProfiled:
         assert any("sink" in n for n in names)
 
     def test_func_time_positive_for_nodes_with_functions(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(slow_fn).sink(noop)
 
         report = s.emit_profiled(5)
@@ -63,7 +63,7 @@ class TestEmitProfiled:
         assert map_node["func_time_ms"] > 0
 
     def test_source_has_zero_func_time(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
@@ -72,7 +72,7 @@ class TestEmitProfiled:
         assert source_node["func_time_ms"] == 0.0
 
     def test_items_flow(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
@@ -87,14 +87,14 @@ class TestEmitProfiled:
         assert sink_node["items_out"] == 0  # terminal
 
     def test_overhead_nonnegative(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
         assert report.total_overhead_ms >= 0
 
     def test_non_source_raises(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         m = s.map(double)
         with pytest.raises(RuntimeError):
             m.emit_profiled(5)
@@ -106,7 +106,7 @@ class TestEmitProfiled:
 
 class TestBatchProfiled:
     def test_batch_items_count(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_batch_profiled([1, 2, 3])
@@ -116,7 +116,7 @@ class TestBatchProfiled:
         assert map_node["items_out"] == 3
 
     def test_batch_filter_funnel(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.filter(is_even).sink(noop)
 
         report = s.emit_batch_profiled([1, 2, 3, 4, 5, 6])
@@ -132,7 +132,7 @@ class TestBatchProfiled:
 
 class TestStartStop:
     def test_multi_emit_accumulates(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         s.start_profiling()
@@ -147,7 +147,7 @@ class TestStartStop:
         assert map_node["items_out"] == 100
 
     def test_filter_accumulates_correctly(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.filter(is_even).sink(noop)
 
         s.start_profiling()
@@ -161,7 +161,7 @@ class TestStartStop:
         assert filter_node["items_out"] == 50  # 0,2,4,...,98
 
     def test_non_source_start_raises(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         m = s.map(double)
         with pytest.raises(RuntimeError):
             m.start_profiling()
@@ -173,7 +173,7 @@ class TestStartStop:
 
 class TestContextManager:
     def test_profile_context_manager(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         with s.profile() as p:
@@ -189,7 +189,7 @@ class TestContextManager:
                 raise ValueError("bad")
             return x
 
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(bad_fn).sink(noop)
 
         with s.profile() as p:
@@ -211,7 +211,7 @@ class TestContextManager:
 class TestCompiledProfiling:
     def test_fused_maps_single_entry(self):
         """Compiled chain expands individual steps in the profiling report."""
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).map(double).sink(noop)
         s.compile()
 
@@ -226,12 +226,12 @@ class TestCompiledProfiling:
     def test_compiled_vs_uncompiled_overhead(self):
         """Compiled pipeline should have less overhead per item."""
         # Uncompiled
-        s1 = Stream(asynchronous=False)
+        s1 = Stream()
         s1.map(double).map(double).map(double).sink(noop)
         r1 = s1.emit_batch_profiled(list(range(1000)))
 
         # Compiled
-        s2 = Stream(asynchronous=False)
+        s2 = Stream()
         s2.map(double).map(double).map(double).sink(noop)
         s2.compile()
         r2 = s2.emit_batch_profiled(list(range(1000)))
@@ -251,7 +251,7 @@ class TestCompiledProfiling:
 
 class TestBranchingPipeline:
     def test_branching_both_sinks_appear(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         m = s.map(double)
         results_a = []
         results_b = []
@@ -264,7 +264,7 @@ class TestBranchingPipeline:
         assert len(sink_nodes) == 2
 
     def test_branching_edges(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         m = s.map(double)
         results_a = []
         results_b = []
@@ -283,7 +283,7 @@ class TestBranchingPipeline:
 
 class TestWallTime:
     def test_wall_time_excludes_sleep(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         s.start_profiling()
@@ -302,7 +302,7 @@ class TestWallTime:
 
 class TestNestedProfiling:
     def test_nested_raises(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         s.start_profiling()
@@ -317,7 +317,7 @@ class TestNestedProfiling:
 
 class TestReportFormatting:
     def test_tree_view_str(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).filter(is_even).sink(noop)
 
         report = s.emit_profiled(5)
@@ -327,7 +327,7 @@ class TestReportFormatting:
         assert "Overhead:" in output
 
     def test_sorted_view(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).filter(is_even).sink(noop)
 
         report = s.emit_profiled(5)
@@ -335,7 +335,7 @@ class TestReportFormatting:
         report.print(sort_by="time")
 
     def test_to_dict_structure(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
@@ -356,7 +356,7 @@ class TestReportFormatting:
             assert "items_out" in node
 
     def test_to_list(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
@@ -364,7 +364,7 @@ class TestReportFormatting:
         assert len(lst) > 0
 
     def test_getters(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.map(double).sink(noop)
 
         report = s.emit_profiled(5)
@@ -380,7 +380,7 @@ class TestReportFormatting:
 
 class TestFlattenProfiling:
     def test_flatten_items_out_gt_items_in(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.flatten().sink(noop)
 
         report = s.emit_profiled([1, 2, 3])
@@ -396,7 +396,7 @@ class TestFlattenProfiling:
 
 class TestAccumulateProfiling:
     def test_accumulate_func_time(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.accumulate(lambda state, x: state + x, start=0).sink(noop)
 
         report = s.emit_batch_profiled([1, 2, 3, 4, 5])
@@ -412,7 +412,7 @@ class TestAccumulateProfiling:
 
 class TestEmptyPipeline:
     def test_source_only(self):
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.sink(noop)
 
         s.start_profiling()

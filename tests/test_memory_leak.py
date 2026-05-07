@@ -36,10 +36,10 @@ def run_leak_test(setup_func, run_func, iterations=50_000, allowed_growth_mb=5.0
 
 
 def test_leak_async_false_pipeline():
-    """Test standard map/filter/sink pipeline with asynchronous=False."""
+    """Test standard map/filter/sink pipeline ."""
 
     def setup():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         # Chain typical nodes to exercise argument packing optimizations
         s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).sink(lambda x: None)
         return s
@@ -55,7 +55,7 @@ def test_leak_emit_batch():
     """Test repeated emit_batch calls."""
 
     def setup():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         s.map(lambda x: x).sink(lambda x: None)
         return s
 
@@ -74,7 +74,7 @@ def test_leak_split_union_cloning():
     """Test the cloning logic in propagate_batch at splits."""
 
     def setup():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         # 3 branches to force 2 clones + 1 move in propagate_batch
         b1 = s.map(lambda x: x)
         b2 = s.map(lambda x: x)
@@ -98,7 +98,7 @@ def test_leak_accumulate_state():
     """Test accumulate which holds state, ensuring old state is dropped."""
 
     def setup():
-        s = akayu.Stream(asynchronous=False)
+        s = akayu.Stream()
         s.accumulate(lambda acc, x: x, start=0).sink(lambda x: None)
         return s
 

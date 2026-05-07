@@ -11,7 +11,7 @@ def test_write_file_sink():
         path = f.name
 
     try:
-        s = Stream(asynchronous=False)
+        s = Stream()
         # Using to_text_file as a utility sink
         s.sink(to_text_file, path)
 
@@ -68,7 +68,7 @@ def test_write_file_sink_append():
         path = f.name
 
     try:
-        s = Stream(asynchronous=False)
+        s = Stream()
         s.sink(to_text_file, path)
 
         # First batch of writes

@@ -1,7 +1,5 @@
-import asyncio
 import contextvars
 import dis
-import inspect
 import os
 import sys
 import threading
@@ -509,39 +507,6 @@ def _get_caller_location():
     except ValueError:
         return "<unknown>"
 
-async def _process_async(awaitable, downstreams):
-    val = await awaitable
-    results = []
-    for d in downstreams:
-        res = d.update(val)
-        if res is not None:
-            results.append(res)
-    if results:
-        await asyncio.gather(*results)
-
-async def _gather(futures):
-    await asyncio.gather(*futures)
-
-async def _filter_async(coro, x, downstreams):
-    allowed = await coro
-    if allowed:
-        results = []
-        for d in downstreams:
-            res = d.update(x)
-            if res is not None:
-                results.append(res)
-        if results:
-            await asyncio.gather(*results)
-
-def _is_sync_callable(func):
-    """Return True if func is definitely synchronous (not a coroutine function)."""
-    if inspect.iscoroutinefunction(func):
-        return False
-    if inspect.isasyncgenfunction(func):
-        return False
-    # Assume sync for regular functions/lambdas
-    return True
-
 def _build_map_func(func, args, kwargs):
     # args is a tuple or None, kwargs is a dict or None
     if not args and not kwargs:
@@ -618,21 +583,17 @@ def _parallel_execute(val, downstreams):
     pool = _get_global_pool()
 
     def make_update_fn(d, v):
-        # Copy context for THIS specific thread (each thread gets its own copy)
         ctx = contextvars.copy_context()
         def update_in_context():
-            # Acquire per-node lock to prevent concurrent borrows
             lock = _get_node_lock(d)
             with lock:
                 return ctx.run(d.update, v)
         return update_in_context
 
-    # Submit all downstream updates to the thread pool
     futures = []
     for d in downstreams:
         futures.append(pool.submit(make_update_fn(d, val)))
 
-    # Wait for all to complete and collect results
     results = []
     errors = []
     for f in futures:
@@ -643,14 +604,13 @@ def _parallel_execute(val, downstreams):
         except Exception as e:
             errors.append(e)
 
-    # If any errors occurred, raise the first one
     if errors:
         raise errors[0]
 
-    # If any returned coroutines, gather them
-    if results:
-        return asyncio.gather(*results)
     return None
+
+def _gather(futures):
+    pass
 
 def _safe_update(node, val):
     """Call node.update(val) with per-node locking to prevent concurrent borrows."""
@@ -899,78 +859,3 @@ class _PrefetchBatchMapState:
                 self.ready[seq] = self.pending[seq].result()
             self.pending.clear()
             return self._collect_ready()
-
-
-class _AsyncState:
-    """State manager for async map operations with asynchronous=True.
-
-    Manages concurrent execution of async coroutines while preserving output order.
-    Uses a dedicated event loop running in a background thread.
-
-    Returns results to Rust for propagation instead of calling d.update() directly,
-    to avoid thread-safety issues with PyO3 borrows.
-    """
-
-    def __init__(self):
-        import threading
-        self.loop = asyncio.new_event_loop()
-        self.loop_thread = threading.Thread(target=self.loop.run_forever, daemon=True)
-        self.loop_thread.start()
-        self.pending = {}    # {seq_num: Future}
-        self.next_seq = 0    # next item sequence number
-        self.next_emit = 0   # next sequence to emit
-        self.ready = {}      # {seq_num: result} for completed out-of-order
-        self._lock = threading.Lock()
-
-    def submit(self, coro):
-        """Submit coroutine, return ready results in order."""
-        with self._lock:
-            seq = self.next_seq
-            self.next_seq += 1
-            future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-            self.pending[seq] = future
-
-        # Collect ready results in order
-        results = []
-        with self._lock:
-            # First, check if any completed pending futures can be moved to ready
-            for s in list(self.pending.keys()):
-                if self.pending[s].done():
-                    res = self.pending.pop(s).result()
-                    if s == self.next_emit:
-                        results.append(res)
-                        self.next_emit += 1
-                    else:
-                        self.ready[s] = res
-
-            # Then emit any consecutive ready results
-            while self.next_emit in self.ready:
-                results.append(self.ready.pop(self.next_emit))
-                self.next_emit += 1
-
-        return results
-
-    def flush(self):
-        """Wait for all pending and return in order."""
-        results = []
-        with self._lock:
-            pending_items = list(self.pending.items())
-
-        # Wait for all pending futures (outside lock to avoid deadlock)
-        for seq, future in pending_items:
-            res = future.result()
-            with self._lock:
-                if seq == self.next_emit:
-                    results.append(res)
-                    self.next_emit += 1
-                else:
-                    self.ready[seq] = res
-                self.pending.pop(seq, None)
-
-        # Collect any remaining ready results in order
-        with self._lock:
-            while self.next_emit in self.ready:
-                results.append(self.ready.pop(self.next_emit))
-                self.next_emit += 1
-
-        return results

@@ -45,7 +45,7 @@ def fmt(ms, ips):
 
 def deep_akayu():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -61,7 +61,7 @@ def deep_akayu():
 
 def deep_akayu_batch():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -106,7 +106,7 @@ def deep_python():
 
 def diamond_akayu():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -121,7 +121,7 @@ def diamond_akayu():
 
 def diamond_akayu_batch():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -163,7 +163,7 @@ def diamond_python():
 
 def fanout_akayu():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -176,7 +176,7 @@ def fanout_akayu():
 
 def fanout_akayu_batch():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -217,7 +217,7 @@ def fanout_python():
 
 def complex_dag_akayu():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -232,7 +232,7 @@ def complex_dag_akayu():
 
 def complex_dag_akayu_batch():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -279,10 +279,10 @@ def complex_dag_python():
 
 def multi_union_akayu():
     import akayu
-    s1 = akayu.Stream(asynchronous=False)
-    s2 = akayu.Stream(asynchronous=False)
-    s3 = akayu.Stream(asynchronous=False)
-    s4 = akayu.Stream(asynchronous=False)
+    s1 = akayu.Stream()
+    s2 = akayu.Stream()
+    s3 = akayu.Stream()
+    s4 = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -332,7 +332,7 @@ def multi_union_python():
 
 def accumulate_akayu():
     import akayu
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -380,9 +380,9 @@ def accumulate_python():
 
 def zip_akayu():
     import akayu
-    s1 = akayu.Stream(asynchronous=False)
-    s2 = akayu.Stream(asynchronous=False)
-    s3 = akayu.Stream(asynchronous=False)
+    s1 = akayu.Stream()
+    s2 = akayu.Stream()
+    s3 = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count
@@ -425,9 +425,9 @@ def zip_python():
 
 def combine_latest_akayu():
     import akayu
-    s1 = akayu.Stream(asynchronous=False)
-    s2 = akayu.Stream(asynchronous=False)
-    s3 = akayu.Stream(asynchronous=False)
+    s1 = akayu.Stream()
+    s2 = akayu.Stream()
+    s3 = akayu.Stream()
     count = 0
     def inc(x):
         nonlocal count

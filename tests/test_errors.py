@@ -30,7 +30,7 @@ def test_error_propagation():
 
 
 def test_error_propagation_batch():
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
 
     def failing_func(x):
         if x == 2:
@@ -92,7 +92,7 @@ def test_error_in_accumulate():
 
 def test_error_in_batch_map():
     """Test error propagation from a batch_map function."""
-    s = akayu.Stream(asynchronous=False)
+    s = akayu.Stream()
 
     def bad_batch(items):
         raise RuntimeError("batch kaboom")

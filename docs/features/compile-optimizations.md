@@ -8,7 +8,6 @@ When you call `.compile()`, akayu:
 
 1. **Freezes the topology** - Prevents further modifications to the stream graph
 1. **Applies chain fusion** - Combines consecutive operations into single nodes
-1. **Enables async check elimination** - Skips unnecessary awaitable checks for sync-only pipelines
 1. **Marks convergence points** - Identifies nodes that need thread-safe locking for `par()` + `prefetch()` combinations
 <!-- pytest-codeblocks:skip -->
 ```python
@@ -166,29 +165,6 @@ flowchart LR
     end
     before -.-> after
 ```
-
-## Async Check Optimization
-
-If all functions in the pipeline are synchronous, akayu can skip checking whether return values are awaitables:
-
-```mermaid
-flowchart LR
-    subgraph before [Before: Per-Item Checks]
-        N1[Map]:::process --"result"--> C1{"is awaitable?"}:::warn
-        C1 --"no"--> N2[Filter]:::process --"result"--> C2{"is awaitable?"}:::warn
-        C2 --"no"--> N3[Sink]:::sink
-    end
-
-    subgraph after [After: Checks Eliminated]
-        M1["Map 🔒"]:::process --"result"--> M2["Filter 🔒"]:::process --"result"--> M3["Sink 🔒"]:::sink
-    end
-
-    before -.-> after
-```
-
-All nodes detected as sync → `skip_async_check = true` (no `isawaitable()` calls)
-
-This optimization is only safe after compile because the topology is frozen.
 
 ## When to Use `.compile()`
 
