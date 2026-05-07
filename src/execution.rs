@@ -82,6 +82,38 @@ fn vcall1(
     }
 }
 
+/// Advance an `ExtractBetween` state machine by one item, returning the
+/// completed chunk when `close` fires on a non-empty buffer.
+///
+/// Only the predicate for the current state is called: `open` while outside,
+/// `close` while inside. This lets one predicate serve as both delimiters.
+#[allow(clippy::too_many_arguments)]
+fn extract_between_step(
+    py: Python,
+    x: &Py<PyAny>,
+    buffer: &mut Vec<Py<PyAny>>,
+    inside: &mut bool,
+    (open, open_vc): (&Py<PyAny>, &Option<pyo3::ffi::vectorcallfunc>),
+    (close, close_vc): (&Py<PyAny>, &Option<pyo3::ffi::vectorcallfunc>),
+    name: &str,
+    source_location: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (pred, vc) = if *inside { (close, close_vc) } else { (open, open_vc) };
+    let res = wrap_error(py, vcall1(py, pred, x, vc), name, source_location)?;
+    if !res.is_truthy(py)? {
+        if *inside {
+            buffer.push(x.clone_ref(py));
+        }
+        return Ok(None);
+    }
+    *inside = !*inside;
+    if *inside || buffer.is_empty() {
+        return Ok(None);
+    }
+    let chunk = std::mem::take(buffer);
+    Ok(Some(PyTuple::new(py, chunk)?.into_any().unbind()))
+}
+
 /// Apply a `BuiltinOp` to a single value, returning the result.
 ///
 /// This is the recursive workhorse for Chain, And, Or, Negate.
@@ -1063,6 +1095,48 @@ impl Stream {
                 return Ok(None);
             }
 
+            NodeLogic::ExtractBetween {
+                buffer,
+                open,
+                close,
+                inside,
+                close_vectorcall,
+            } => {
+                let t = prof_start(profiling_active);
+                let mut emitted = Vec::new();
+                for x in items {
+                    if let Some(chunk) = extract_between_step(
+                        py,
+                        &x,
+                        buffer,
+                        inside,
+                        (open, &self.cached_vectorcall),
+                        (close, close_vectorcall),
+                        &self.name,
+                        &self.source_location,
+                    )? {
+                        emitted.push(chunk);
+                    }
+                }
+                let items_out = emitted.len() as u64;
+                if let Some(t) = t
+                    && profiling_active
+                {
+                    profiling::record_node(
+                        node_id,
+                        t.elapsed(),
+                        items_in,
+                        items_out,
+                        &self.name,
+                        &self.source_location,
+                    );
+                }
+                if !emitted.is_empty() {
+                    return self.propagate_batch(py, emitted);
+                }
+                return Ok(None);
+            }
+
             // -- Multi-stream --
             NodeLogic::Tag { index } => {
                 let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
@@ -1416,6 +1490,43 @@ impl Stream {
                     profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
                 }
                 return Ok(None);
+            }
+            NodeLogic::ExtractBetween {
+                buffer,
+                open,
+                close,
+                inside,
+                close_vectorcall,
+            } => {
+                let t = prof_start(profiling_active);
+                let chunk = extract_between_step(
+                    py,
+                    &x,
+                    buffer,
+                    inside,
+                    (open, &self.cached_vectorcall),
+                    (close, close_vectorcall),
+                    &self.name,
+                    &self.source_location,
+                )?;
+                if let Some(t) = t {
+                    ft = t.elapsed();
+                }
+                if profiling_active {
+                    let items_out = chunk.is_some() as u64;
+                    profiling::record_node(
+                        node_id,
+                        ft,
+                        1,
+                        items_out,
+                        &self.name,
+                        &self.source_location,
+                    );
+                }
+                return match chunk {
+                    Some(chunk) => self.propagate(py, chunk),
+                    None => Ok(None),
+                };
             }
             NodeLogic::Tag { index } => {
                 let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
