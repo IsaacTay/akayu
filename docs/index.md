@@ -36,6 +36,7 @@ print(results)  # [6, 8, 10, 12, 14, 16, 18]
 - [Getting Started Guide](getting-started.md) — Installation, basic usage, and core concepts
 - [Patterns & Best Practices](patterns.md) — Common architectures, concurrency strategies, and anti-patterns
 - [API Reference](api.md) — Full method documentation
+- [MultiStream](features/multistream.md) — Batch operations across multiple streams
 - [Benchmarks](benchmarks.md) — Performance comparisons vs streamz
 - [Migrating from streamz](migrating-from-streamz.md) — Porting guide for streamz users
 - [FAQ](faq.md) — Common questions and troubleshooting

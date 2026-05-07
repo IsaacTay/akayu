@@ -577,15 +577,25 @@ class MultiStream:
         ```
     """
 
-    def __init__(self, streams: Sequence[Stream]) -> None:
-        """Create a MultiStream batch from a sequence of Stream instances.
+    @overload
+    def __init__(self, streams: Sequence[Stream]) -> None: ...
+    @overload
+    def __init__(self, streams: dict[str, Stream]) -> None: ...
+
+    def __init__(self, streams: Sequence[Stream] | dict[str, Stream]) -> None:
+        """Create a MultiStream batch from a sequence or dict of Stream instances.
 
         Args:
-            streams: List or tuple of Stream instances.
+            streams: List, tuple, or dict of Stream instances.
 
         Raises:
             TypeError: If any element is not a Stream.
         """
+        ...
+
+    @property
+    def keyed(self) -> bool:
+        """True if constructed with a dict, False if constructed with a list."""
         ...
 
     def __len__(self) -> int:
@@ -600,12 +610,62 @@ class MultiStream:
     def __getitem__(self, key: int) -> Stream: ...
     @overload
     def __getitem__(self, key: slice) -> MultiStream: ...
+    @overload
+    def __getitem__(self, key: str) -> Stream: ...
+
+    def __getitem__(self, key: int | slice | str) -> Stream | MultiStream:
+        """Get stream(s) by index, slice, or key.
+
+        In list mode: supports int and slice only. str raises TypeError.
+        In dict mode: supports str (returns Stream, raises KeyError if missing) and int/slice.
+
+        Args:
+            key: int index, slice, or str key (dict mode only).
+
+        Returns:
+            Stream for single int/str key, MultiStream for slice.
+
+        Raises:
+            KeyError: If key not found in dict mode.
+            TypeError: If str key used in list mode, or wrong key type.
+        """
+        ...
+
+    def keys(self) -> Iterator[str]:
+        """Iterate over keys in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
+        ...
+
+    def values(self) -> Iterator[Stream]:
+        """Iterate over stream values in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
+        ...
+
+    def items(self) -> Iterator[tuple[str, Stream]]:
+        """Iterate over (key, stream) pairs in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
+        ...
+
+    def to_dict(self) -> dict[str, Stream]:
+        """Convert to dict of streams in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
+        ...
 
     def __repr__(self) -> str:
         """Return string representation."""
         ...
-
-    # --- transforms ---
 
     def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
         """Apply a map to each stream in the batch."""
@@ -649,17 +709,31 @@ class MultiStream:
         """Apply chunk_by to each stream in the batch."""
         ...
 
-    # --- collectors ---
+    @overload
+    def to_list(self) -> list[list[Any]]: ...
+    @overload
+    def to_list(self) -> dict[str, list[Any]]: ...
 
-    def to_list(self) -> list[list[Any]]:
-        """Collect each stream into a list. Returns a list of lists."""
+    def to_list(self) -> list[list[Any]] | dict[str, list[Any]]:
+        """Collect each stream into a list.
+
+        In list mode: returns list of lists.
+        In dict mode: returns dict of lists.
+        """
         ...
 
-    def to_set(self) -> list[set[Any]]:
-        """Collect each stream into a set. Returns a list of sets."""
-        ...
+    @overload
+    def to_set(self) -> list[set[Any]]: ...
+    @overload
+    def to_set(self) -> dict[str, set[Any]]: ...
 
-    # --- actions ---
+    def to_set(self) -> list[set[Any]] | dict[str, set[Any]]:
+        """Collect each stream into a set.
+
+        In list mode: returns list of sets.
+        In dict mode: returns dict of sets.
+        """
+        ...
 
     def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
         """Flush all streams in the batch."""
@@ -672,8 +746,6 @@ class MultiStream:
     def compile(self) -> MultiStream:
         """Compile all streams in the batch. Returns self for chaining."""
         ...
-
-    # --- broadcasting combinators ---
 
     def union(self, *others: _StreamOrMultiStream) -> MultiStream:
         """Pairwise union with broadcasting.
