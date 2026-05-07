@@ -1045,17 +1045,17 @@ impl Stream {
                     }
                 }
                 let items_out = emitted.len() as u64;
-                if let Some(t) = t {
-                    if profiling_active {
-                        profiling::record_node(
-                            node_id,
-                            t.elapsed(),
-                            items_in,
-                            items_out,
-                            &self.name,
-                            &self.source_location,
-                        );
-                    }
+                if let Some(t) = t
+                    && profiling_active
+                {
+                    profiling::record_node(
+                        node_id,
+                        t.elapsed(),
+                        items_in,
+                        items_out,
+                        &self.name,
+                        &self.source_location,
+                    );
                 }
                 if !emitted.is_empty() {
                     return self.propagate_batch(py, emitted);
