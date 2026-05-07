@@ -60,6 +60,22 @@ clean-all: clean
 rebuild: sync
     uv pip install -e . --reinstall-package akayu
 
+# Build and upload wheel to copyparty
+publish: build-wheels
+    #!/usr/bin/env bash
+    wheel=$(ls -t dist/*.whl | head -1)
+    name=$(basename "$wheel")
+    url="https://api-v2.precix.io/share/akayu_wheels/$name"
+    echo "Uploading $name ..."
+    status=$(curl -s -o /dev/null -w '%{http_code}' -T "$wheel" "$url")
+    if [ "$status" = "201" ]; then
+        echo "Uploaded"
+        echo "Install: uv add 'akayu @ $url'"
+    else
+        echo "Upload failed (HTTP $status)"
+        exit 1
+    fi
+
 # Build wheels for Python 3.13
 build-wheels:
     mkdir -p dist
