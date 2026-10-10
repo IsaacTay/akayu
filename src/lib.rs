@@ -18,6 +18,7 @@ mod builtin;
 mod combinators;
 mod error;
 mod execution;
+mod gc;
 mod helpers;
 mod node;
 mod operations;
@@ -62,7 +63,7 @@ impl StreamPtr {
 ///     >>> source.emit(5)
 ///     >>> result
 ///     [10]
-#[pyclass(subclass)]
+#[pyclass(subclass, weakref)]
 #[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 pub struct Stream {
     pub(crate) logic: NodeLogic,
