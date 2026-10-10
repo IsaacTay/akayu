@@ -43,6 +43,9 @@
             openssl
             zlib
             stdenv.cc.cc.lib
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            # Instruction counts for scripts/bench_cost.py
+            linuxPackages.perf
           ];
 
           shellHook = ''
