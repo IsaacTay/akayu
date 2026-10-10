@@ -9,6 +9,8 @@
 
 /// tab | pip
 
+<!--pytest.mark.skip-->
+
 ```bash
 pip install akayu
 ```
@@ -16,6 +18,8 @@ pip install akayu
 ///
 
 /// tab | uv
+
+<!--pytest.mark.skip-->
 
 ```bash
 uv add akayu
@@ -25,6 +29,8 @@ uv add akayu
 
 /// tab | pixi
 
+<!--pytest.mark.skip-->
+
 ```bash
 pixi add akayu
 ```
@@ -32,6 +38,8 @@ pixi add akayu
 ///
 
 ## Verify Installation
+
+<!--pytest.mark.skip-->
 
 ```bash
 python -c "import akayu; print('akayu installed!')"
@@ -89,6 +97,11 @@ flowchart LR
 ```
 
 ```python
+import akayu
+
+source = akayu.Stream()
+source.sink(print)
+
 # Single item
 source.emit(5)
 
@@ -101,31 +114,43 @@ source.emit_batch([1, 2, 3, 4, 5])
 The `compile()` step enables graph optimizations but is **optional**.
 
 **What compile() does:**
+
 - **Operator fusion** — Chains of `map.map.map` become a single fused operation
 - **Graph locking** — Prevents accidental modifications after optimization
 - **State initialization** — Prepares accumulate states upfront
 
 **When to use it:**
+
 - Production pipelines processing high volumes
 - Hot loops where overhead matters
 - When you want protection against accidental graph mutation
 
 **When to skip it:**
+
 - Debugging — uncompiled graphs are easier to inspect
 - Dynamic pipelines — you need to add/remove nodes at runtime
 - Rapid prototyping — faster iteration without recompiling
 
 ```python
+import akayu
+
+source = akayu.Stream()
+source.map(lambda x: x * 2).sink(print)
+
 # Optional but recommended for production
 source.compile()
-source.emit_batch(data)
+source.emit_batch([1, 2, 3])
 ```
 
 ## Common Mistakes
 
 ### Emitting to a non-source node
 
+<!--pytest.mark.xfail(strict=True)-->
+
 ```python
+import akayu
+
 source = akayu.Stream()
 mapped = source.map(lambda x: x * 2)
 
@@ -133,13 +158,19 @@ mapped.emit(5)  # ❌ RuntimeError: Cannot emit to non-source node
 ```
 
 **Error:**
+
 ```
-RuntimeError: Cannot emit to non-source node. Only source nodes (created with Stream()) can receive data.
+RuntimeError: Emit called on non-source node 'map(<lambda>)'. Data can only be emitted into source nodes.
 ```
 
 **Fix:** Always emit to the original source node:
 
 ```python
+import akayu
+
+source = akayu.Stream()
+mapped = source.map(lambda x: x * 2)
+
 source.emit(5)  # ✅ Correct
 ```
 
@@ -148,6 +179,8 @@ source.emit(5)  # ✅ Correct
 Every operation accepts an optional `stream_name` parameter. Names appear in error messages, making it easy to trace problems in complex pipelines.
 
 ```python
+import akayu
+
 source = akayu.Stream(name="input")
 doubled = source.map(lambda x: x * 2, stream_name="double")
 filtered = doubled.filter(lambda x: x > 10, stream_name="filter_gt_10")

@@ -4,6 +4,8 @@
 
 **No.** akayu distributes pre-built wheels via pip. Just run:
 
+<!--pytest.mark.skip-->
+
 ```bash
 pip install akayu
 ```
@@ -14,13 +16,13 @@ No Rust toolchain, no compilation step.
 
 `compile()` is **optional** but recommended for production use:
 
-| Scenario | compile()? | Why |
-|----------|------------|-----|
-| Production pipelines | ✅ Yes | Enables operator fusion, reduces overhead |
-| Hot loops | ✅ Yes | Minimizes per-item overhead |
-| Debugging | ❌ No | Uncompiled graphs are easier to inspect |
-| Dynamic pipelines | ❌ No | You need to modify the graph at runtime |
-| Prototyping | ❌ No | Faster iteration without recompiling |
+| Scenario             | compile()? | Why                                       |
+| -------------------- | ---------- | ----------------------------------------- |
+| Production pipelines | ✅ Yes     | Enables operator fusion, reduces overhead |
+| Hot loops            | ✅ Yes     | Minimizes per-item overhead               |
+| Debugging            | ❌ No      | Uncompiled graphs are easier to inspect   |
+| Dynamic pipelines    | ❌ No      | You need to modify the graph at runtime   |
+| Prototyping          | ❌ No      | Faster iteration without recompiling      |
 
 ## What's the difference between `emit()` and `emit_batch()`?
 
@@ -28,6 +30,11 @@ No Rust toolchain, no compilation step.
 - `emit_batch([...])` — Emit a **collection of items** more efficiently
 
 ```python
+import akayu
+
+source = akayu.Stream()
+source.sink(print)
+
 # Single item (higher per-item overhead)
 source.emit(1)
 source.emit(2)
@@ -44,8 +51,10 @@ For large datasets (>1000 items), prefer `emit_batch()` with `batch_map()` for o
 ### 1. Name your streams
 
 ```python
+import akayu
+
 source = akayu.Stream(name="input")
-processed = source.map(process, stream_name="process_step")
+processed = source.map(lambda x: x * 2, stream_name="double")
 ```
 
 ### 2. Skip compile() while debugging
@@ -53,6 +62,8 @@ processed = source.map(process, stream_name="process_step")
 Compiled graphs are harder to inspect. Debug with an uncompiled graph first:
 
 ```python
+import akayu
+
 source = akayu.Stream()
 # ... build pipeline ...
 # source.compile()  # Comment out for debugging
@@ -60,11 +71,15 @@ source = akayu.Stream()
 
 ### 3. Add print sinks temporarily
 
+<!-- pytest-codeblocks:cont -->
+
 ```python
-source.map(transform).sink(print)  # Inspect values at any stage
+source.map(lambda x: x + 1).sink(print)  # Inspect values at any stage
 ```
 
 ### 4. Profile hot paths
+
+<!--pytest.mark.skip-->
 
 ```python
 import cProfile
@@ -85,37 +100,46 @@ akayu uses thread-based concurrency via `par()` and `prefetch()` for parallel ex
 - For true parallelism, use `par()` which manages its own thread pool
 
 ```python
-# Safe: Multiple threads emitting to one source
+from concurrent.futures import ThreadPoolExecutor
+
+import akayu
+
+results = []
 source = akayu.Stream()
-source.map(heavy_task).sink(print)
+source.map(lambda x: x * x).sink(results.append)
 source.compile()
 
+# Safe: multiple threads emitting to one source
 with ThreadPoolExecutor(4) as ex:
-    for item in items:
+    for item in range(100):
         ex.submit(source.emit, item)
+
+assert sorted(results) == [x * x for x in range(100)]
 ```
 
 ## How does it compare to streamz/RxPY/aiostream?
 
-| Library | Performance | Async | Rust Backend | Learning Curve |
-|---------|-------------|-------|--------------|----------------|
-| **akayu** | High (~3x vs streamz) | ✅ | ✅ | Low |
-| **streamz** | Medium | ✅ | ❌ | Low |
-| **RxPY** | Medium | ❌ | ❌ | Medium |
-| **aiostream** | Medium | ✅ | ❌ | Low |
+| Library       | Performance           | Async                                 | Rust Backend | Learning Curve |
+| ------------- | --------------------- | ------------------------------------- | ------------ | -------------- |
+| **akayu**     | High (~3x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
+| **streamz**   | Medium                | ✅                                    | ❌           | Low            |
+| **RxPY**      | Medium                | ❌                                    | ❌           | Medium         |
+| **aiostream** | Medium                | ✅                                    | ❌           | Low            |
 
-**akayu** is the fastest pure-Python streams library while maintaining streamz's simple API.
+**akayu** keeps streamz's simple API with a Rust core; see [Benchmarks](benchmarks.md) for measured speedups.
 
 ## Why is my pipeline slow?
 
 ### Common causes:
 
 1. **Too much parallelism on cheap ops** — `par()` overhead only pays off for ops >1ms
-2. **Not using `compile()`** — Missing operator fusion
-3. **Item-by-item processing** — Use `emit_batch()` + `batch_map()` for bulk data
-4. **Python function overhead** — Consider numba or vectorized ops in `batch_map()`
+1. **Not using `compile()`** — Missing operator fusion
+1. **Item-by-item processing** — Use `emit_batch()` + `batch_map()` for bulk data
+1. **Python function overhead** — Consider numba or vectorized ops in `batch_map()`
 
 ### Debugging steps:
+
+<!--pytest.mark.skip-->
 
 ```python
 # 1. Profile to find the bottleneck

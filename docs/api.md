@@ -50,34 +50,34 @@ members:
 
 ::: akayu.MultiStream
 options:
-  members:
-    - __init__
-    - map
-    - filter
-    - flatten
-    - collect
-    - flush
-    - sink
-    - accumulate
-    - starmap
-    - batch_map
-    - prefetch
-    - compile
-    - chunk_by
-    - drain
-    - to_list
-    - to_set
-    - to_dict
-    - par
-    - parallel
-    - seq
-    - union
-    - combine_latest
-    - zip
-    - profile
-    - keys
-    - values
-    - items
+members:
+\- __init__
+\- map
+\- filter
+\- flatten
+\- collect
+\- flush
+\- sink
+\- accumulate
+\- starmap
+\- batch_map
+\- prefetch
+\- compile
+\- chunk_by
+\- drain
+\- to_list
+\- to_set
+\- to_dict
+\- par
+\- parallel
+\- seq
+\- union
+\- combine_latest
+\- zip
+\- profile
+\- keys
+\- values
+\- items
 
 <!-- ## Module Functions -->
 

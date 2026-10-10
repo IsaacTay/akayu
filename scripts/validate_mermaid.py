@@ -7,6 +7,14 @@ import tempfile
 import argparse
 
 
+def _browser_env():
+    """mmdc's headless Chromium must not pick up host libraries: on NixOS a
+    host LD_LIBRARY_PATH makes it load an incompatible libasound and fail."""
+    env = dict(os.environ)
+    env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
 def check_mermaid(files):
     """
     Validates Mermaid diagrams in markdown files using mermaid-cli (mmdc).
@@ -23,6 +31,7 @@ def check_mermaid(files):
                 subprocess.check_output(
                     ["mmdc", "-i", file_path, "-o", output_file],
                     stderr=subprocess.STDOUT,
+                    env=_browser_env(),
                 )
                 print(" OK")
             except subprocess.CalledProcessError as e:
