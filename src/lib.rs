@@ -70,8 +70,6 @@ pub struct Stream {
     pub(crate) downstreams: Vec<Py<Stream>>,
     pub(crate) parents: std::sync::Mutex<Vec<Py<Stream>>>,
     pub(crate) name: String,
-    /// True if this node's function is definitely synchronous (not a coroutine function)
-    pub(crate) func_is_sync: bool,
     /// True if topology has been frozen/optimized on first emit
     pub(crate) frozen: bool,
     /// True if this node needs thread-safe locking (convergence point from parallel branches)

@@ -26,7 +26,6 @@ macro_rules! define_py_helper {
 }
 
 // Python function references initialized at module load
-define_py_helper!(GATHER, get_gather);
 define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(REJECT_ASYNC, get_reject_async);
@@ -351,7 +350,6 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
             downstreams: Vec::new(),
             parents: std::sync::Mutex::new(Vec::new()),
             name: "file_source".to_string(),
-            func_is_sync: true,
             frozen: false,
             needs_lock: false,
             par_branches_marked: false,
@@ -426,7 +424,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let mname = CString::new("helpers").unwrap();
     let helpers_module = PyModule::from_code(py, &code, &fname, &mname)?;
 
-    let gather = helpers_module.getattr("_gather")?;
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
     let parallel_execute = helpers_module.getattr("_parallel_execute")?;
@@ -437,7 +434,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
     let strip_internal_frames = helpers_module.getattr("_strip_internal_frames")?;
 
-    let _ = GATHER.set(gather.unbind());
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());

@@ -53,7 +53,6 @@ impl Stream {
             NodeLogic::Parallel,
             "par".to_string(),
             source_location,
-            true,
         )?;
         this.downstreams.push(node.clone_ref(py));
         drop(this);
@@ -103,7 +102,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             NodeLogic::Source,
             "seq".to_string(),
             source_location,
-            true,
         )?;
         this.downstreams.push(node.clone_ref(py));
         drop(this);
@@ -156,7 +154,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             NodeLogic::Source,
             "union".to_string(),
             source_location,
-            true,
         )?;
 
         this.downstreams.push(node.clone_ref(py));
@@ -272,7 +269,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             },
             "combine_latest".to_string(),
             source_location.clone(),
-            true,
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
@@ -342,7 +338,6 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
             },
             "zip".to_string(),
             source_location.clone(),
-            true,
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
@@ -377,7 +372,6 @@ impl Stream {
             NodeLogic::Tag { index },
             format!("tag({})", index),
             source_location.to_string(),
-            true,
         )?;
         tag_node
             .borrow_mut(py)
@@ -439,7 +433,6 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         NodeLogic::Source,
         "union".to_string(),
         source_location,
-        false,
     )?;
 
     for stream in &streams {
@@ -554,7 +547,6 @@ pub fn combine_latest(
         },
         "combine_latest".to_string(),
         source_location.clone(),
-        false,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
@@ -618,7 +610,6 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
             NodeLogic::Source,
             "zip".to_string(),
             source_location,
-            true,
         )?;
         stream.borrow_mut(py).downstreams.push(node.clone_ref(py));
         node.borrow(py).parents.lock().unwrap().push(stream_py);
@@ -639,7 +630,6 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         },
         "zip".to_string(),
         source_location.clone(),
-        false,
     )?;
 
     for (i, stream) in streams.iter().enumerate() {
