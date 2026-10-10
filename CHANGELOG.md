@@ -44,6 +44,8 @@ independent of machine load:
 - `map`/`filter`/`sink`/`batch_map(func, *args, **kwargs)` bind the extra arguments natively instead
   of calling a Python wrapper per item: 81% less per item with keyword arguments, 40% with
   positional ones. `starmap(func)` star-calls natively: 13-17% less.
+- `compile()` also optimizes lambdas with defaulted extra parameters, the `lambda x, k=k:`
+  idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
 - 45% less memory per node (565 -> 313 bytes); `compile()` frees the nodes it fuses into chains

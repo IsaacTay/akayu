@@ -11,7 +11,7 @@ described under [Benchmark Details](#benchmark-details).
 | Topology Type | Scenario                    | Speedup over streamz |
 | ------------- | --------------------------- | -------------------- |
 | Deep Chains   | 10 chained maps             | **~51x**             |
-| Branching     | Fan-out, diamond            | **~24x - 44x**       |
+| Branching     | Fan-out, diamond            | **~30x - 44x**       |
 | Merging       | Union, zip, combine_latest  | **~30x - 60x**       |
 | Complex DAG   | Split, flatten, union mixed | **~30x**             |
 
@@ -25,7 +25,7 @@ program.
 | ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | -------------- |
 | [Deep pipeline (10 maps)](#deep-pipeline)       |        373 |                     264 |       19,066 |              240 | **51x faster** |
 | [Diamond (split → union)](#diamond)             |        226 |                     215 |        9,888 |               80 | **44x faster** |
-| [Fan-out (5 branches)](#fan-out)                |        763 |                     753 |       18,224 |              268 | **24x faster** |
+| [Fan-out (5 branches)](#fan-out)                |        603 |                     595 |       18,224 |              264 | **30x faster** |
 | [Complex DAG](#complex-dag)                     |        481 |                     428 |       14,254 |              106 | **30x faster** |
 | [Multi-union (4 sources)](#multi-union)         |        129 |                       - |        7,653 |               44 | **60x faster** |
 | [Accumulate (3 branches)](#accumulate-branches) |        422 |                       - |        9,124 |              119 | **22x faster** |

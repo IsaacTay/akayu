@@ -55,3 +55,19 @@ def test_slice_recognized():
 
 def test_unrecognized_lambda_is_left_alone():
     assert _analyze_lambda(lambda x: (x, x + 1)) is None
+
+
+@pytest.mark.parametrize(
+    ("func", "expected"),
+    [
+        (lambda x, k=3: x + k, ("binop", "+", 3)),
+        (lambda x, lim=5: x > lim, ("compare", ">", 5)),
+        (lambda x, key="a": x[key], ("itemgetter", "a")),
+        (lambda x, y: x + y, None),  # no default: not a constant
+        (lambda x, *, k=1: x + k, None),  # keyword-only
+        (lambda x, k=3: k - x, None),  # the item must come first
+    ],
+    ids=["binop", "compare", "itemgetter", "no-default", "kw-only", "reversed"],
+)
+def test_defaulted_parameters_are_constants(func, expected):
+    assert _analyze_lambda(func) == expected

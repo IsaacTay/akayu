@@ -78,3 +78,17 @@ def test_entries_die_with_their_code():
     del lam
     gc.collect()
     assert key not in _analysis_cache
+
+
+def test_loop_captured_defaults_stay_per_branch():
+    """`lambda x, k=k:` is recognised (k is a constant: nodes pass one
+    argument). Branches share the lambda's code but not its default, so each
+    must get its own analysis."""
+    for compile_graph in (False, True):
+        s, out = akayu.Stream(), []
+        for k in range(5):
+            s.map(lambda x, k=k: x + k).sink(out.append)
+        if compile_graph:
+            s.compile()
+        s.emit(100)
+        assert out == [100, 101, 102, 103, 104]
