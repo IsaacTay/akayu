@@ -38,7 +38,8 @@ independent of machine load:
 - `par()` and `prefetch()` use a Rust thread pool instead of `ThreadPoolExecutor`: ~95% fewer
   instructions per item (compiled `par()`: 199,000 -> 6,100).
 - Module-level `union()` and `par()` convergence points lock in Rust instead of through a
-  Python helper per item: `union()` costs 87-92% less per item.
+  Python helper per item: `union()` costs 87-92% less per item. `compile()` gives a graph
+  without `par()` one shared lock and drops the per-item merge locks (union: 14% less).
 - `zip()` / `combine_latest()` no longer pack and unpack an `(index, value)` tuple per item:
   78% / 71% less per item, 65% less in batches.
 - `map`/`filter`/`sink`/`batch_map(func, *args, **kwargs)` bind the extra arguments natively instead
@@ -72,6 +73,10 @@ independent of machine load:
 - `from_text_file()` no longer loses lines emitted before the pipeline is attached, or swallows errors.
 - par()/prefetch() per-node locks are released with their node.
 - The type stub matches the runtime API (checked with stubtest), and every documentation example runs.
+- Streams merged with `a.union(b)`, `zip()` or `combine_latest()` and emitted from different
+  threads raised "Already borrowed", lost updates, or crashed (compiled `combine_latest`); only
+  `akayu.union()` locked its shared node. Every merge now does, and a `sink(target.emit)`
+  shortcut takes the target's lock like `target.emit()`.
 - A failed `prefetch()` item raises once; it used to be re-raised by every later `emit()`/`flush()`.
 - Nested `par()` much wider than the thread pool deadlocked (40 outer branches on 16 workers,
   each waiting on inner branches queued behind the others); it now completes.
