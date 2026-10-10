@@ -29,7 +29,7 @@ run_py38() {
 }
 
 echo "Installing test dependencies..."
-run_py38 "uv pip install pytest pytest-asyncio pytest-benchmark pytest-codeblocks streamz psutil toolz tornado exceptiongroup typing-extensions tomli iniconfig pluggy packaging zict"
+run_py38 "uv pip install pytest pytest-asyncio pytest-benchmark pytest-codeblocks hypothesis numpy scipy streamz psutil toolz tornado exceptiongroup typing-extensions tomli iniconfig pluggy packaging zict"
 
 echo "Building akayu wheel for Python 3.8..."
 # Build specifically for the python inside the venv
