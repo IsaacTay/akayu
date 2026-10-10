@@ -161,6 +161,17 @@ def _resolve(instr, func):
     op = instr[0]
     if op == "LOAD_CONST":
         return instr[1]
+    if op == "LOAD_DEFAULT":
+        # A defaulted parameter (`lambda x, k=k: ...`): nodes call with one
+        # argument, so it always holds its default.
+        code = func.__code__
+        params = code.co_varnames[: code.co_argcount]
+        defaults = func.__defaults__ or ()
+        if instr[1] in params[1:]:
+            i = params.index(instr[1]) - (len(params) - len(defaults))
+            if i >= 0:
+                return defaults[i]
+        return _UNRESOLVABLE
     if op == "LOAD_DEREF":
         # Closure variable — snapshot at compile time
         closure = getattr(func, "__closure__", None)
@@ -653,10 +664,30 @@ def _bindings_match(deps, func):
     return True
 
 
+def _bind_defaults(instrs, code):
+    """Rewrite loads of defaulted parameters as LOAD_DEFAULT, so only the item
+    is LOAD_FAST; split LOAD_FAST_LOAD_FAST (two locals) into two loads."""
+    item = code.co_varnames[0]
+    out = []
+    for op, av in instrs:
+        if op == "LOAD_FAST_LOAD_FAST":
+            names = (code.co_varnames[av >> 4], code.co_varnames[av & 15])
+        elif op == "LOAD_FAST":
+            names = (av,)
+        else:
+            out.append((op, av))
+            continue
+        out.extend(("LOAD_FAST", n) if n == item else ("LOAD_DEFAULT", n) for n in names)
+    return out
+
+
 def _analyze_code(func, code, ctx):
     """Uncached body of _analyze_lambda."""
-    # Must be single-arg, no *args/**kwargs
-    if code.co_argcount != 1:
+    # One item parameter. Further positional parameters are fine if they all
+    # have defaults (the `lambda x, k=k:` idiom for capturing a loop variable):
+    # a node calls with one argument, so they are constants.
+    extra = code.co_argcount - 1
+    if extra < 0 or extra > len(getattr(func, "__defaults__", None) or ()) or code.co_kwonlyargcount:
         return None
     flags = code.co_flags
     if flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
@@ -687,7 +718,7 @@ def _analyze_code(func, code, ctx):
     # For compound expressions, each sub-expression can reference x once
     # We'll let the recursive analyzer handle this naturally
 
-    return _analyze_expr(clean, ctx)
+    return _analyze_expr(_bind_defaults(clean, code), ctx)
 
 
 def _reject_async(func, op):

@@ -43,7 +43,7 @@ Compiled pipelines against streamz, 500,000 items:
 | Topology Type | Scenario                    | Speedup over streamz |
 | ------------- | --------------------------- | -------------------- |
 | Deep Chains   | 10 chained maps             | **~51x**             |
-| Branching     | Fan-out, diamond            | **~24x - 44x**       |
+| Branching     | Fan-out, diamond            | **~30x - 44x**       |
 | Merging       | Union, zip, combine_latest  | **~30x - 60x**       |
 | Complex DAG   | Split, flatten, union mixed | **~30x**             |
 
