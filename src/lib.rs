@@ -80,7 +80,7 @@ pub struct Stream {
     pub(crate) logic: NodeLogic,
     pub(crate) downstreams: Downstreams,
     pub(crate) parents: std::sync::Mutex<Parents>,
-    pub(crate) name: String,
+    pub(crate) name: std::sync::Arc<str>,
     /// True if topology has been frozen/optimized on first emit
     pub(crate) frozen: bool,
     /// True if this node needs thread-safe locking (convergence point from parallel branches)
@@ -91,7 +91,7 @@ pub struct Stream {
     pub(crate) source_location: std::sync::Arc<str>,
     /// Optional builtin fast-path hint. When set, execution bypasses Python
     /// function dispatch for known builtins. Cleared by fusion.
-    pub(crate) builtin_op: Option<Box<BuiltinOp>>,
+    pub(crate) builtin_op: Option<std::sync::Arc<BuiltinOp>>,
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Bypasses per-call type flag check + offset dereference in the hot loop.
     pub(crate) cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,

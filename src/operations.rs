@@ -53,7 +53,7 @@ impl Stream {
                 logic,
                 downstreams: crate::Downstreams::new(),
                 parents: std::sync::Mutex::new(crate::Parents::new()),
-                name,
+                name: name.into(),
                 frozen: false,
                 needs_lock: false,
                 compiled: false,
@@ -78,7 +78,7 @@ impl Stream {
         let lock = std::sync::Arc::clone(&self.lock);
         let _guard = lock.acquire(py);
         if self.flushing {
-            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
+            return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
         }
         self.flushing = true;
         let result = self.flush_inner(py, warn_if_noop);
@@ -222,7 +222,7 @@ impl Stream {
             logic: NodeLogic::Source,
             downstreams: crate::Downstreams::new(),
             parents: std::sync::Mutex::new(crate::Parents::new()),
-            name: name.unwrap_or_else(|| "source".to_string()),
+            name: name.map_or_else(|| "source".into(), Into::into),
             frozen: false,
             needs_lock: false,
             compiled: false,
@@ -296,7 +296,7 @@ impl Stream {
             this.logic = NodeLogic::Prefetched {
                 prefetcher: Box::new(Prefetcher::new(wrapped_func, PrefetchKind::Map, size)),
             };
-            this.name = format!("prefetch_map({size})+{name}");
+            this.name = format!("prefetch_map({size})+{name}").into();
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
@@ -494,7 +494,7 @@ impl Stream {
             this.logic = NodeLogic::Prefetched {
                 prefetcher: Box::new(Prefetcher::new(wrapped_func, PrefetchKind::BatchMap, size)),
             };
-            this.name = format!("prefetch_batch_map({size})+{name}");
+            this.name = format!("prefetch_batch_map({size})+{name}").into();
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
@@ -567,7 +567,7 @@ impl Stream {
                     size,
                 )),
             };
-            this.name = format!("prefetch_filter({size})+{name}");
+            this.name = format!("prefetch_filter({size})+{name}").into();
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
@@ -935,7 +935,7 @@ impl Stream {
     ) -> PyResult<()> {
         // Re-entrancy guard: detect cycles in the flush graph
         if self.flushing {
-            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
+            return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
         }
         self.flushing = true;
         let result = self.drain_inner(py);
@@ -1120,10 +1120,10 @@ impl Stream {
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
         if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(StreamError::ReentrantEmit(self.name.clone()).into());
+            return Err(StreamError::ReentrantEmit(self.name.to_string()).into());
         }
         self.emitting
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1171,10 +1171,10 @@ impl Stream {
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
         if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(StreamError::ReentrantEmit(self.name.clone()).into());
+            return Err(StreamError::ReentrantEmit(self.name.to_string()).into());
         }
         self.emitting
             .store(true, std::sync::atomic::Ordering::Release);
@@ -1231,7 +1231,7 @@ impl Stream {
         let source_py_ptr = slf.as_ptr() as usize;
         let mut this = slf.borrow_mut();
         if this.compiled {
-            return Err(StreamError::AlreadyCompiled(this.name.clone()).into());
+            return Err(StreamError::AlreadyCompiled(this.name.to_string()).into());
         }
 
         let all_nodes = this.optimize_topology_full(py, source_py_ptr);
@@ -1252,7 +1252,7 @@ impl Stream {
     /// * `RuntimeError` - If called on a non-source node or if profiling is already active.
     pub fn start_profiling(&self) -> PyResult<()> {
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
         crate::profiling::start_session()
     }
@@ -1293,7 +1293,7 @@ impl Stream {
         {
             let this = slf.borrow();
             if !matches!(this.logic, NodeLogic::Source) {
-                return Err(StreamError::EmitOnNonSource(this.name.clone()).into());
+                return Err(StreamError::EmitOnNonSource(this.name.to_string()).into());
             }
         }
         let profiler_class = get_profiler_class()?;
@@ -1332,7 +1332,7 @@ impl Stream {
         x: Py<PyAny>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
@@ -1376,7 +1376,7 @@ impl Stream {
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
         if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
+            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();

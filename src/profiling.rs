@@ -198,7 +198,7 @@ pub fn build_report(
     let source_ptr = std::ptr::from_ref(source) as usize;
     let source_profile = data.get(&source_ptr);
     let source_node = ReportNode {
-        name: source.name.clone(),
+        name: source.name.to_string(),
         source_location: source.source_location.to_string(),
         func_time_ns: source_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
         items_in: source_profile.map_or(0, |p| p.items_in),
@@ -247,7 +247,7 @@ pub fn build_report(
             for step in steps {
                 let step_profile = data.get(&step.node_id);
                 let step_node = ReportNode {
-                    name: step.name.clone(),
+                    name: step.name.to_string(),
                     source_location: step.source_location.to_string(),
                     func_time_ns: step_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
                     items_in: step_profile.map_or(0, |p| p.items_in),
@@ -278,7 +278,7 @@ pub fn build_report(
         let child_profile = data.get(&child_ptr);
 
         let child_node = ReportNode {
-            name: child.name.clone(),
+            name: child.name.to_string(),
             source_location: child.source_location.to_string(),
             func_time_ns: child_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
             items_in: child_profile.map_or(0, |p| p.items_in),

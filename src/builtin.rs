@@ -2,6 +2,8 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crate::Stream;
 use crate::helpers::{
@@ -171,19 +173,41 @@ fn analyze_bytecode(py: Python, func: &Py<PyAny>) -> Option<Py<PyAny>> {
 }
 
 /// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.
-fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
+fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     let result = analyze_bytecode(py, func)?;
-    parse_analysis_tuple(py, result.bind(py))
+    parse_cached(py, &result)
+}
+
+/// Parsed ops by the analysis result they came from (`_analyze_lambda`
+/// caches results per code object), so graphs built from the same code
+/// share one immutable op tree instead of allocating their own. Entries hold
+/// their result, so a key can't be reused by another object; entries only
+/// this table still references are dropped when it grows.
+type ParsedOps = HashMap<usize, (Py<PyAny>, Arc<BuiltinOp>)>;
+static PARSED: LazyLock<Mutex<ParsedOps>> = LazyLock::new(Mutex::default);
+
+fn parse_cached(py: Python, result: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
+    let key = result.as_ptr() as usize;
+    let mut parsed = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, op)) = parsed.get(&key) {
+        return Some(Arc::clone(op));
+    }
+    let op = Arc::new(parse_analysis_tuple(py, result.bind(py))?);
+    if parsed.len() >= 256 {
+        parsed.retain(|_, (held, _)| held.get_refcnt(py) > 1);
+    }
+    parsed.insert(key, (result.clone_ref(py), Arc::clone(&op)));
+    Some(op)
 }
 
 /// Detect builtin fast-path for a Map function via identity checks only.
-fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
+fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     // Simple identity checks: func is exactly the builtin
     macro_rules! check_identity {
         ($getter:ident, $op:expr) => {
             if let Ok(b) = $getter() {
                 if func.is(b) {
-                    return Some($op);
+                    return Some(Arc::new($op));
                 }
             }
         };
@@ -213,7 +237,7 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
             .filter(|t| t.len() == 1)
             .and_then(|t| t.get_item(0).ok().map(|k| k.unbind()));
         if let Some(k) = key {
-            return Some(BuiltinOp::ItemGetter(k));
+            return Some(Arc::new(BuiltinOp::ItemGetter(k)));
         }
     }
     // Detect operator.attrgetter instances (e.g., operator.attrgetter("name"))
@@ -233,7 +257,7 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
                     .ok()
             });
         if let Some(name_str) = name {
-            return Some(BuiltinOp::AttrGetter(name_str.unbind()));
+            return Some(Arc::new(BuiltinOp::AttrGetter(name_str.unbind())));
         }
     }
     // Fallback: analyze lambda bytecode
@@ -245,7 +269,7 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp
 /// When a lambda wraps a simple callable (e.g., `lambda x: MyClass(x)`), the analyzer
 /// returns `("unwrap", resolved_callable)`. We replace the func in the Map logic directly
 /// and return `None` — the callable gets cached vectorcall automatically.
-fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<BuiltinOp> {
+fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     // First try the normal detection
     if let Some(op) = detect_map_builtin_identity(py, func) {
         return Some(op);
@@ -264,7 +288,7 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Bu
         *func = resolved;
         return None;
     }
-    parse_analysis_tuple(py, bound)
+    parse_cached(py, &result)
 }
 
 /// Detect builtin fast-path for a Filter predicate.
@@ -272,7 +296,7 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Bu
 /// `filter(isinstance, int)` binds `int` after the item (`crate::call::bind`);
 /// a bound call with exactly one extra positional argument is checked against
 /// isinstance / operator.is_ / operator.is_not.
-fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp> {
+fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     let Some(bound) = crate::call::bound_parts(py, predicate) else {
         // No extra arguments: analyse the predicate's own bytecode
         return analyze_lambda_fallback(py, predicate);
@@ -284,13 +308,13 @@ fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp>
     let (func, arg) = (&call.func, arg.clone_ref(py));
 
     if get_builtin_isinstance().is_ok_and(|b| func.is(b)) {
-        return Some(BuiltinOp::IsInstance(arg));
+        return Some(Arc::new(BuiltinOp::IsInstance(arg)));
     }
     if get_operator_is().is_ok_and(|b| func.is(b)) {
-        return Some(BuiltinOp::Is(arg));
+        return Some(Arc::new(BuiltinOp::Is(arg)));
     }
     if get_operator_is_not().is_ok_and(|b| func.is(b)) {
-        return Some(BuiltinOp::IsNot(arg));
+        return Some(Arc::new(BuiltinOp::IsNot(arg)));
     }
     None
 }
@@ -306,18 +330,21 @@ fn detect_sink_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
 /// Detect the appropriate builtin fast-path for a given NodeLogic variant.
 ///
 /// For Map nodes, also handles `("unwrap", callable)` — replacing the func in-place.
-pub(crate) fn detect_builtin_for_logic(py: Python, logic: &mut NodeLogic) -> Option<BuiltinOp> {
+pub(crate) fn detect_builtin_for_logic(
+    py: Python,
+    logic: &mut NodeLogic,
+) -> Option<Arc<BuiltinOp>> {
     match logic {
         NodeLogic::Map { func } => detect_map_builtin_with_unwrap(py, func),
         NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
         NodeLogic::ChunkBy(chunk) => detect_filter_builtin(py, &chunk.predicate),
         NodeLogic::ExtractBetween(_) => None,
-        NodeLogic::Sink { func } => detect_sink_builtin(func),
+        NodeLogic::Sink { func } => detect_sink_builtin(func).map(Arc::new),
         NodeLogic::Accumulate {
             func,
             returns_state: false,
             ..
-        } => detect_accumulate_builtin(py, func),
+        } => detect_accumulate_builtin(py, func).map(Arc::new),
         _ => None,
     }
 }

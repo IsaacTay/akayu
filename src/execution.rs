@@ -60,7 +60,7 @@ pub(crate) enum BatchStepResult {
 /// Per-node metadata that always travels together through apply_logic/apply_logic_batch.
 /// Zero-cost: just references, no allocation.
 pub(crate) struct NodeCtx<'a> {
-    pub builtin_op: &'a Option<Box<BuiltinOp>>,
+    pub builtin_op: &'a Option<std::sync::Arc<BuiltinOp>>,
     pub cached_vc: &'a Option<pyo3::ffi::vectorcallfunc>,
     pub name: &'a str,
     pub source_location: &'a str,
@@ -661,7 +661,7 @@ fn apply_logic_general(
                 }
                 let t = target.borrow(py);
                 if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                    let name = t.name.clone();
+                    let name = t.name.to_string();
                     drop(t);
                     return Err(crate::error::StreamError::ReentrantEmit(name).into());
                 }
@@ -945,7 +945,7 @@ pub(crate) fn apply_logic_batch(
                 }
                 let t = target.borrow(py);
                 if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                    let name = t.name.clone();
+                    let name = t.name.to_string();
                     drop(t);
                     return Err(crate::error::StreamError::ReentrantEmit(name).into());
                 }
@@ -1036,7 +1036,7 @@ impl Stream {
             }
             let t = target.borrow(py);
             if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                let name = t.name.clone();
+                let name = t.name.to_string();
                 drop(t);
                 return Err(crate::error::StreamError::ReentrantEmit(name).into());
             }
@@ -1297,7 +1297,7 @@ impl Stream {
             }
             let t = target.borrow(py);
             if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                let name = t.name.clone();
+                let name = t.name.to_string();
                 drop(t);
                 return Err(crate::error::StreamError::ReentrantEmit(name).into());
             }

@@ -113,9 +113,9 @@ pub struct ExtractBetweenState {
 /// and per-node metadata needed for execution and profiling.
 pub struct ChainNode {
     pub logic: NodeLogic,
-    pub name: String,
+    pub name: std::sync::Arc<str>,
     pub source_location: std::sync::Arc<str>,
-    pub builtin_op: Option<Box<BuiltinOp>>,
+    pub builtin_op: Option<std::sync::Arc<BuiltinOp>>,
     pub node_id: usize,
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Avoids per-call type flag check + offset dereference in the hot loop.

@@ -53,7 +53,7 @@ independent of machine load:
   operator), `max(acc, x)`, `min(acc, x)`: 27% less per item, 50% less in batches.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
-- 45% less memory per node (565 -> 313 bytes); `compile()` frees the nodes it fuses into chains
+- 45% less memory per node (565 -> 309 bytes; compiled 518 -> 304); `compile()` frees the nodes it fuses into chains
   unless you hold them; `emit_batch()` map/filter/accumulate stages reuse one buffer instead of
   allocating one per stage.
 - Wall clock, `tests/bench_complex.py` on the same machine: compiled pipelines are 2.3x - 15.9x

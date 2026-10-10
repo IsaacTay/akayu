@@ -2,7 +2,7 @@
 
 A node used to cost ~565 bytes: a Python RLock each, a heap allocation per
 parent and per downstream edge, and a 64-byte inline NodeLogic sized by its
-rarest variants. These bounds leave some headroom over today's ~370 bytes.
+rarest variants. These bounds leave some headroom over today's ~310 bytes.
 """
 
 import gc
@@ -15,12 +15,12 @@ import akayu
 
 def test_inline_node_size():
     # The Rust struct plus the Python object header, GC header and weakref slot.
-    assert sys.getsizeof(akayu.Stream()) <= 288
+    assert sys.getsizeof(akayu.Stream()) <= 256
 
 
 def _rss_per_node(compile_graphs):
     proc = psutil.Process()
-    f = lambda x: x  # noqa: E731
+    f = lambda x: x * 2 + 1  # noqa: E731 - compile() runs this natively
     keep = []
     gc.collect()
     before = proc.memory_info().rss
@@ -35,11 +35,11 @@ def _rss_per_node(compile_graphs):
 
 
 def test_memory_per_node():
-    assert _rss_per_node(compile_graphs=False) < 450
+    assert _rss_per_node(compile_graphs=False) < 360
 
 
 def test_memory_per_compiled_node():
-    assert _rss_per_node(compile_graphs=True) < 450
+    assert _rss_per_node(compile_graphs=True) < 340
 
 
 def test_compile_frees_fused_chain_members():
