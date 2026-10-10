@@ -1,6 +1,7 @@
 import builtins as _builtins
 import threading as _threading
 import time as _time
+from importlib.metadata import version as _version
 from pathlib import Path as _Path
 
 from akayu.akayu import (
@@ -19,6 +20,8 @@ from akayu.akayu import (
 )
 
 Stream = _Stream
+
+__version__ = _version("akayu")
 
 _UNSUPPORTED = frozenset(
     {

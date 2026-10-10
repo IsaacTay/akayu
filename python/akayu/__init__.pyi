@@ -16,6 +16,8 @@ from typing_extensions import disjoint_base
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
+__version__: str
+
 _StreamOrMultiStream = Union["Stream", "MultiStream"]
 
 @final
