@@ -8,7 +8,7 @@ use crate::builtin::{
     detect_flush_target_from_func, extract_vectorcall_for_logic,
 };
 use crate::lock::Downstream;
-use crate::node::{ChainNode, NodeLogic};
+use crate::node::{ChainNode, ChunkByState, NodeLogic};
 use crate::{Stream, StreamPtr};
 
 impl Stream {
@@ -248,7 +248,7 @@ impl Stream {
             let new_downstreams: Vec<Downstream> =
                 child.downstreams.iter().map(|d| d.clone_edge(py)).collect();
             drop(child);
-            self.downstreams = new_downstreams;
+            self.downstreams = new_downstreams.into();
         }
     }
 
@@ -395,7 +395,7 @@ impl Stream {
             let mut node = node_py.borrow_mut(py);
 
             // 1. Detect builtin fast-path (may mutate logic via "unwrap" on Map nodes)
-            node.builtin_op = detect_builtin_for_logic(py, &mut node.logic);
+            node.builtin_op = detect_builtin_for_logic(py, &mut node.logic).map(Box::new);
 
             // 2. Detect flush targets (Sink nodes calling .flush() on Collect nodes)
             if let NodeLogic::Sink { ref func } = node.logic
@@ -648,15 +648,15 @@ impl Stream {
 
             {
                 let mut chunk_node = chunk_node_py.borrow_mut(py);
-                chunk_node.logic = NodeLogic::ChunkBy {
+                chunk_node.logic = NodeLogic::ChunkBy(Box::new(ChunkByState {
                     buffer: Vec::new(),
                     predicate,
                     include_delimiter: true,
                     pre_buffer_chain,
-                };
+                }));
                 chunk_node.name = format!("chunk_by[fused]({})", filter_name);
                 chunk_node.source_location = filter_source;
-                chunk_node.downstreams = collect_downstreams;
+                chunk_node.downstreams = collect_downstreams.into();
             }
 
             // If buffer_path had intermediate nodes, mark the Collect as orphaned

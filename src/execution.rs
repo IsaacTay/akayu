@@ -7,7 +7,9 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::Stream;
 use crate::helpers::{cached_vectorcall1, vectorcall1, vectorcall2, wrap_error};
-use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
+use crate::node::{
+    BinaryOp, BuiltinOp, ChunkByState, CombineLatestState, ExtractBetweenState, NodeLogic,
+};
 use crate::pool::{self, Latch};
 use crate::profiling;
 use std::sync::Arc;
@@ -57,7 +59,7 @@ pub(crate) enum BatchStepResult {
 /// Per-node metadata that always travels together through apply_logic/apply_logic_batch.
 /// Zero-cost: just references, no allocation.
 pub(crate) struct NodeCtx<'a> {
-    pub builtin_op: &'a Option<BuiltinOp>,
+    pub builtin_op: &'a Option<Box<BuiltinOp>>,
     pub cached_vc: &'a Option<pyo3::ffi::vectorcallfunc>,
     pub name: &'a str,
     pub source_location: &'a str,
@@ -512,7 +514,7 @@ pub(crate) fn apply_logic(
                 return Ok(StepResult::Terminal);
             }
             let t = prof_start(profiling);
-            match ctx.builtin_op {
+            match ctx.builtin_op.as_deref() {
                 Some(BuiltinOp::Print) => {
                     let print_fn = crate::helpers::get_builtin_print()?;
                     print_fn.call1(py, (&x,))?;
@@ -691,23 +693,25 @@ pub(crate) fn apply_logic_batch(
     let items_in = items.len() as u64;
 
     match logic {
+        // Map and Filter work in place: no new buffer per stage, so a batch
+        // costs one buffer however long the chain.
         NodeLogic::Map { func } => {
             let t = prof_start(profiling);
-            let mut output = Vec::with_capacity(items.len());
+            let mut output = items;
             match ctx.builtin_op {
                 Some(op) => {
-                    for (i, x) in items.into_iter().enumerate() {
+                    for (i, x) in output.iter_mut().enumerate() {
                         if i & 1023 == 0 {
                             check_signals(py)?;
                         }
-                        let res = apply_builtin(py, op, &x);
-                        output.push(wrap_error(py, res, ctx.name, ctx.source_location)?);
+                        let res = apply_builtin(py, op, x);
+                        *x = wrap_error(py, res, ctx.name, ctx.source_location)?;
                     }
                 }
                 None => {
-                    for x in items {
-                        let res = vcall1(py, func, &x, ctx.cached_vc);
-                        output.push(wrap_error(py, res, ctx.name, ctx.source_location)?);
+                    for x in &mut output {
+                        let res = vcall1(py, func, x, ctx.cached_vc);
+                        *x = wrap_error(py, res, ctx.name, ctx.source_location)?;
                     }
                 }
             }
@@ -726,29 +730,33 @@ pub(crate) fn apply_logic_batch(
 
         NodeLogic::Filter { predicate } => {
             let t = prof_start(profiling);
-            let mut output = Vec::with_capacity(items.len());
+            // Compact the kept items to the front, then cut the rest off.
+            let mut output = items;
+            let mut kept = 0;
             match ctx.builtin_op {
                 Some(op) => {
-                    for (i, x) in items.into_iter().enumerate() {
+                    for i in 0..output.len() {
                         if i & 1023 == 0 {
                             check_signals(py)?;
                         }
-                        let res = apply_builtin_as_filter(py, op, &x);
+                        let res = apply_builtin_as_filter(py, op, &output[i]);
                         if wrap_error(py, res, ctx.name, ctx.source_location)? {
-                            output.push(x);
+                            output.swap(kept, i);
+                            kept += 1;
                         }
                     }
                 }
                 None => {
-                    for x in items {
-                        let res = vcall1(py, predicate, &x, ctx.cached_vc);
-                        let res = wrap_error(py, res, ctx.name, ctx.source_location)?;
-                        if res.is_truthy(py)? {
-                            output.push(x);
+                    for i in 0..output.len() {
+                        let res = vcall1(py, predicate, &output[i], ctx.cached_vc);
+                        if wrap_error(py, res, ctx.name, ctx.source_location)?.is_truthy(py)? {
+                            output.swap(kept, i);
+                            kept += 1;
                         }
                     }
                 }
             }
+            output.truncate(kept);
             if let Some(t) = t {
                 profiling::record_node(
                     ctx.node_id,
@@ -817,17 +825,17 @@ pub(crate) fn apply_logic_batch(
             returns_state,
         } => {
             let t = prof_start(profiling);
-            let mut output = Vec::with_capacity(items.len());
-            for x in items {
-                let result = vectorcall2(py, func, state, &x);
+            let mut output = items;
+            for x in &mut output {
+                let result = vectorcall2(py, func, state, x);
                 let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
                 if *returns_state {
                     let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
                     *state = tuple.0;
-                    output.push(tuple.1);
+                    *x = tuple.1;
                 } else {
                     *state = result.clone_ref(py);
-                    output.push(result);
+                    *x = result;
                 }
             }
             if let Some(t) = t {
@@ -886,7 +894,7 @@ pub(crate) fn apply_logic_batch(
                 return Ok(BatchStepResult::Terminal);
             }
             let t = prof_start(profiling);
-            match ctx.builtin_op {
+            match ctx.builtin_op.as_deref() {
                 Some(BuiltinOp::Print) => {
                     let print_fn = crate::helpers::get_builtin_print()?;
                     for x in items {
@@ -1052,12 +1060,13 @@ impl Stream {
                 return Ok(());
             }
 
-            NodeLogic::ChunkBy {
-                buffer,
-                predicate,
-                include_delimiter,
-                pre_buffer_chain,
-            } => {
+            NodeLogic::ChunkBy(boxed) => {
+                let ChunkByState {
+                    buffer,
+                    predicate,
+                    include_delimiter,
+                    pre_buffer_chain,
+                } = &mut **boxed;
                 let t = prof_start(profiling_active);
                 let mut emitted = Vec::new();
                 for x in items {
@@ -1135,13 +1144,14 @@ impl Stream {
                 return Ok(());
             }
 
-            NodeLogic::ExtractBetween {
-                buffer,
-                open,
-                close,
-                inside,
-                close_vectorcall,
-            } => {
+            NodeLogic::ExtractBetween(boxed) => {
+                let ExtractBetweenState {
+                    buffer,
+                    open,
+                    close,
+                    inside,
+                    close_vectorcall,
+                } = &mut **boxed;
                 let t = prof_start(profiling_active);
                 let mut emitted = Vec::new();
                 for x in items {
@@ -1192,10 +1202,11 @@ impl Stream {
                 }
                 return self.propagate_batch_tagged(py, index, items);
             }
-            NodeLogic::CombineLatest {
-                state,
-                emit_on_indices,
-            } => {
+            NodeLogic::CombineLatest(boxed) => {
+                let CombineLatestState {
+                    state,
+                    emit_on_indices,
+                } = &mut **boxed;
                 for x in items {
                     let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
                     output_batch.extend(combine_latest_push(py, state, emit_on_indices, idx, val)?);
@@ -1366,12 +1377,13 @@ impl Stream {
                 buffer.push(x);
                 return Ok(());
             }
-            NodeLogic::ChunkBy {
-                buffer,
-                predicate,
-                include_delimiter,
-                pre_buffer_chain,
-            } => {
+            NodeLogic::ChunkBy(boxed) => {
+                let ChunkByState {
+                    buffer,
+                    predicate,
+                    include_delimiter,
+                    pre_buffer_chain,
+                } = &mut **boxed;
                 let t = prof_start(profiling_active);
                 // Apply pre_buffer_chain transforms to get the buffered item
                 let buffered = if pre_buffer_chain.is_empty() {
@@ -1447,13 +1459,14 @@ impl Stream {
                 }
                 return Ok(());
             }
-            NodeLogic::ExtractBetween {
-                buffer,
-                open,
-                close,
-                inside,
-                close_vectorcall,
-            } => {
+            NodeLogic::ExtractBetween(boxed) => {
+                let ExtractBetweenState {
+                    buffer,
+                    open,
+                    close,
+                    inside,
+                    close_vectorcall,
+                } = &mut **boxed;
                 let t = prof_start(profiling_active);
                 let chunk = extract_between_step(
                     py,
@@ -1498,10 +1511,11 @@ impl Stream {
                 }
                 return self.propagate_tagged(py, index, x);
             }
-            NodeLogic::CombineLatest {
-                state,
-                emit_on_indices,
-            } => {
+            NodeLogic::CombineLatest(boxed) => {
+                let CombineLatestState {
+                    state,
+                    emit_on_indices,
+                } = &mut **boxed;
                 let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
                 combine_latest_push(py, state, emit_on_indices, idx, val)?
             }
@@ -1714,10 +1728,9 @@ impl Stream {
     fn update_tagged(&mut self, py: Python, index: usize, val: Py<PyAny>) -> PyResult<()> {
         let out = match &mut self.logic {
             NodeLogic::Zip { buffers } => zip_push(py, buffers, index, val)?,
-            NodeLogic::CombineLatest {
-                state,
-                emit_on_indices,
-            } => combine_latest_push(py, state, emit_on_indices, index, val)?,
+            NodeLogic::CombineLatest(combine) => {
+                combine_latest_push(py, &mut combine.state, &combine.emit_on_indices, index, val)?
+            }
             _ => {
                 let tuple = PyTuple::new(py, [index.into_pyobject(py)?.into_any().unbind(), val])?;
                 return self.update(py, tuple.into_any().unbind());
@@ -1755,10 +1768,11 @@ impl Stream {
                     output.extend(zip_push(py, buffers, index, val)?);
                 }
             }
-            NodeLogic::CombineLatest {
-                state,
-                emit_on_indices,
-            } => {
+            NodeLogic::CombineLatest(boxed) => {
+                let CombineLatestState {
+                    state,
+                    emit_on_indices,
+                } = &mut **boxed;
                 for val in items {
                     output.extend(combine_latest_push(py, state, emit_on_indices, index, val)?);
                 }

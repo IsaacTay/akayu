@@ -29,10 +29,7 @@ pub enum NodeLogic {
     Tag {
         index: usize,
     },
-    CombineLatest {
-        state: Vec<Option<Py<PyAny>>>,
-        emit_on_indices: Vec<usize>, // Empty = emit on any, non-empty = only these indices
-    },
+    CombineLatest(Box<CombineLatestState>),
     Zip {
         buffers: Vec<VecDeque<Py<PyAny>>>,
     },
@@ -48,7 +45,7 @@ pub enum NodeLogic {
     /// A map, filter or batch_map after prefetch(n): runs its function ahead
     /// on the thread pool while preserving order.
     Prefetched {
-        prefetcher: crate::prefetch::Prefetcher,
+        prefetcher: Box<crate::prefetch::Prefetcher>,
     },
     /// Compiled chain: a linear segment of chainable nodes extracted at compile time.
     /// Eliminates per-node borrow_mut/drop/propagate overhead by processing all steps
@@ -64,28 +61,48 @@ pub enum NodeLogic {
     /// Buffers items until a predicate matches, then emits the buffer as a tuple.
     /// Fused from `collect() + filter(pred).sink(flush)` patterns at compile time,
     /// or created directly via `chunk_by(pred)`.
-    ChunkBy {
-        buffer: Vec<Py<PyAny>>,
-        predicate: Py<PyAny>,
-        include_delimiter: bool,
-        /// Transforms applied to each item before buffering.
-        /// Extracted from nodes between branch point and the original Collect.
-        /// Empty when Collect was a direct downstream of the branch point.
-        pre_buffer_chain: Vec<ChainNode>,
-    },
+    ChunkBy(Box<ChunkByState>),
     /// Extracts items between two delimiter predicates.
     /// State machine: Outside state waits for `open` predicate, Inside state
     /// buffers items until `close` predicate, then emits buffer as a tuple.
     /// Flush discards an incomplete chunk and returns to the Outside state.
-    ExtractBetween {
-        buffer: Vec<Py<PyAny>>,
-        open: Py<PyAny>,
-        close: Py<PyAny>,
-        inside: bool,
-        /// Vectorcall pointer for `close`. The node's `cached_vectorcall`
-        /// belongs to `open`, and the two may be different callable types.
-        close_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
-    },
+    ExtractBetween(Box<ExtractBetweenState>),
+}
+
+// Rarely used variants keep their state behind a Box, so NodeLogic (inline in
+// every node) is 32 bytes instead of 64.
+
+pub struct CombineLatestState {
+    pub state: Vec<Option<Py<PyAny>>>,
+    /// Empty = emit on any input, non-empty = only these inputs.
+    pub emit_on_indices: Vec<usize>,
+}
+
+/// Buffers items until a predicate matches, then emits the buffer as a tuple.
+/// Fused from `collect() + filter(pred).sink(flush)` patterns at compile time,
+/// or created directly via `chunk_by(pred)`.
+pub struct ChunkByState {
+    pub buffer: Vec<Py<PyAny>>,
+    pub predicate: Py<PyAny>,
+    pub include_delimiter: bool,
+    /// Transforms applied to each item before buffering.
+    /// Extracted from nodes between branch point and the original Collect.
+    /// Empty when Collect was a direct downstream of the branch point.
+    pub pre_buffer_chain: Vec<ChainNode>,
+}
+
+/// Extracts items between two delimiter predicates.
+/// State machine: Outside state waits for `open` predicate, Inside state
+/// buffers items until `close` predicate, then emits buffer as a tuple.
+/// Flush discards an incomplete chunk and returns to the Outside state.
+pub struct ExtractBetweenState {
+    pub buffer: Vec<Py<PyAny>>,
+    pub open: Py<PyAny>,
+    pub close: Py<PyAny>,
+    pub inside: bool,
+    /// Vectorcall pointer for `close`. The node's `cached_vectorcall`
+    /// belongs to `open`, and the two may be different callable types.
+    pub close_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
 }
 
 /// A single step in a compiled chain, holding the extracted NodeLogic
@@ -94,7 +111,7 @@ pub struct ChainNode {
     pub logic: NodeLogic,
     pub name: String,
     pub source_location: std::sync::Arc<str>,
-    pub builtin_op: Option<BuiltinOp>,
+    pub builtin_op: Option<Box<BuiltinOp>>,
     pub node_id: usize,
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Avoids per-call type flag check + offset dereference in the hot loop.

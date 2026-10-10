@@ -33,6 +33,11 @@ pub use combinators::{combine_latest, union, zip};
 pub use helpers::to_text_file;
 pub use node::{BuiltinOp, NodeLogic};
 
+/// Most nodes have one parent and one downstream, so one of each is stored
+/// inline: no heap allocation per edge.
+pub(crate) type Downstreams = smallvec::SmallVec<[lock::Downstream; 1]>;
+pub(crate) type Parents = smallvec::SmallVec<[Py<Stream>; 1]>;
+
 /// A raw pointer to a downstream `Stream`, cached at freeze time to bypass
 /// PyCell's atomic borrow checks in the propagation hot path.
 ///
@@ -70,8 +75,8 @@ impl StreamPtr {
 #[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 pub struct Stream {
     pub(crate) logic: NodeLogic,
-    pub(crate) downstreams: Vec<lock::Downstream>,
-    pub(crate) parents: std::sync::Mutex<Vec<Py<Stream>>>,
+    pub(crate) downstreams: Downstreams,
+    pub(crate) parents: std::sync::Mutex<Parents>,
     pub(crate) name: String,
     /// True if topology has been frozen/optimized on first emit
     pub(crate) frozen: bool,
@@ -85,7 +90,7 @@ pub struct Stream {
     pub(crate) source_location: std::sync::Arc<str>,
     /// Optional builtin fast-path hint. When set, execution bypasses Python
     /// function dispatch for known builtins. Cleared by fusion.
-    pub(crate) builtin_op: Option<BuiltinOp>,
+    pub(crate) builtin_op: Option<Box<BuiltinOp>>,
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Bypasses per-call type flag check + offset dereference in the hot loop.
     pub(crate) cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,

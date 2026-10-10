@@ -332,8 +332,8 @@ pub(crate) fn detect_builtin_for_logic(py: Python, logic: &mut NodeLogic) -> Opt
     match logic {
         NodeLogic::Map { func } => detect_map_builtin_with_unwrap(py, func),
         NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
-        NodeLogic::ChunkBy { predicate, .. } => detect_filter_builtin(py, predicate),
-        NodeLogic::ExtractBetween { .. } => None,
+        NodeLogic::ChunkBy(chunk) => detect_filter_builtin(py, &chunk.predicate),
+        NodeLogic::ExtractBetween(_) => None,
         NodeLogic::Sink { func } => detect_sink_builtin(func),
         _ => None,
     }
@@ -481,8 +481,8 @@ pub(crate) fn extract_vectorcall_for_logic(
     let callable_ptr = match logic {
         NodeLogic::Map { func } => func.as_ptr(),
         NodeLogic::Filter { predicate } => predicate.as_ptr(),
-        NodeLogic::ChunkBy { predicate, .. } => predicate.as_ptr(),
-        NodeLogic::ExtractBetween { open, .. } => open.as_ptr(),
+        NodeLogic::ChunkBy(chunk) => chunk.predicate.as_ptr(),
+        NodeLogic::ExtractBetween(between) => between.open.as_ptr(),
         NodeLogic::Sink { func } => func.as_ptr(),
         NodeLogic::Accumulate { func, .. } => func.as_ptr(),
         NodeLogic::BatchMap { func } => func.as_ptr(),
@@ -494,12 +494,7 @@ pub(crate) fn extract_vectorcall_for_logic(
 /// Cache vectorcall pointers for callables beyond the primary one that
 /// `extract_vectorcall_for_logic` caches on the node.
 pub(crate) fn cache_secondary_vectorcalls(logic: &mut NodeLogic) {
-    if let NodeLogic::ExtractBetween {
-        close,
-        close_vectorcall,
-        ..
-    } = logic
-    {
-        *close_vectorcall = unsafe { extract_vectorcall(close.as_ptr()) };
+    if let NodeLogic::ExtractBetween(between) = logic {
+        between.close_vectorcall = unsafe { extract_vectorcall(between.close.as_ptr()) };
     }
 }

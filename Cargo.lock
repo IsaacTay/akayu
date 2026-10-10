@@ -9,6 +9,7 @@ dependencies = [
  "lock_api",
  "parking_lot",
  "pyo3",
+ "smallvec",
  "strum",
  "thiserror",
 ]
