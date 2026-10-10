@@ -1,10 +1,11 @@
 //! Python FFI helpers and utility functions.
 
 use pyo3::prelude::*;
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::sync::OnceLock;
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
 use crate::error::StreamError;
 
@@ -32,10 +33,6 @@ define_py_helper!(
     PREFETCH_BATCH_MAP_STATE_CLASS,
     get_prefetch_batch_map_state_class
 );
-define_py_helper!(SAFE_UPDATE, get_safe_update);
-define_py_helper!(SAFE_UPDATE_BATCH, get_safe_update_batch);
-define_py_helper!(STRIP_INTERNAL_FRAMES, get_strip_internal_frames);
-define_py_helper!(CALLER_LOCATION, get_caller_location);
 define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
 define_py_helper!(BUILTIN_LEN, get_builtin_len);
 define_py_helper!(BUILTIN_STR, get_builtin_str);
@@ -103,15 +100,104 @@ pub(crate) fn get_func_name(py: Python, func: &Py<PyAny>) -> Option<String> {
     None
 }
 
-/// Capture the caller's source location (file:line) from Python.
-pub(crate) fn capture_source_location(py: Python) -> String {
-    let Ok(helper) = get_caller_location() else {
-        return "<unknown>".to_string();
-    };
-    helper
-        .call0(py)
-        .and_then(|r| r.extract::<String>(py))
-        .unwrap_or_else(|_| "<unknown>".to_string())
+/// Interned `"file:line"` strings by file, then line.
+type LocationTable = HashMap<Box<str>, HashMap<u32, Arc<str>>>;
+
+/// `"file:line"` strings, interned: every node built on the same line shares
+/// one allocation. Bounded by the number of distinct lines that build nodes.
+static LOCATIONS: LazyLock<Mutex<LocationTable>> = LazyLock::new(Mutex::default);
+
+/// akayu's own Python wrapper module (`zip()`, `union()`, MultiStream...), whose
+/// frames are skipped so locations point at the user's code.
+static WRAPPER_FILE: OnceLock<Option<Box<str>>> = OnceLock::new();
+
+fn wrapper_file(py: Python) -> Option<&'static str> {
+    WRAPPER_FILE
+        .get_or_init(|| {
+            let module = py
+                .import("sys")
+                .ok()?
+                .getattr("modules")
+                .ok()?
+                .get_item("akayu")
+                .ok()?;
+            let file = module.getattr("__file__").ok()?;
+            Some(file.extract::<String>().ok()?.into_boxed_str())
+        })
+        .as_deref()
+}
+
+/// The caller's source location (`file:line`): the innermost Python frame
+/// outside akayu's wrapper module. Read from the frame directly (no Python
+/// helper, no string formatting once the line has been seen).
+pub(crate) fn capture_source_location(py: Python) -> Arc<str> {
+    caller_file_line(py).map_or_else(|| Arc::from("<unknown>"), |(f, l)| intern_location(&f, l))
+}
+
+fn caller_file_line(py: Python) -> Option<(String, u32)> {
+    let wrapper = wrapper_file(py);
+    // SAFETY: GIL held. PyEval_GetFrame returns a borrowed frame (or NULL);
+    // PyFrame_GetCode and PyFrame_GetBack return new references.
+    unsafe {
+        let top = pyo3::ffi::PyEval_GetFrame();
+        if top.is_null() {
+            return None;
+        }
+        let mut frame = Bound::from_borrowed_ptr(py, top.cast());
+        let mut fallback = None;
+        loop {
+            let code =
+                Bound::from_owned_ptr(py, pyo3::ffi::PyFrame_GetCode(frame.as_ptr().cast()).cast());
+            let file: String = code
+                .getattr(pyo3::intern!(py, "co_filename"))
+                .ok()?
+                .extract()
+                .ok()?;
+            let line =
+                u32::try_from(pyo3::ffi::PyFrame_GetLineNumber(frame.as_ptr().cast())).unwrap_or(0);
+            if wrapper != Some(file.as_str()) {
+                return Some((file, line));
+            }
+            fallback.get_or_insert((file, line));
+            let back = pyo3::ffi::PyFrame_GetBack(frame.as_ptr().cast());
+            if back.is_null() {
+                return fallback;
+            }
+            frame = Bound::from_owned_ptr(py, back.cast());
+        }
+    }
+}
+
+fn intern_location(file: &str, line: u32) -> Arc<str> {
+    let mut map = LOCATIONS.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(loc) = map.get(file).and_then(|lines| lines.get(&line)) {
+        return Arc::clone(loc);
+    }
+    let loc: Arc<str> = Arc::from(format!("{file}:{line}"));
+    map.entry(file.into())
+        .or_default()
+        .insert(line, Arc::clone(&loc));
+    loc
+}
+
+/// Call a Python callable with two positional arguments, without the argument
+/// tuple that `func.call1(py, (a, b))` allocates.
+#[inline(always)]
+pub(crate) fn vectorcall2(
+    py: Python,
+    func: &Py<PyAny>,
+    a: &Py<PyAny>,
+    b: &Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    unsafe {
+        let args = [a.as_ptr(), b.as_ptr()];
+        let result =
+            pyo3::ffi::PyObject_Vectorcall(func.as_ptr(), args.as_ptr(), 2, std::ptr::null_mut());
+        if result.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        Ok(Py::from_owned_ptr(py, result))
+    }
 }
 
 /// Call a Python callable with a single positional argument using vectorcall.
@@ -172,9 +258,6 @@ pub(crate) fn wrap_error<T>(
                 .is_some_and(|r| r.to_string().contains("Stream operation failed at node"));
         if is_akayu_err {
             return e;
-        }
-        if let Ok(strip_fn) = get_strip_internal_frames() {
-            let _ = strip_fn.call1(py, (e.value(py),));
         }
         let mut msg =
             format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
@@ -328,22 +411,13 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
     let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
     let prefetch_batch_map_state_class = helpers_module.getattr("_PrefetchBatchMapState")?;
-    let safe_update = helpers_module.getattr("_safe_update")?;
-    let safe_update_batch = helpers_module.getattr("_safe_update_batch")?;
-    let strip_internal_frames = helpers_module.getattr("_strip_internal_frames")?;
 
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
     let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
-    let _ = SAFE_UPDATE.set(safe_update.unbind());
-    let _ = SAFE_UPDATE_BATCH.set(safe_update_batch.unbind());
-    let _ = STRIP_INTERNAL_FRAMES.set(strip_internal_frames.unbind());
     let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
     let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
     let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
-
-    let caller_location = helpers_module.getattr("_get_caller_location")?;
-    let _ = CALLER_LOCATION.set(caller_location.unbind());
 
     let profiler_class = helpers_module.getattr("_Profiler")?;
     let _ = PROFILER_CLASS.set(profiler_class.unbind());

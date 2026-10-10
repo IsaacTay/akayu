@@ -478,21 +478,20 @@ def test_partial_and_method_callables_are_freed():
     assert scaler_ref() is None
 
 
-def test_par_node_locks_are_released():
-    """Per-node locks for par()/prefetch() convergence used to be keyed by
-    id(node) and never removed: one RLock leaked per node, forever."""
-    from akayu._helpers import _node_locks
+def test_par_graphs_are_released():
+    """par() branches used to take per-node locks from a table keyed by
+    id(node) that was never cleaned up. The locks now live in the nodes; a
+    par()/union graph must be freed once unreachable, branches included."""
 
     def run_par_graph():
         s, out = akayu.Stream(), []
         p = s.par()
-        akayu.union(p.map(lambda x: x), p.map(lambda x: -x)).sink(out.append)
+        merged = akayu.union(p.map(lambda x: x), p.map(lambda x: -x))
+        merged.sink(out.append)
         s.emit_batch([1, 2, 3])
+        assert sorted(out) == [-3, -2, -1, 1, 2, 3]
+        return weakref.ref(s), weakref.ref(merged)
 
-    run_par_graph()
+    refs = [run_par_graph() for _ in range(20)]
     gc.collect()
-    baseline = len(_node_locks)
-    for _ in range(50):
-        run_par_graph()
-    gc.collect()
-    assert len(_node_locks) == baseline
+    assert all(r() is None for pair in refs for r in pair)

@@ -20,6 +20,7 @@ mod error;
 mod execution;
 mod gc;
 mod helpers;
+mod lock;
 mod node;
 mod operations;
 mod optimization;
@@ -67,7 +68,7 @@ impl StreamPtr {
 #[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 pub struct Stream {
     pub(crate) logic: NodeLogic,
-    pub(crate) downstreams: Vec<Py<Stream>>,
+    pub(crate) downstreams: Vec<lock::Downstream>,
     pub(crate) parents: std::sync::Mutex<Vec<Py<Stream>>>,
     pub(crate) name: String,
     /// True if topology has been frozen/optimized on first emit
@@ -79,7 +80,7 @@ pub struct Stream {
     /// True if compile() was explicitly called (prevents modifications)
     pub(crate) compiled: bool,
     /// Source location where this node was created (e.g., "pipeline.py:42")
-    pub(crate) source_location: String,
+    pub(crate) source_location: std::sync::Arc<str>,
     /// Optional builtin fast-path hint. When set, execution bypasses Python
     /// function dispatch for known builtins. Cleared by fusion.
     pub(crate) builtin_op: Option<BuiltinOp>,
@@ -111,7 +112,8 @@ pub struct Stream {
     /// Guard against re-entrant emit calls. True while this node is
     /// actively propagating from an emit(). Prevents cycles in the data graph.
     pub(crate) emitting: std::sync::atomic::AtomicBool,
-    pub(crate) emit_lock: Py<PyAny>,
+    /// Serializes emit()/flush() on this node and updates through `needs_lock` edges.
+    pub(crate) lock: std::sync::Arc<lock::NodeLock>,
     /// True if convergence point check has been performed (lazy, one-time).
     pub(crate) convergence_checked: bool,
 }
