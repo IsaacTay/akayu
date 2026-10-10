@@ -51,7 +51,7 @@
             if [ ! -d ".venv" ]; then
               uv venv
             fi
-            uv sync --extra dev
+            uv sync
           '';
         };
 

@@ -19,16 +19,6 @@ classifiers = [
 dynamic = ["version"]
 dependencies = []
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-    "pytest-codeblocks>=0.17",
-    "pytest-benchmark>=4.0",
-    "maturin>=1.10,<2.0",
-    "streamz>=0.6",
-    "psutil>=5.0",
-    "hypothesis>=6.0",
-]
 [tool.ruff]
 target-version = "py313"
 line-length = 120
@@ -56,11 +46,16 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "sr
 [dependency-groups]
 dev = [
     "hypothesis>=6.113.0",
+    "maturin>=1.10,<2.0",
     "mypy>=1.18",  # tests/test_stubs.py: mypy + stubtest check the type stub
     # numpy/scipy are only needed by the pipeline/ test fixture
-    "numpy>=1.24.4",
-    "pytest-codeblocks>=0.17.0",
-    "scipy>=1.10.1",
+    "numpy>=2.1",
+    "psutil>=5.0",
+    "pytest>=8.0",
+    "pytest-benchmark>=4.0",
+    "pytest-codeblocks>=0.17",
+    "scipy>=1.14.1",
+    "streamz>=0.6",
 ]
 docs = [
     "mkdocs-shadcn>=0.9.8",

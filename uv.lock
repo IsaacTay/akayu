@@ -10,24 +10,18 @@ resolution-markers = [
 name = "akayu"
 source = { editable = "." }
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "hypothesis" },
     { name = "maturin" },
+    { name = "mypy" },
+    { name = "numpy" },
     { name = "psutil" },
     { name = "pytest" },
     { name = "pytest-benchmark" },
     { name = "pytest-codeblocks" },
-    { name = "streamz" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "hypothesis" },
-    { name = "mypy" },
-    { name = "numpy" },
-    { name = "pytest-codeblocks" },
     { name = "scipy" },
+    { name = "streamz" },
 ]
 docs = [
     { name = "mdformat" },
@@ -40,24 +34,19 @@ docs = [
 ]
 
 [package.metadata]
-requires-dist = [
-    { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.0" },
-    { name = "maturin", marker = "extra == 'dev'", specifier = ">=1.10,<2.0" },
-    { name = "psutil", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "pytest-codeblocks", marker = "extra == 'dev'", specifier = ">=0.17" },
-    { name = "streamz", marker = "extra == 'dev'", specifier = ">=0.6" },
-]
-provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "hypothesis", specifier = ">=6.113.0" },
+    { name = "maturin", specifier = ">=1.10,<2.0" },
     { name = "mypy", specifier = ">=1.18" },
-    { name = "numpy", specifier = ">=1.24.4" },
-    { name = "pytest-codeblocks", specifier = ">=0.17.0" },
-    { name = "scipy", specifier = ">=1.10.1" },
+    { name = "numpy", specifier = ">=2.1" },
+    { name = "psutil", specifier = ">=5.0" },
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "pytest-benchmark", specifier = ">=4.0" },
+    { name = "pytest-codeblocks", specifier = ">=0.17" },
+    { name = "scipy", specifier = ">=1.14.1" },
+    { name = "streamz", specifier = ">=0.6" },
 ]
 docs = [
     { name = "mdformat", specifier = ">=0.7" },

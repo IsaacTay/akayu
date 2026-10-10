@@ -38,7 +38,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
-        run: uv sync --extra dev --group docs
+        run: uv sync --group docs
 
       - name: Build project
         # --uv flag is now the default when running inside uv run, but specifying it doesn't hurt.
