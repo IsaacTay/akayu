@@ -20,7 +20,6 @@ dependencies = []
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
-    "pytest-asyncio>=0.23",
     "pytest-codeblocks>=0.17",
     "pytest-benchmark>=4.0",
     "maturin>=1.10,<2.0",
@@ -39,7 +38,6 @@ select = ["E", "F", "W", "I", "UP", "SIM", "B", "C4", "PERF", "RUF", "ARG", "PLC
 "tests/**" = ["ARG", "PLC0415", "PERF", "RUF001", "RUF002", "B017", "B007", "B011", "C414", "C417", "SIM"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.maturin]

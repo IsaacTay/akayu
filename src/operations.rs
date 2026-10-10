@@ -5,7 +5,7 @@ use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 
 use crate::error::StreamError;
 use crate::helpers::{
-    capture_source_location, check_not_compiled, resolve_stream_name,
+    capture_source_location, check_not_compiled, reject_async, resolve_stream_name,
     get_build_map_func, get_build_starmap_func, get_func_name, get_gather,
     get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
     get_profiler_class, wrap_error,
@@ -351,6 +351,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &func, "map")?;
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "map", func_name.as_deref());
         let source_location = capture_source_location(py);
@@ -488,6 +489,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &func, "starmap")?;
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "starmap", func_name.as_deref());
         let source_location = capture_source_location(py);
@@ -552,6 +554,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &func, "batch_map")?;
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "batch_map", func_name.as_deref());
         let source_location = capture_source_location(py);
@@ -626,6 +629,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &predicate, "filter")?;
         let func_name = get_func_name(py, &predicate);
         let name = resolve_stream_name(stream_name, "filter", func_name.as_deref());
         let source_location = capture_source_location(py);
@@ -833,6 +837,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &predicate, "chunk_by")?;
         let func_name = get_func_name(py, &predicate);
         let source_location = capture_source_location(py);
         let func_is_sync = true;
@@ -911,6 +916,8 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &open, "chunks_between")?;
+        reject_async(py, &close, "chunks_between")?;
         let open_name = get_func_name(py, &open);
         let close_name = get_func_name(py, &close);
         let source_location = capture_source_location(py);
@@ -942,19 +949,18 @@ impl Stream {
         Ok(node)
     }
 
-    /// Flush collected elements downstream.
+    /// Flush buffered elements downstream.
     ///
-    /// For `collect()` nodes, emits all buffered elements as a tuple
-    /// and clears the buffer. Has no effect on other node types.
+    /// `collect()` and `chunk_by()` nodes emit their buffer as a tuple and
+    /// stop there; `chunks_between()` discards an incomplete chunk; prefetch
+    /// nodes wait for items still in flight. Other nodes pass the flush on,
+    /// so `source.flush()` reaches the first buffering node on every path.
+    /// Use `drain()` to flush every node in the graph.
     ///
     /// # Arguments
     ///
     /// * `*args` - Ignored (for compatibility with streamz).
     /// * `**kwargs` - Ignored (for compatibility with streamz).
-    ///
-    /// # Returns
-    ///
-    /// A coroutine if async processing is triggered, otherwise None.
     ///
     /// # Examples
     ///
@@ -1000,10 +1006,6 @@ impl Stream {
     ///
     /// * `*args` - Ignored (for compatibility with streamz).
     /// * `**kwargs` - Ignored (for compatibility with streamz).
-    ///
-    /// # Returns
-    ///
-    /// A coroutine if async processing is triggered, otherwise None.
     ///
     /// # Examples
     ///
@@ -1079,6 +1081,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &func, "sink")?;
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "sink", func_name.as_deref());
         let source_location = capture_source_location(py);
@@ -1166,6 +1169,7 @@ impl Stream {
     ) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
+        reject_async(py, &func, "accumulate")?;
         let func_name = get_func_name(py, &func);
         let source_location = capture_source_location(py);
         let func_is_sync = true;
@@ -1201,10 +1205,6 @@ impl Stream {
     /// # Arguments
     ///
     /// * `x` - The value to emit.
-    ///
-    /// # Returns
-    ///
-    /// A coroutine if async processing is triggered, otherwise None.
     ///
     /// # Examples
     ///
@@ -1254,10 +1254,6 @@ impl Stream {
     /// # Arguments
     ///
     /// * `items` - List of values to emit.
-    ///
-    /// # Returns
-    ///
-    /// A coroutine if async processing is triggered, otherwise None.
     ///
     /// # Examples
     ///
