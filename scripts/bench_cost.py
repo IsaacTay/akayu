@@ -71,18 +71,36 @@ def _delim(x):
     return x % 64 == 0 or False
 
 
+def _mod0(x):
+    return x % 3 == 0 or False
+
+
+def _mod1(x):
+    return x % 3 == 1 or False
+
+
 def _batch(xs):
     return [x * 1 + 1 for x in xs]
 
 
 FUNCS = {
-    "opaque": {"inc": _inc, "even": _even, "dbl": _dbl, "tri": _tri, "delim": _delim},
+    "opaque": {
+        "inc": _inc,
+        "even": _even,
+        "dbl": _dbl,
+        "tri": _tri,
+        "delim": _delim,
+        "mod0": _mod0,
+        "mod1": _mod1,
+    },
     "lambda": {
         "inc": lambda x: x + 1,
         "even": lambda x: x % 2 == 0,
         "dbl": lambda x: x * 2,
         "tri": lambda x: x * 3,
         "delim": lambda x: x % 64 == 0,
+        "mod0": lambda x: x % 3 == 0,
+        "mod1": lambda x: x % 3 == 1,
     },
 }
 
@@ -113,6 +131,16 @@ def _workloads(f, out):
     def diamond():
         s = akayu.Stream()
         akayu.union(s.map(f["dbl"]), s.map(f["tri"])).sink(sink)
+        return [s]
+
+    def partition():
+        """Split into three lists: independent branches (see compile())."""
+        s = akayu.Stream()
+        lists = ([], [], [])
+        s.filter(f["mod0"]).sink(lists[0].append)
+        s.filter(f["mod1"]).sink(lists[1].append)
+        s.map(f["dbl"]).sink(lists[2].append)
+        sink(lists)  # keep them alive with the graph's output
         return [s]
 
     def zip3():

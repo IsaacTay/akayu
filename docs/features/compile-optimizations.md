@@ -8,6 +8,8 @@ When you call `.compile()`, akayu:
 
 1. **Freezes the topology** - Prevents further modifications to the stream graph
 1. **Applies chain fusion** - Combines consecutive operations into single nodes
+1. **Runs simple functions natively** - see [Native Operations](#native-operations)
+1. **Shares one lock across the graph** - see [Proven Fast Paths](#proven-fast-paths)
 1. **Marks convergence points** - Identifies nodes that need thread-safe locking for `par()` + `prefetch()` combinations
 
 <!--pytest.mark.skip-->
@@ -169,6 +171,38 @@ flowchart LR
     end
     before -.-> after
 ```
+
+## Native Operations
+
+`compile()` reads the bytecode of each function and replaces simple ones with native operations,
+so no Python function call happens per item. Recognized shapes include:
+
+- One step on the item: `x + 1`, `x % 2`, `x > 3`, `x["key"]`, `x.attr`, `x.strip()`,
+  `x.get("k", 0)`, `len(x)`, `str(x)`, `x in allowed`, `x is None`, `not x`, `x[1:]`
+- Chains of such steps: `x % 2 == 0`, `x * 2 + 1`, `x["a"]["b"]`, `str(x).upper()`
+- `and` / `or` of them, and tuples/lists of them: `(x["a"], x["b"])`
+- Extra parameters with defaults, the loop-variable idiom: `lambda x, k=k: x + k`
+- Accumulators: `acc + x`, `acc + 1` (any binary operator), `max(acc, x)`, `min(acc, x)`
+- Sinks: `sink(results.append)` on a list, `sink(print)`
+
+Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
+item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
+
+## Proven Fast Paths
+
+Some checks are only needed when the graph could be used in a way `compile()` can rule out:
+
+- **One lock for the graph.** Merges of several sources (`union`, `zip`, `combine_latest`) lock
+  each item, in case the sources are emitted from different threads. Each `emit()` already takes
+  a lock, so when every node in the connected graph shares one lock, two threads can't be in the
+  graph at once. `compile()` gives a graph without `par()` one shared lock and drops the per-item
+  merge locks.
+- **Independent branches in batches.** Below a branch point, `emit_batch()` passes items through
+  the branches one at a time (item 1 through every branch, then item 2, ...), so the branches'
+  side effects interleave as with `emit()`. When every node in the branches is a native operation
+  and each branch appends to its own list, that order can't be observed: each branch takes the
+  whole batch instead, which is faster. (If a step raises halfway, the branches before it will
+  have processed the whole batch.)
 
 ## When to Use `.compile()`
 

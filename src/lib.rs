@@ -101,6 +101,9 @@ pub struct Stream {
     /// Set at freeze time. True if this is a Filter whose predicate can skip the
     /// async check (has builtin_op), so update() routes through apply_logic.
     pub(crate) compiled_filter_fast: bool,
+    /// Set by compile() on a branch point whose branches it proved can't
+    /// observe each other: emit_batch hands each branch the whole batch.
+    pub(crate) batch_fanout: bool,
     /// If this Sink node's function calls .flush() on a Collect node in the same graph,
     /// store a direct reference to skip Python dispatch at runtime.
     /// Detected at compile time via bound method check or lambda bytecode analysis.

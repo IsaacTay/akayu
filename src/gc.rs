@@ -27,6 +27,7 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
     match op {
         BuiltinOp::IsInstance(obj)
         | BuiltinOp::AccumBinOpConst(_, obj)
+        | BuiltinOp::ListAppend(obj)
         | BuiltinOp::Is(obj)
         | BuiltinOp::IsNot(obj)
         | BuiltinOp::ItemGetter(obj)

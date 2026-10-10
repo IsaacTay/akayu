@@ -179,6 +179,16 @@ fn emit_into_target(
     Ok(())
 }
 
+/// `list.append(x)` for an exact list, without the method call.
+#[inline]
+fn list_append(py: Python, list: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<()> {
+    // SAFETY: GIL held; `list` is an exact list (checked by compile()).
+    if unsafe { pyo3::ffi::PyList_Append(list.as_ptr(), x.as_ptr()) } != 0 {
+        return Err(PyErr::fetch(py));
+    }
+    Ok(())
+}
+
 /// `func(*x)`. A tuple is passed through as the argument tuple; anything else
 /// is converted to one first (raising like `*x` for non-iterables).
 fn star_call(py: Python, func: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -443,8 +453,9 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
         BuiltinOp::AccumBinOp(_)
         | BuiltinOp::AccumBinOpConst(..)
         | BuiltinOp::AccumMax
-        | BuiltinOp::AccumMin => Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "akayu internal error: accumulate op applied to a single value",
+        | BuiltinOp::AccumMin
+        | BuiltinOp::ListAppend(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "akayu internal error: accumulate/sink op applied to a single value",
         )),
     }
 }
@@ -537,9 +548,12 @@ pub(crate) fn apply_logic(
             NodeLogic::Sink { func }
                 if ctx.flush_target.is_none()
                     && ctx.emit_target.is_none()
-                    && ctx.builtin_op.is_none() =>
+                    && !matches!(ctx.builtin_op.as_deref(), Some(BuiltinOp::Print)) =>
             {
-                let res = vcall1(py, func, &x, ctx.cached_vc);
+                let res = match ctx.builtin_op.as_deref() {
+                    Some(BuiltinOp::ListAppend(list)) => list_append(py, list, &x),
+                    _ => vcall1(py, func, &x, ctx.cached_vc).map(drop),
+                };
                 wrap_error(py, res, ctx.name, ctx.source_location)?;
                 return Ok(StepResult::Terminal);
             }
@@ -687,6 +701,9 @@ fn apply_logic_general(
                 Some(BuiltinOp::Print) => {
                     let print_fn = crate::helpers::get_builtin_print()?;
                     print_fn.call1(py, (&x,))?;
+                }
+                Some(BuiltinOp::ListAppend(list)) => {
+                    wrap_error(py, list_append(py, list, &x), ctx.name, ctx.source_location)?;
                 }
                 _ => {
                     let res = vcall1(py, func, &x, ctx.cached_vc);
@@ -966,6 +983,11 @@ pub(crate) fn apply_logic_batch(
                     let print_fn = crate::helpers::get_builtin_print()?;
                     for x in items {
                         print_fn.call1(py, (&x,))?;
+                    }
+                }
+                Some(BuiltinOp::ListAppend(list)) => {
+                    for x in &items {
+                        wrap_error(py, list_append(py, list, x), ctx.name, ctx.source_location)?;
                     }
                 }
                 _ => {
@@ -1531,6 +1553,17 @@ impl Stream {
                 .update_batch(py, output_batch);
         }
 
+        if self.batch_fanout {
+            // compile() proved the branches independent: each takes the whole
+            // batch, on the per-step batch path.
+            let ptr = |d: &crate::lock::Downstream| d.ptr.expect("compiled edge");
+            for d in self.downstreams.iter().take(n - 1) {
+                let batch = output_batch.iter().map(|v| v.clone_ref(py)).collect();
+                unsafe { ptr(d).get_mut() }.update_batch(py, batch)?;
+            }
+            return unsafe { ptr(&self.downstreams[n - 1]).get_mut() }
+                .update_batch(py, output_batch);
+        }
         if use_lock {
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {

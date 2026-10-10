@@ -213,6 +213,10 @@ pub enum BuiltinOp {
     AccumMax,
     /// min(state, x)
     AccumMin,
+
+    // --- sink(func) patterns ---
+    /// sink(lst.append) on an exact list: PyList_Append, no method call
+    ListAppend(Py<PyAny>),
 }
 
 /// Binary arithmetic operations for `BuiltinOp::BinOp`.
