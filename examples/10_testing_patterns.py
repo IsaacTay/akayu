@@ -322,18 +322,18 @@ class TestPropertyBasedPatterns(unittest.TestCase):
             self.assertLessEqual(len(results), len(test_data))
             self.assertEqual(len(results), len(test_data))  # With predicate=True
 
-    def test_doubling_then_adding_one_equalsadding_one_then_doubling(self):
-        """For linear operations, order shouldn't affect result"""
+    def test_scaling_order_does_not_matter(self):
+        """Scaling operations commute, so their order shouldn't affect the result"""
         results_a = []
         results_b = []
 
-        # (x * 2) + 1
+        # (x * 2) * 3
         source_a = Stream()
-        source_a.map(lambda x: x * 2).map(lambda x: x + 1).sink(results_a.append)
+        source_a.map(lambda x: x * 2).map(lambda x: x * 3).sink(results_a.append)
 
-        # (x + 1) * 2
+        # (x * 3) * 2
         source_b = Stream()
-        source_b.map(lambda x: x + 1).map(lambda x: x * 2).sink(results_b.append)
+        source_b.map(lambda x: x * 3).map(lambda x: x * 2).sink(results_b.append)
 
         test_values = list(range(20))
 

@@ -77,10 +77,12 @@ def main():
     source = akayu.Stream()
 
     # Extract level, convert to uppercase, filter errors
-    source.map(lambda log: log.split(":")[0])  # Extract level
-         .map(lambda level: level.strip().upper())  # Normalize
-         .filter(lambda level: level == "ERROR")  # Keep only errors
-         .sink(processed_logs.append)
+    (
+        source.map(lambda log: log.split(":")[0])  # Extract level
+              .map(lambda level: level.strip().upper())  # Normalize
+              .filter(lambda level: level == "ERROR")  # Keep only errors
+              .sink(processed_logs.append)
+    )
 
     for log in logs:
         source.emit(log)
