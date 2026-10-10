@@ -12,6 +12,7 @@ import builtins as _builtins
 
 _NOISE_OPCODES = frozenset({
     'RESUME', 'COPY_FREE_VARS', 'NOP', 'CACHE', 'PUSH_NULL', 'PRECALL', 'TO_BOOL',
+    'NOT_TAKEN',  # 3.14: branch-prediction marker after conditional jumps
 })
 
 # --- Fast bytecode extractor ---
@@ -58,6 +59,14 @@ def _fast_extract(co):
         j += caches * 2  # skip inline cache entries
         if name is None or name in _NOISE_OPCODES or name == 'RETURN_VALUE':
             continue
+        # Python 3.14 spellings of 3.13 opcodes, so the patterns below match
+        if name == 'LOAD_FAST_BORROW':
+            name = 'LOAD_FAST'
+        elif name == 'LOAD_FAST_BORROW_LOAD_FAST_BORROW':
+            name = 'LOAD_FAST_LOAD_FAST'
+        elif name == 'LOAD_SMALL_INT':  # the int is the oparg itself
+            result.append(('LOAD_CONST', arg))
+            continue
         # Resolve argval based on opcode
         if name == 'LOAD_CONST':
             av = consts[arg]
@@ -67,6 +76,8 @@ def _fast_extract(co):
             av = _CMP_OP[arg >> 5]
         elif name == 'BINARY_OP':
             av = _NB_OPS[arg][1] if arg < len(_NB_OPS) else arg
+            if av == '[]':  # 3.14 spells BINARY_SUBSCR as BINARY_OP []
+                name, av = 'BINARY_SUBSCR', 0
         elif name in ('CONTAINS_OP', 'IS_OP'):
             av = arg
         elif name == 'LOAD_FAST':

@@ -1,3 +1,6 @@
+# Benchmarks and slow memory tests, skipped by the quick test runs
+quick_ignores := "--ignore=tests/test_benchmark.py --ignore=tests/test_benchmark_split.py --ignore=tests/test_memory_leak.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_lambda_benchmark.py --ignore=tests/test_vectorcall_benchmark.py"
+
 # Default recipe - show available commands
 default:
     @just --list
@@ -20,13 +23,23 @@ test: build
 
 # Run tests without benchmarks (faster)
 test-quick: build
-    uv run python -m pytest tests/ -v \
-        --ignore=tests/test_benchmark.py \
-        --ignore=tests/test_benchmark_split.py \
-        --ignore=tests/test_memory_leak.py \
-        --ignore=tests/test_compile_benchmark.py \
-        --ignore=tests/test_lambda_benchmark.py \
-        --ignore=tests/test_vectorcall_benchmark.py
+    uv run python -m pytest tests/ -v {{quick_ignores}}
+
+# Run the quick tests on Python 3.14 (cp314 wheel built outside the 3.13 dev env)
+test-py314:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    work=$(mktemp -d -t akayu-py314.XXXXXX)
+    trap 'rm -rf "$work"' EXIT
+    py=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#python314)/bin/python3.14
+    # PyPI's numpy/scipy wheels need libstdc++, which NixOS keeps off the default path
+    libcxx=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#stdenv.cc.cc.lib)/lib
+    env -u PYTHONPATH PYO3_PYTHON="$py" CARGO_TARGET_DIR=target/py314 \
+        uv run --no-sync maturin build --release -i "$py" --out "$work"
+    uv export --frozen --no-hashes --no-emit-project --all-extras > "$work/requirements.txt"
+    env -u PYTHONPATH uv venv -q -p "$py" "$work/venv"
+    env -u PYTHONPATH uv pip install -q --python "$work/venv/bin/python" -r "$work/requirements.txt" "$work"/*.whl
+    env -u PYTHONPATH LD_LIBRARY_PATH="$libcxx" "$work/venv/bin/python" -m pytest tests/ -q {{quick_ignores}}
 
 # Run benchmarks only
 bench: build-release
@@ -173,12 +186,3 @@ docs-check: docs-check-mermaid docs-test-examples
 # Check markdown formatting (no changes)
 docs-fmt-check: sync-docs
     uv run mdformat --check docs/ README.md
-
-# Run backward compatibility tests (Python 3.8) - NIX ONLY
-test-compat:
-    @./scripts/test_compat.sh
-
-# Run backward compatibility tests (Python 3.8) - Standard (Non-Nix)
-# Usage: just test-compat-std
-test-compat-std:
-    uv run --python 3.8 python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_benchmark_split.py --ignore=tests/test_lambda_benchmark.py --ignore=tests/test_vectorcall_benchmark.py
