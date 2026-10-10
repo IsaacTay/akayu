@@ -51,9 +51,7 @@ def test_ordering_split_union_scalar_vs_batch():
 
     s_batch.emit_batch([1, 2])
 
-    assert out_batch == expected_order, (
-        f"Batch ordering failed. Got {out_batch}, expected {expected_order}"
-    )
+    assert out_batch == expected_order, f"Batch ordering failed. Got {out_batch}, expected {expected_order}"
 
 
 def test_ordering_complex_split():

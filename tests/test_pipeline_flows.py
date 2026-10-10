@@ -112,12 +112,14 @@ def test_full_pipeline_source_to_merge():
         n = 20
         result = []
         for i in range(n):
-            result.extend([
-                Timestamp(start.timestamp + i * 10000),
-                Rotmat(np.eye(3)),
-                Accel([0, 0, 9.81]),
-                Gyro([0, 0, 0]),
-            ])
+            result.extend(
+                [
+                    Timestamp(start.timestamp + i * 10000),
+                    Rotmat(np.eye(3)),
+                    Accel([0, 0, 9.81]),
+                    Gyro([0, 0, 0]),
+                ]
+            )
         return result
 
     source = _create_source_node(imu_source)
@@ -137,9 +139,7 @@ def test_full_pipeline_source_to_merge():
 
 def test_segment_csv_flow_pattern():
     events = akayu.Stream()
-    exe_events, seg_events = split_filter(
-        events, lambda x: isinstance(x, (Start, Stop, Timestamp))
-    )
+    exe_events, seg_events = split_filter(events, lambda x: isinstance(x, (Start, Stop, Timestamp)))
 
     seg = flush_segments({"test": seg_events})
     result = []

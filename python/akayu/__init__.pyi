@@ -709,8 +709,11 @@ class MultiStream:
         ...
 
     def filter(
-        self, predicate: Callable[..., bool], *args: Any,
-        stream_name: str | None = None, **kwargs: Any,
+        self,
+        predicate: Callable[..., bool],
+        *args: Any,
+        stream_name: str | None = None,
+        **kwargs: Any,
     ) -> MultiStream:
         """Apply a filter to each stream in the batch."""
         ...
@@ -719,7 +722,9 @@ class MultiStream:
         """Apply a sink to each stream in the batch."""
         ...
 
-    def starmap(self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+    def starmap(
+        self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any
+    ) -> MultiStream:
         """Apply a starmap to each stream in the batch."""
         ...
 
@@ -738,13 +743,23 @@ class MultiStream:
         ...
 
     def batch_map(
-        self, func: Callable[[list[Any]], Iterable[_T]], *args: Any,
-        stream_name: str | None = None, **kwargs: Any,
+        self,
+        func: Callable[[list[Any]], Iterable[_T]],
+        *args: Any,
+        stream_name: str | None = None,
+        **kwargs: Any,
     ) -> MultiStream:
         """Apply a batch_map to each stream in the batch."""
         ...
 
-    def chunk_by(self, predicate: Callable[[Any], Any], *, include_delimiter: bool = False, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+    def chunk_by(
+        self,
+        predicate: Callable[[Any], Any],
+        *,
+        include_delimiter: bool = False,
+        stream_name: str | None = None,
+        **kwargs: Any,
+    ) -> MultiStream:
         """Apply chunk_by to each stream in the batch."""
         ...
 

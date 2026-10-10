@@ -142,11 +142,7 @@ def main():
     # Each branch can have completely different transformations
     print("\n--- Different operations per branch ---")
 
-    transformed_data = {
-        "doubled": [],
-        "tripled": [],
-        "negative": []
-    }
+    transformed_data = {"doubled": [], "tripled": [], "negative": []}
 
     source = akayu.Stream()
     p = source.par()

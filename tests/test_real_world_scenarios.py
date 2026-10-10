@@ -37,10 +37,12 @@ class TestLogProcessingPipeline:
     def test_log_aggregation_with_accumulate(self):
         s = Stream()
         counts = {}
+
         def count(acc, line):
             level = line.split(" ")[0]
             acc[level] = acc.get(level, 0) + 1
             return acc
+
         s.accumulate(count, start={}).sink(lambda d: counts.update(d))
         s.emit("INFO test")
         s.emit("ERROR fail")
@@ -95,7 +97,13 @@ class TestETLPipeline:
     def test_etl_with_data_type_conversion(self):
         s = Stream()
         processed = []
-        s.map(lambda row: {"id": int(row["id"]), "amount": float(row["amount"].replace("$", "")), "active": row["status"] == "active"}).sink(processed.append)
+        s.map(
+            lambda row: {
+                "id": int(row["id"]),
+                "amount": float(row["amount"].replace("$", "")),
+                "active": row["status"] == "active",
+            }
+        ).sink(processed.append)
         s.emit({"id": "42", "amount": "$99.50", "status": "active"})
         s.emit({"id": "17", "amount": "$10.00", "status": "inactive"})
         assert processed[0]["id"] == 42
@@ -106,7 +114,9 @@ class TestETLPipeline:
     def test_etl_with_batch_map_bulk_operations(self):
         s = Stream()
         results = []
-        s.batch_map(lambda batch: [{"id": r["id"], "score": r["score"] * 2} for r in batch if r["score"] > 0]).sink(results.append)
+        s.batch_map(lambda batch: [{"id": r["id"], "score": r["score"] * 2} for r in batch if r["score"] > 0]).sink(
+            results.append
+        )
         s.emit({"id": 1, "score": 5})
         s.emit({"id": 2, "score": -1})
         s.emit({"id": 3, "score": 10})
@@ -135,11 +145,13 @@ class TestDataAggregation:
     def test_running_average_with_accumulate_returns_state(self):
         s = Stream()
         avgs = []
+
         def avg(state, x):
             state["count"] += 1
             state["sum"] += x
             state["avg"] = state["sum"] / state["count"]
             return (state, state["avg"])
+
         s.accumulate(avg, start={"count": 0, "sum": 0, "avg": 0.0}, returns_state=True).sink(lambda s: avgs.append(s))
         s.emit(10)
         s.emit(20)
@@ -170,7 +182,9 @@ class TestDataAggregation:
         s2 = Stream()
         combined = akayu.combine_latest(s1, s2, emit_on=None)
         products = []
-        combined.map(lambda pair: pair[0] * pair[1] if pair[1] is not None else None).filter(lambda x: x is not None).sink(products.append)
+        combined.map(lambda pair: pair[0] * pair[1] if pair[1] is not None else None).filter(
+            lambda x: x is not None
+        ).sink(products.append)
         s1.emit(2)
         s2.emit(3)
         s1.emit(5)
@@ -198,7 +212,10 @@ class TestMultiConsumer:
         p = s.par()
         p.map(lambda x: x * 2).sink(doubled.append)
         p.filter(lambda x: x % 2 == 0).sink(filtered.append)
-        def acc(acc, x): return acc + x
+
+        def acc(acc, x):
+            return acc + x
+
         p.accumulate(acc, start=0).sink(accumulated.append)
         s.emit(1)
         s.emit(2)
@@ -354,11 +371,13 @@ class TestDataRouting:
     def test_route_with_chunk_by_batching(self):
         s = Stream()
         small_batches, large_batches = [], []
+
         def route(batch):
             if len(batch) <= 3:
                 small_batches.append(batch)
             else:
                 large_batches.append(batch)
+
         s.chunk_by(lambda x: x == ";", include_delimiter=True).sink(route)
         s.emit_batch([1, 2, ";", 3, 4, 5, 6, ";", 7])
         assert len(small_batches) == 1
@@ -391,7 +410,9 @@ class TestNestedTransforms:
     def test_filter_map_filter_map_sink(self):
         s = Stream()
         result = []
-        s.filter(lambda x: x > 0).map(lambda x: x * 10).filter(lambda x: x >= 50).map(lambda x: x + 5).sink(result.append)
+        s.filter(lambda x: x > 0).map(lambda x: x * 10).filter(lambda x: x >= 50).map(lambda x: x + 5).sink(
+            result.append
+        )
         s.emit(-5)
         s.emit(3)
         s.emit(5)
@@ -421,7 +442,9 @@ class TestNestedTransforms:
     def test_deep_chain_with_compile(self):
         s = Stream()
         result = []
-        s.map(lambda x: x * 2).filter(lambda x: x > 5).map(lambda x: x + 1).accumulate(lambda a, x: a + x, start=0).sink(result.append)
+        s.map(lambda x: x * 2).filter(lambda x: x > 5).map(lambda x: x + 1).accumulate(
+            lambda a, x: a + x, start=0
+        ).sink(result.append)
         s.compile()
         s.emit(1)
         s.emit(5)
@@ -433,6 +456,7 @@ class TestStatefulProcessing:
     def test_accumulate_running_statistics(self):
         s = Stream()
         stats = []
+
         def stats_fn(acc, val):
             acc["n"] += 1
             acc["sum"] += val
@@ -441,6 +465,7 @@ class TestStatefulProcessing:
             delta = val - acc["mean"]
             acc["m2"] = m2 + delta * delta
             return acc
+
         s.accumulate(stats_fn, start={"n": 0, "sum": 0, "mean": 0, "m2": 0}).sink(stats.append)
         s.emit(10)
         s.emit(20)
@@ -451,10 +476,12 @@ class TestStatefulProcessing:
     def test_accumulate_with_returns_state_complex_state(self):
         s = Stream()
         history = []
+
         def stateful(acc, item):
             acc["items"].append(item)
             acc["last"] = item
             return (acc, item)
+
         s.accumulate(stateful, start={"items": [], "last": None}, returns_state=True).sink(history.append)
         s.emit("a")
         s.emit("b")
@@ -579,6 +606,7 @@ class TestStreamingMetrics:
     def test_calculate_running_percentiles_with_accumulate(self):
         s = Stream()
         medians = []
+
         def running_median(acc, val):
             acc["values"].append(val)
             acc["values"].sort()
@@ -588,7 +616,10 @@ class TestStreamingMetrics:
             else:
                 median = acc["values"][n // 2]
             return (acc, median)
-        s.accumulate(running_median, start={"values": [], "median": 0}, returns_state=True).sink(lambda m: medians.append(m))
+
+        s.accumulate(running_median, start={"values": [], "median": 0}, returns_state=True).sink(
+            lambda m: medians.append(m)
+        )
         for v in [5, 1, 9, 3, 7, 2]:
             s.emit(v)
         assert medians[-1] == 4.0
@@ -596,9 +627,11 @@ class TestStreamingMetrics:
     def test_track_unique_values_with_accumulate_set_state(self):
         s = Stream()
         unique_counts = []
+
         def track_unique(acc, val):
             acc.add(val)
             return acc
+
         s.accumulate(track_unique, start=set()).sink(lambda s: unique_counts.append(len(s)))
         s.emit("a")
         s.emit("b")
@@ -610,12 +643,16 @@ class TestStreamingMetrics:
     def test_rate_calculation_events_per_emit_with_accumulate(self):
         s = Stream()
         rates = []
+
         def calc_rate(acc, val):
             acc["count"] += 1
             acc["total"] += val
             acc["rate"] = acc["total"] / acc["count"]
             return (acc, acc["rate"])
-        s.accumulate(calc_rate, start={"count": 0, "total": 0, "rate": 0.0}, returns_state=True).sink(lambda r: rates.append(r))
+
+        s.accumulate(calc_rate, start={"count": 0, "total": 0, "rate": 0.0}, returns_state=True).sink(
+            lambda r: rates.append(r)
+        )
         s.emit(10)
         s.emit(20)
         s.emit(30)
@@ -628,7 +665,10 @@ class TestStreamingMetrics:
         p = s.par()
         p.accumulate(lambda a, x: a + x, start=0).sink(sums.append)
         p.map(lambda x: 1).accumulate(lambda a, x: a + x, start=0).sink(counts.append)
-        def max_fn(acc, x): return max(acc, x)
+
+        def max_fn(acc, x):
+            return max(acc, x)
+
         p.accumulate(max_fn, start=0).sink(maxes.append)
         for i in [5, 3, 9, 1, 7, 2]:
             s.emit(i)
@@ -686,7 +726,7 @@ class TestCompileOptimizationsRealWorld:
         s.compile()
         s.emit_batch(list("ab,cd,e"))
         s.flush()
-        assert result == [('a', 'b', ','), ('c', 'd', ','), ('e',)]
+        assert result == [("a", "b", ","), ("c", "d", ","), ("e",)]
 
     def test_verify_compile_does_not_change_results(self):
         s1 = Stream()

@@ -34,7 +34,12 @@ def main():
         {"sensor_id": "A1", "temperature": 23.1, "humidity": 46.2, "timestamp": 1001},
         {"sensor_id": "B2", "temperature": 18.9, "humidity": 52.1, "timestamp": 1002},
         {"sensor_id": "A1", "temperature": 24.3, "humidity": 44.8, "timestamp": 1003},
-        {"sensor_id": "C3", "temperature": 999.0, "humidity": 45.0, "timestamp": 1004},  # Invalid: temperature out of range
+        {
+            "sensor_id": "C3",
+            "temperature": 999.0,
+            "humidity": 45.0,
+            "timestamp": 1004,
+        },  # Invalid: temperature out of range
         {"sensor_id": "B2", "temperature": 19.2, "humidity": 51.5, "timestamp": 1005},
     ]
 
@@ -56,7 +61,9 @@ def main():
     validated = source.map(validate_reading).filter(lambda x: x is not None)
 
     # Branch 1: Store valid readings
-    validated.map(lambda r: f"Sensor {r['sensor_id']}: {r['temperature']:.1f}°C, {r['humidity']:.1f}% humidity").sink(valid_readings.append)
+    validated.map(lambda r: f"Sensor {r['sensor_id']}: {r['temperature']:.1f}°C, {r['humidity']:.1f}% humidity").sink(
+        valid_readings.append
+    )
 
     # Branch 2: Check for high temperature alerts
     def check_alerts(reading):
@@ -105,11 +112,7 @@ def main():
     def parse_log(log):
         parts = log.split(" ", 3)
         if len(parts) >= 4:
-            return {
-                "timestamp": parts[0] + " " + parts[1],
-                "level": parts[2],
-                "message": parts[3]
-            }
+            return {"timestamp": parts[0] + " " + parts[1], "level": parts[2], "message": parts[3]}
         return None
 
     parsed = source.map(parse_log).filter(lambda x: x is not None)
@@ -148,7 +151,7 @@ def main():
             "sensor_id": sensor_id,
             "temperature": base_temp + random.uniform(-2, 2),
             "humidity": base_humidity + random.uniform(-5, 5),
-            "timestamp": time.time()
+            "timestamp": time.time(),
         }
 
     processed = []
@@ -160,14 +163,14 @@ def main():
     p = source.par()
 
     # Branch 1: Normalize and store
-    p.map(lambda r: {
-        "id": r["sensor_id"],
-        "temp": round(r["temperature"], 1),
-        "humidity": round(r["humidity"], 1)
-    }).sink(processed.append)
+    p.map(
+        lambda r: {"id": r["sensor_id"], "temp": round(r["temperature"], 1), "humidity": round(r["humidity"], 1)}
+    ).sink(processed.append)
 
     # Branch 2: Flag high readings
-    p.map(lambda r: r["temperature"]).filter(lambda t: t > 25).map(lambda t: f"High temp: {t:.1f}°C").sink(high_readings.append)
+    p.map(lambda r: r["temperature"]).filter(lambda t: t > 25).map(lambda t: f"High temp: {t:.1f}°C").sink(
+        high_readings.append
+    )
 
     # Simulate data coming in
     sensors = [
@@ -216,10 +219,7 @@ def main():
     # Transform: convert to USD
     def to_usd(tx):
         rate = rates.get(tx["currency"], 1.0)
-        return {
-            **tx,
-            "amount_usd": round(tx["amount"] * rate, 2)
-        }
+        return {**tx, "amount_usd": round(tx["amount"] * rate, 2)}
 
     transformed = source.map(to_usd)
 

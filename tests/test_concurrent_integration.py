@@ -339,11 +339,7 @@ class TestWebServerSimulation:
         for t in threads:
             t.join()
 
-        expected = sorted(
-            (start + i) * 2
-            for start in range(0, 10000, 1000)
-            for i in range(100)
-        )
+        expected = sorted((start + i) * 2 for start in range(0, 10000, 1000) for i in range(100))
         assert len(results) == 1000
         assert sorted(results) == expected
 
@@ -724,10 +720,7 @@ class TestStressTests:
             for i in range(start, start + count):
                 stream.emit(i)
 
-        threads = [
-            threading.Thread(target=emit_from_stream, args=(streams[i], i * 500, 500))
-            for i in range(20)
-        ]
+        threads = [threading.Thread(target=emit_from_stream, args=(streams[i], i * 500, 500)) for i in range(20)]
         for t in threads:
             t.start()
         for t in threads:

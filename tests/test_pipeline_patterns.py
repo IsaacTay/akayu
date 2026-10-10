@@ -77,10 +77,10 @@ def test_flush_segments():
     segment_events = {"left": akayu.Stream(), "right": akayu.Stream()}
 
     for i in range(3):
-        segment_events["left"].emit(SegmentStart(timestamp=i*1000, set=i))
-        segment_events["left"].emit(Timestamp(i*1000 + 100))
-        segment_events["left"].emit(Timestamp(i*1000 + 200))
-        segment_events["left"].emit(SegmentStop(timestamp=i*1000 + 300, set=i))
+        segment_events["left"].emit(SegmentStart(timestamp=i * 1000, set=i))
+        segment_events["left"].emit(Timestamp(i * 1000 + 100))
+        segment_events["left"].emit(Timestamp(i * 1000 + 200))
+        segment_events["left"].emit(SegmentStop(timestamp=i * 1000 + 300, set=i))
 
     seg = flush_segments(segment_events)
     result_dict = seg.flush()
@@ -140,12 +140,14 @@ def test_source_node_synthetic_imu():
         n = 10
         result = []
         for i in range(n):
-            result.extend([
-                Timestamp(start_info.timestamp + i * 10000),
-                Rotmat(np.eye(3)),
-                Accel([0, 0, 9.81]),
-                Gyro([0, 0, 0]),
-            ])
+            result.extend(
+                [
+                    Timestamp(start_info.timestamp + i * 10000),
+                    Rotmat(np.eye(3)),
+                    Accel([0, 0, 9.81]),
+                    Gyro([0, 0, 0]),
+                ]
+            )
         return result
 
     node = _create_source_node(synthetic_imu_source)
@@ -163,4 +165,4 @@ def test_source_node_synthetic_imu():
     assert len(output) >= 2
     assert isinstance(output[0], Start)
     assert isinstance(output[-1], Stop)
-    assert len(output) == 1 + 10*4 + 1
+    assert len(output) == 1 + 10 * 4 + 1

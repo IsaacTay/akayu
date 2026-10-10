@@ -79,9 +79,9 @@ def main():
     # Extract level, convert to uppercase, filter errors
     (
         source.map(lambda log: log.split(":")[0])  # Extract level
-              .map(lambda level: level.strip().upper())  # Normalize
-              .filter(lambda level: level == "ERROR")  # Keep only errors
-              .sink(processed_logs.append)
+        .map(lambda level: level.strip().upper())  # Normalize
+        .filter(lambda level: level == "ERROR")  # Keep only errors
+        .sink(processed_logs.append)
     )
 
     for log in logs:
@@ -102,10 +102,10 @@ def main():
 
     source = akayu.Stream()
     (
-        source.map(lambda x: x * 3)       # Multiply by 3
-              .filter(lambda x: x % 2 == 0)  # Keep even
-              .map(lambda x: f"Value: {x}")  # Format as string
-              .sink(final_result.append)
+        source.map(lambda x: x * 3)  # Multiply by 3
+        .filter(lambda x: x % 2 == 0)  # Keep even
+        .map(lambda x: f"Value: {x}")  # Format as string
+        .sink(final_result.append)
     )
 
     source.emit_batch(numbers)
@@ -124,7 +124,7 @@ def main():
     distances = []
 
     source = akayu.Stream()
-    source.starmap(lambda x, y: (x ** 2 + y ** 2) ** 0.5).sink(distances.append)
+    source.starmap(lambda x, y: (x**2 + y**2) ** 0.5).sink(distances.append)
 
     source.emit_batch(coords)
 

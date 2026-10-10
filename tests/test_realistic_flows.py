@@ -15,9 +15,7 @@ class TestLogProcessing:
         warning_count = [0]
 
         parsed = src.map(lambda line: line.split(" ", 2))
-        parsed.starmap(
-            lambda level, ts, msg: errors.append(msg) if level == "ERROR" else None
-        )
+        parsed.starmap(lambda level, ts, msg: errors.append(msg) if level == "ERROR" else None)
         parsed.filter(lambda parts: parts[0] == "WARN").sink(
             lambda _: warning_count.__setitem__(0, warning_count[0] + 1)
         )
@@ -67,9 +65,7 @@ class TestLogProcessing:
     def test_error_rate_per_server(self):
         sources = _sources(3)
         ms = MultiStream(sources)
-        error_counts = ms.filter(lambda line: "500" in line).accumulate(
-            lambda acc, _: acc + 1, start=0
-        ).to_list()
+        error_counts = ms.filter(lambda line: "500" in line).accumulate(lambda acc, _: acc + 1, start=0).to_list()
 
         server_logs = [
             ["req 200", "req 500", "req 200"],
@@ -87,12 +83,7 @@ class TestETLPipeline:
     def test_clean_transform_load(self):
         src = Stream()
         results = []
-        (
-            src.map(lambda raw: raw.strip())
-            .filter(lambda s: s != "")
-            .map(lambda s: s.upper())
-            .sink(results.append)
-        )
+        (src.map(lambda raw: raw.strip()).filter(lambda s: s != "").map(lambda s: s.upper()).sink(results.append))
 
         for d in ["  hello  ", "", "  world  ", "  ", "  foo  "]:
             src.emit(d)
@@ -227,7 +218,7 @@ class TestStreamFanout:
         doubled = []
         stringified = []
 
-        src.map(lambda x: x ** 2).sink(squared.append)
+        src.map(lambda x: x**2).sink(squared.append)
         src.map(lambda x: x * 2).sink(doubled.append)
         src.map(lambda x: str(x)).sink(stringified.append)
 
@@ -291,11 +282,7 @@ class TestCompiledPipeline:
         def build(compile_it=False):
             src = Stream()
             results = []
-            pipeline = (
-                src.map(lambda x: x.strip())
-                .filter(lambda x: len(x) > 0)
-                .map(lambda x: int(x) * 2)
-            )
+            pipeline = src.map(lambda x: x.strip()).filter(lambda x: len(x) > 0).map(lambda x: int(x) * 2)
             pipeline.sink(results.append)
             if compile_it:
                 pipeline.compile()

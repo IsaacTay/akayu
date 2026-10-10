@@ -108,12 +108,12 @@ def main():
 
     results_a = []
     source_a = akayu.Stream()
-    source_a.map(lambda x: x ** 2).filter(lambda x: x < 50).sink(results_a.append)
+    source_a.map(lambda x: x**2).filter(lambda x: x < 50).sink(results_a.append)
     source_a.compile()
 
     results_b = []
     source_b = akayu.Stream()
-    source_b.map(lambda x: x ** 2).filter(lambda x: x < 50).sink(results_b.append)
+    source_b.map(lambda x: x**2).filter(lambda x: x < 50).sink(results_b.append)
     # Don't compile
 
     test_data = list(range(10))

@@ -34,7 +34,7 @@ def compare(name, fns, n=N):
     base_ns = results[0][1]
     print(f"  {name}")
     for label, ns in results:
-        ratio = ns / base_ns if base_ns > 0 else float('inf')
+        ratio = ns / base_ns if base_ns > 0 else float("inf")
         print(f"    {label:<40s}  {ns:>7.1f} ns/item  ({ratio:.2f}x)")
     print()
 
@@ -42,14 +42,15 @@ def compare(name, fns, n=N):
 if __name__ == "__main__":
     int_inputs = list(range(N))
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"  Propagation overhead isolation  ({N:,} items)")
-    print(f"{'='*80}\n")
+    print(f"{'=' * 80}\n")
 
     # ── Fan-out: compiled vs uncompiled, identity sinks ──
     print("  ── Fan-out with no-op sinks (identity) ──\n")
 
     for fan in [2, 5, 10, 20]:
+
         def _compiled(fan=fan):
             def make():
                 s = akayu.Stream()
@@ -57,6 +58,7 @@ if __name__ == "__main__":
                     s.sink(lambda x: None)
                 s.compile()
                 s.emit_batch(int_inputs)
+
             return make
 
         def _uncompiled(fan=fan):
@@ -67,26 +69,34 @@ if __name__ == "__main__":
                 # no compile
                 for i in int_inputs:
                     s.emit(i)
+
             return make
 
         def _python(fan=fan):
             def make():
-                def noop(x): pass
+                def noop(x):
+                    pass
+
                 for i in range(N):
                     for _ in range(fan):
                         noop(i)
+
             return make
 
-        compare(f"fan-out ×{fan} (no-op sinks)", [
-            ("compiled (raw ptr)", _compiled),
-            ("uncompiled (borrow_mut)", _uncompiled),
-            ("python", _python),
-        ])
+        compare(
+            f"fan-out ×{fan} (no-op sinks)",
+            [
+                ("compiled (raw ptr)", _compiled),
+                ("uncompiled (borrow_mut)", _uncompiled),
+                ("python", _python),
+            ],
+        )
 
     # ── Fan-out with builtin bool map + sink ──
     print("  ── Fan-out with bool map → sink ──\n")
 
     for fan in [2, 5, 10]:
+
         def _compiled_bool(fan=fan):
             def make():
                 s = akayu.Stream()
@@ -94,6 +104,7 @@ if __name__ == "__main__":
                     s.map(bool).sink(lambda x: None)
                 s.compile()
                 s.emit_batch(int_inputs)
+
             return make
 
         def _uncompiled_bool(fan=fan):
@@ -103,26 +114,34 @@ if __name__ == "__main__":
                     s.map(bool).sink(lambda x: None)
                 for i in int_inputs:
                     s.emit(i)
+
             return make
 
         def _python_bool(fan=fan):
             def make():
-                def noop(x): pass
+                def noop(x):
+                    pass
+
                 for i in range(N):
                     for _ in range(fan):
                         noop(bool(i))
+
             return make
 
-        compare(f"fan-out ×{fan} (bool→sink per branch)", [
-            ("compiled (raw ptr)", _compiled_bool),
-            ("uncompiled (borrow_mut)", _uncompiled_bool),
-            ("python", _python_bool),
-        ])
+        compare(
+            f"fan-out ×{fan} (bool→sink per branch)",
+            [
+                ("compiled (raw ptr)", _compiled_bool),
+                ("uncompiled (borrow_mut)", _uncompiled_bool),
+                ("python", _python_bool),
+            ],
+        )
 
     # ── Linear chain: compiled vs uncompiled ──
     print("  ── Linear chain (no-op identity maps) ──\n")
 
     for depth in [2, 5, 10, 20]:
+
         def _compiled_chain(depth=depth):
             def make():
                 s = akayu.Stream()
@@ -132,6 +151,7 @@ if __name__ == "__main__":
                 node.sink(lambda x: None)
                 s.compile()
                 s.emit_batch(int_inputs)
+
             return make
 
         def _uncompiled_chain(depth=depth):
@@ -143,28 +163,36 @@ if __name__ == "__main__":
                 node.sink(lambda x: None)
                 for i in int_inputs:
                     s.emit(i)
+
             return make
 
         def _python_chain(depth=depth):
             def make():
-                def noop(x): pass
+                def noop(x):
+                    pass
+
                 for i in range(N):
                     x = i
                     for _ in range(depth):
                         x = bool(x)
                     noop(x)
+
             return make
 
-        compare(f"chain ×{depth} (bool maps)", [
-            ("compiled (fused + raw ptr)", _compiled_chain),
-            ("uncompiled (borrow_mut)", _uncompiled_chain),
-            ("python", _python_chain),
-        ])
+        compare(
+            f"chain ×{depth} (bool maps)",
+            [
+                ("compiled (fused + raw ptr)", _compiled_chain),
+                ("uncompiled (borrow_mut)", _uncompiled_chain),
+                ("python", _python_chain),
+            ],
+        )
 
     # ── Diamond: compiled vs uncompiled ──
     print("  ── Diamond (fan-out → union → sink) ──\n")
 
     for fan in [2, 5, 10]:
+
         def _compiled_diamond(fan=fan):
             def make():
                 s = akayu.Stream()
@@ -175,6 +203,7 @@ if __name__ == "__main__":
                 node.sink(lambda x: None)
                 s.compile()
                 s.emit_batch(int_inputs)
+
             return make
 
         def _uncompiled_diamond(fan=fan):
@@ -187,18 +216,25 @@ if __name__ == "__main__":
                 node.sink(lambda x: None)
                 for i in int_inputs:
                     s.emit(i)
+
             return make
 
         def _python_diamond(fan=fan):
             def make():
-                def noop(x): pass
+                def noop(x):
+                    pass
+
                 for i in range(N):
                     for _ in range(fan):
                         noop(bool(i))
+
             return make
 
-        compare(f"diamond ×{fan} (bool→union→sink)", [
-            ("compiled (raw ptr)", _compiled_diamond),
-            ("uncompiled (borrow_mut)", _uncompiled_diamond),
-            ("python", _python_diamond),
-        ])
+        compare(
+            f"diamond ×{fan} (bool→union→sink)",
+            [
+                ("compiled (raw ptr)", _compiled_diamond),
+                ("uncompiled (borrow_mut)", _uncompiled_diamond),
+                ("python", _python_diamond),
+            ],
+        )

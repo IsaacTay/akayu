@@ -6,6 +6,7 @@ from akayu import Stream
 # Tier 1: Direct Rust flush (flush_target bypass)
 # ---------------------------------------------------------------------------
 
+
 class TestFlushTarget:
     """Tier 1: Sink calling .flush() on Collect bypasses Python dispatch."""
 
@@ -80,6 +81,7 @@ class TestFlushTarget:
 # ---------------------------------------------------------------------------
 # Tier 2: ChunkBy — direct API
 # ---------------------------------------------------------------------------
+
 
 class TestChunkByDirect:
     """chunk_by() API without compile-time fusion."""
@@ -200,6 +202,7 @@ class TestChunkByDirect:
 # ---------------------------------------------------------------------------
 # Tier 2: ChunkBy — compile-time fusion
 # ---------------------------------------------------------------------------
+
 
 class TestChunkByFusion:
     """collect() + filter(pred).sink(flush) fused into ChunkBy at compile time."""

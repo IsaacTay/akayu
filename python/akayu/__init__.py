@@ -19,10 +19,16 @@ from akayu.akayu import (
 
 Stream = _Stream
 
-_UNSUPPORTED = frozenset({
-    "emit", "emit_batch",
-    "start_profiling", "stop_profiling", "emit_profiled", "emit_batch_profiled",
-})
+_UNSUPPORTED = frozenset(
+    {
+        "emit",
+        "emit_batch",
+        "start_profiling",
+        "stop_profiling",
+        "emit_profiled",
+        "emit_batch_profiled",
+    }
+)
 
 
 def _as_streams(obj, label=None):
@@ -41,8 +47,7 @@ def _broadcast(*streams_args):
     lengths = [len(s) for s in streams_args]
     if max(lengths) == 0:
         raise ValueError(
-            "Cannot broadcast: all MultiStream arguments are empty. "
-            "Provide at least one non-empty MultiStream."
+            "Cannot broadcast: all MultiStream arguments are empty. Provide at least one non-empty MultiStream."
         )
     target = max(lengths)
     for i, length in enumerate(lengths):
@@ -166,15 +171,10 @@ class MultiStream:
 
     def __setitem__(self, key, value):
         if not isinstance(value, (Stream, MultiStream)):
-            raise TypeError(
-                f"Cannot assign {type(value).__name__} to MultiStream. "
-                f"Expected Stream or MultiStream."
-            )
+            raise TypeError(f"Cannot assign {type(value).__name__} to MultiStream. Expected Stream or MultiStream.")
         if isinstance(key, str):
             if self._keys is None:
-                raise TypeError(
-                    f"Cannot use string key '{key}' on a list-backed MultiStream."
-                )
+                raise TypeError(f"Cannot use string key '{key}' on a list-backed MultiStream.")
             try:
                 idx = self._keys.index(key)
             except ValueError:
@@ -289,7 +289,10 @@ class MultiStream:
 
     def chunk_by(self, predicate, *, include_delimiter=False, stream_name=None, **kwargs):
         ms = MultiStream.__new__(MultiStream)
-        ms._streams = [s.chunk_by(predicate, include_delimiter=include_delimiter, stream_name=stream_name, **kwargs) for s in self._streams]
+        ms._streams = [
+            s.chunk_by(predicate, include_delimiter=include_delimiter, stream_name=stream_name, **kwargs)
+            for s in self._streams
+        ]
         ms._keys = self._keys
         return ms
 
@@ -347,8 +350,7 @@ class MultiStream:
     def union(self, *others):
         if not others:
             raise ValueError(
-                "union() needs at least one other stream to merge with. "
-                "Usage: ms.union(other) or ms.union(a, b, ...)"
+                "union() needs at least one other stream to merge with. Usage: ms.union(other) or ms.union(a, b, ...)"
             )
         if any(isinstance(s, MultiStream) for s in self._streams):
             raise TypeError(
@@ -392,10 +394,7 @@ class MultiStream:
                         f"{_builtins.tuple(emit_on_s._keys)}."
                     )
                 if emit_on_s._keys is None and len(emit_on_s) != 1:
-                    raise TypeError(
-                        "Cannot use list-backed MultiStream as emit_on with "
-                        "dict-backed arguments."
-                    )
+                    raise TypeError("Cannot use list-backed MultiStream as emit_on with dict-backed arguments.")
                 if len(emit_on_s) == 1:
                     emit_on_streams = emit_on_s._streams * len(keys)
                 else:
@@ -425,8 +424,7 @@ class MultiStream:
     def zip(self, *others):
         if not others:
             raise ValueError(
-                "zip() needs at least one other stream to pair with. "
-                "Usage: ms.zip(other) or ms.zip(a, b, ...)"
+                "zip() needs at least one other stream to pair with. Usage: ms.zip(other) or ms.zip(a, b, ...)"
             )
         if any(isinstance(s, MultiStream) for s in self._streams):
             raise TypeError(
@@ -449,10 +447,7 @@ class MultiStream:
 
 def union(*args):
     if len(args) < 2:
-        raise ValueError(
-            "akayu.union() needs at least two streams to merge. "
-            "Usage: union(a, b) or union(a, b, c, ...)"
-        )
+        raise ValueError("akayu.union() needs at least two streams to merge. Usage: union(a, b) or union(a, b, c, ...)")
     if all(isinstance(a, Stream) for a in args):
         return _rust_union(*args)
     converted = [_as_streams(a) for a in args]
@@ -494,10 +489,7 @@ def combine_latest(*args, emit_on=None):
                     f"{_builtins.tuple(emit_on_s._keys)}."
                 )
             if emit_on_s._keys is None and len(emit_on_s) != 1:
-                raise TypeError(
-                    "Cannot use list-backed MultiStream as emit_on with "
-                    "dict-backed arguments."
-                )
+                raise TypeError("Cannot use list-backed MultiStream as emit_on with dict-backed arguments.")
             if len(emit_on_s) == 1:
                 emit_on_streams = emit_on_s._streams * len(keys)
             else:
@@ -525,10 +517,7 @@ def combine_latest(*args, emit_on=None):
 
 def zip(*args):
     if len(args) < 2:
-        raise ValueError(
-            "akayu.zip() needs at least two streams to pair. "
-            "Usage: zip(a, b) or zip(a, b, c, ...)"
-        )
+        raise ValueError("akayu.zip() needs at least two streams to pair. Usage: zip(a, b) or zip(a, b, c, ...)")
     if all(isinstance(a, Stream) for a in args):
         return _rust_zip(*args)
     converted = [_as_streams(a) for a in args]

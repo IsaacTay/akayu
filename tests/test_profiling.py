@@ -10,14 +10,18 @@ from akayu import ProfileReport, Stream
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def double(x):
     return x * 2
+
 
 def is_even(x):
     return x % 2 == 0
 
+
 def noop(x):
     pass
+
 
 def slow_fn(x):
     """Burns ~1ms per call for measurable func_time."""
@@ -30,6 +34,7 @@ def slow_fn(x):
 # ---------------------------------------------------------------------------
 # Basic profiling
 # ---------------------------------------------------------------------------
+
 
 class TestEmitProfiled:
     def test_linear_pipeline(self):
@@ -104,6 +109,7 @@ class TestEmitProfiled:
 # Batch profiling
 # ---------------------------------------------------------------------------
 
+
 class TestBatchProfiled:
     def test_batch_items_count(self):
         s = Stream()
@@ -129,6 +135,7 @@ class TestBatchProfiled:
 # ---------------------------------------------------------------------------
 # Multi-emit aggregation (start/stop)
 # ---------------------------------------------------------------------------
+
 
 class TestStartStop:
     def test_multi_emit_accumulates(self):
@@ -171,6 +178,7 @@ class TestStartStop:
 # Context manager
 # ---------------------------------------------------------------------------
 
+
 class TestContextManager:
     def test_profile_context_manager(self):
         s = Stream()
@@ -207,6 +215,7 @@ class TestContextManager:
 # ---------------------------------------------------------------------------
 # Compiled / fused nodes
 # ---------------------------------------------------------------------------
+
 
 class TestCompiledProfiling:
     def test_fused_maps_single_entry(self):
@@ -249,6 +258,7 @@ class TestCompiledProfiling:
 # Branching pipeline
 # ---------------------------------------------------------------------------
 
+
 class TestBranchingPipeline:
     def test_branching_both_sinks_appear(self):
         s = Stream()
@@ -281,6 +291,7 @@ class TestBranchingPipeline:
 # Wall time excludes inter-emit time
 # ---------------------------------------------------------------------------
 
+
 class TestWallTime:
     def test_wall_time_excludes_sleep(self):
         s = Stream()
@@ -300,6 +311,7 @@ class TestWallTime:
 # Nested profiling error
 # ---------------------------------------------------------------------------
 
+
 class TestNestedProfiling:
     def test_nested_raises(self):
         s = Stream()
@@ -314,6 +326,7 @@ class TestNestedProfiling:
 # ---------------------------------------------------------------------------
 # Report formatting
 # ---------------------------------------------------------------------------
+
 
 class TestReportFormatting:
     def test_tree_view_str(self):
@@ -378,6 +391,7 @@ class TestReportFormatting:
 # Flatten expansion
 # ---------------------------------------------------------------------------
 
+
 class TestFlattenProfiling:
     def test_flatten_items_out_gt_items_in(self):
         s = Stream()
@@ -394,6 +408,7 @@ class TestFlattenProfiling:
 # Accumulate
 # ---------------------------------------------------------------------------
 
+
 class TestAccumulateProfiling:
     def test_accumulate_func_time(self):
         s = Stream()
@@ -409,6 +424,7 @@ class TestAccumulateProfiling:
 # ---------------------------------------------------------------------------
 # Empty pipeline
 # ---------------------------------------------------------------------------
+
 
 class TestEmptyPipeline:
     def test_source_only(self):

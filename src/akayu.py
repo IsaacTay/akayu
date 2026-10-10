@@ -10,10 +10,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import builtins as _builtins
 
-_NOISE_OPCODES = frozenset({
-    'RESUME', 'COPY_FREE_VARS', 'NOP', 'CACHE', 'PUSH_NULL', 'PRECALL', 'TO_BOOL',
-    'NOT_TAKEN',  # 3.14: branch-prediction marker after conditional jumps
-})
+_NOISE_OPCODES = frozenset(
+    {
+        "RESUME",
+        "COPY_FREE_VARS",
+        "NOP",
+        "CACHE",
+        "PUSH_NULL",
+        "PRECALL",
+        "TO_BOOL",
+        "NOT_TAKEN",  # 3.14: branch-prediction marker after conditional jumps
+    }
+)
 
 # --- Fast bytecode extractor ---
 # Pre-built lookup tables for custom bytecode parsing.
@@ -28,6 +36,7 @@ for _on, _oc in dis._inline_cache_entries.items():
 
 try:
     import _opcode as _opcode_mod
+
     _NB_OPS = _opcode_mod.get_nb_ops()  # [(name, symbol), ...]
 except (ImportError, AttributeError):
     _NB_OPS = []
@@ -57,37 +66,37 @@ def _fast_extract(co):
         name = _OP_NAME.get(op)
         caches = _OP_CACHE.get(op, 0)
         j += caches * 2  # skip inline cache entries
-        if name is None or name in _NOISE_OPCODES or name == 'RETURN_VALUE':
+        if name is None or name in _NOISE_OPCODES or name == "RETURN_VALUE":
             continue
         # Python 3.14 spellings of 3.13 opcodes, so the patterns below match
-        if name == 'LOAD_FAST_BORROW':
-            name = 'LOAD_FAST'
-        elif name == 'LOAD_FAST_BORROW_LOAD_FAST_BORROW':
-            name = 'LOAD_FAST_LOAD_FAST'
-        elif name == 'LOAD_SMALL_INT':  # the int is the oparg itself
-            result.append(('LOAD_CONST', arg))
+        if name == "LOAD_FAST_BORROW":
+            name = "LOAD_FAST"
+        elif name == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
+            name = "LOAD_FAST_LOAD_FAST"
+        elif name == "LOAD_SMALL_INT":  # the int is the oparg itself
+            result.append(("LOAD_CONST", arg))
             continue
         # Resolve argval based on opcode
-        if name == 'LOAD_CONST':
+        if name == "LOAD_CONST":
             av = consts[arg]
-        elif name in ('LOAD_ATTR', 'LOAD_GLOBAL'):
+        elif name in ("LOAD_ATTR", "LOAD_GLOBAL"):
             av = names[arg >> 1]
-        elif name == 'COMPARE_OP':
+        elif name == "COMPARE_OP":
             av = _CMP_OP[arg >> 5]
-        elif name == 'BINARY_OP':
+        elif name == "BINARY_OP":
             av = _NB_OPS[arg][1] if arg < len(_NB_OPS) else arg
-            if av == '[]':  # 3.14 spells BINARY_SUBSCR as BINARY_OP []
-                name, av = 'BINARY_SUBSCR', 0
-        elif name in ('CONTAINS_OP', 'IS_OP'):
+            if av == "[]":  # 3.14 spells BINARY_SUBSCR as BINARY_OP []
+                name, av = "BINARY_SUBSCR", 0
+        elif name in ("CONTAINS_OP", "IS_OP"):
             av = arg
-        elif name == 'LOAD_FAST':
+        elif name == "LOAD_FAST":
             av = varnames[arg]
-        elif name == 'LOAD_DEREF':
+        elif name == "LOAD_DEREF":
             # Free variable — resolve name from combined locals table
             # In 3.13, LOAD_DEREF arg indexes into co_varnames + co_cellvars + co_freevars
             all_names = co.co_varnames + co.co_cellvars + co.co_freevars
             av = all_names[arg] if arg < len(all_names) else arg
-        elif name == 'POP_JUMP_IF_FALSE' or name == 'POP_JUMP_IF_TRUE':
+        elif name == "POP_JUMP_IF_FALSE" or name == "POP_JUMP_IF_TRUE":
             # Jump target resolution: offset + 2 + arg*2 + cache_size*2
             av = offset + 2 + arg * 2 + caches * 2
         else:
@@ -95,18 +104,33 @@ def _fast_extract(co):
         result.append((name, av))
     return result
 
-_EXCEPTION_OPCODES = frozenset({
-    'SETUP_FINALLY', 'POP_EXCEPT', 'SETUP_WITH', 'BEFORE_WITH',
-    'SETUP_ASYNC_WITH', 'RERAISE', 'PUSH_EXC_INFO',
-})
+
+_EXCEPTION_OPCODES = frozenset(
+    {
+        "SETUP_FINALLY",
+        "POP_EXCEPT",
+        "SETUP_WITH",
+        "BEFORE_WITH",
+        "SETUP_ASYNC_WITH",
+        "RERAISE",
+        "PUSH_EXC_INFO",
+    }
+)
 
 # Known builtins we allow resolving from LOAD_GLOBAL
 _KNOWN_BUILTINS = {
-    'len': _builtins.len, 'str': _builtins.str, 'int': _builtins.int,
-    'float': _builtins.float, 'bool': _builtins.bool, 'isinstance': _builtins.isinstance,
-    'type': _builtins.type, 'hasattr': _builtins.hasattr,
-    'tuple': _builtins.tuple, 'list': _builtins.list, 'set': _builtins.set,
-    'frozenset': _builtins.frozenset,
+    "len": _builtins.len,
+    "str": _builtins.str,
+    "int": _builtins.int,
+    "float": _builtins.float,
+    "bool": _builtins.bool,
+    "isinstance": _builtins.isinstance,
+    "type": _builtins.type,
+    "hasattr": _builtins.hasattr,
+    "tuple": _builtins.tuple,
+    "list": _builtins.list,
+    "set": _builtins.set,
+    "frozenset": _builtins.frozenset,
 }
 
 _UNRESOLVABLE = object()  # sentinel
@@ -119,11 +143,11 @@ def _resolve_value(instr, func):
     Returns the resolved Python object, or _UNRESOLVABLE sentinel.
     """
     op = instr[0]
-    if op == 'LOAD_CONST':
+    if op == "LOAD_CONST":
         return instr[1]
-    if op == 'LOAD_DEREF':
+    if op == "LOAD_DEREF":
         # Closure variable — snapshot at compile time
-        closure = getattr(func, '__closure__', None)
+        closure = getattr(func, "__closure__", None)
         if closure is None:
             return _UNRESOLVABLE
         # Find the index of this free var
@@ -138,12 +162,12 @@ def _resolve_value(instr, func):
                 except ValueError:
                     return _UNRESOLVABLE
         return _UNRESOLVABLE
-    if op == 'LOAD_GLOBAL':
+    if op == "LOAD_GLOBAL":
         name = instr[1]
         if name in _KNOWN_BUILTINS:
             return _KNOWN_BUILTINS[name]
         # Try resolving from func's globals for non-builtins (arbitrary callables)
-        globs = getattr(func, '__globals__', None)
+        globs = getattr(func, "__globals__", None)
         if globs is not None and name in globs:
             return globs[name]
         return _UNRESOLVABLE
@@ -157,7 +181,7 @@ def _clean_instructions(func):
     Returns a list of (opname, argval) tuples instead of Instruction namedtuples.
     Falls back to dis.get_instructions() if _fast_extract fails.
     """
-    code = getattr(func, '__code__', None)
+    code = getattr(func, "__code__", None)
     if code is None:
         return None
     try:
@@ -169,7 +193,7 @@ def _clean_instructions(func):
         except TypeError:
             return None
         clean = [i for i in instrs if i.opname not in _NOISE_OPCODES]
-        while clean and clean[-1].opname == 'RETURN_VALUE':
+        while clean and clean[-1].opname == "RETURN_VALUE":
             clean.pop()
         # Convert to tuple format for compatibility
         return [(i.opname, i.argval) for i in clean]
@@ -189,7 +213,7 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x.attr  (AttrGetter)
     # LOAD_FAST, LOAD_ATTR(name), where LOAD_ATTR is NOT a method load
-    if n == 2 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR':
+    if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR":
         attr_name = instrs[1][1]
         # In 3.12+, LOAD_ATTR can be used for method lookup (argval may have extra info)
         # If it's a method load, the next instruction would be CALL — but we only have 2 instrs
@@ -198,20 +222,19 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x[k]  (ItemGetter)
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(k), BINARY_SUBSCR
-    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_SUBSCR':
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "BINARY_SUBSCR":
         key = _resolve_value(instrs[1], func)
         if key is not _UNRESOLVABLE:
             return ("itemgetter", key)
 
     # lambda x: not x
     # LOAD_FAST, UNARY_NOT
-    if n == 2 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'UNARY_NOT':
+    if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "UNARY_NOT":
         return ("not",)
 
     # lambda x: <builtin>(x) — len, str, int, float, bool
     # LOAD_GLOBAL(name), LOAD_FAST, CALL 1
-    if (n == 3 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
-            and instrs[2][0] == 'CALL'):
+    if n == 3 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[2][0] == "CALL":
         resolved = _resolve_value(instrs[0], func)
         if resolved is _builtins.len:
             return ("len",)
@@ -239,8 +262,7 @@ def _analyze_simple(instrs, func):
 
     # lambda x: isinstance(x, T)
     # LOAD_GLOBAL(isinstance), LOAD_FAST, LOAD_GLOBAL/LOAD_DEREF/LOAD_CONST(T), CALL 2
-    if (n == 4 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
-            and instrs[3][0] == 'CALL'):
+    if n == 4 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[3][0] == "CALL":
         resolved_func = _resolve_value(instrs[0], func)
         if resolved_func is _builtins.isinstance:
             type_obj = _resolve_value(instrs[2], func)
@@ -253,7 +275,7 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x is <value>
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), IS_OP(0)
-    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'IS_OP':
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "IS_OP":
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
             if instrs[2][1] == 0:  # is
@@ -263,25 +285,25 @@ def _analyze_simple(instrs, func):
 
     # --- Comparison: lambda x: x > 0 ---
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), COMPARE_OP(op)
-    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'COMPARE_OP':
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "COMPARE_OP":
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
             op_name = instrs[2][1]
-            if op_name in ('==', '!=', '<', '>', '<=', '>='):
+            if op_name in ("==", "!=", "<", ">", "<=", ">="):
                 return ("compare", op_name, val)
 
     # --- BinOp: lambda x: x + 1 ---
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(val), BINARY_OP(op)
-    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_OP':
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "BINARY_OP":
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
             op_name = instrs[2][1]
-            if op_name in ('+', '-', '*', '/', '//', '%', '**'):
+            if op_name in ("+", "-", "*", "/", "//", "%", "**"):
                 return ("binop", op_name, val)
 
     # --- Contains: lambda x: x in collection ---
     # LOAD_FAST, LOAD_DEREF/LOAD_CONST/LOAD_GLOBAL(coll), CONTAINS_OP
-    if n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'CONTAINS_OP':
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "CONTAINS_OP":
         coll = _resolve_value(instrs[1], func)
         if coll is not _UNRESOLVABLE:
             if instrs[2][1] == 0:
@@ -291,15 +313,13 @@ def _analyze_simple(instrs, func):
 
     # --- Method call with 0 args: lambda x: x.strip() ---
     # LOAD_FAST, LOAD_ATTR(method), CALL 0
-    if (n == 3 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
-            and instrs[2][0] == 'CALL'):
+    if n == 3 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR" and instrs[2][0] == "CALL":
         method_name = instrs[1][1]
         return ("method0", method_name)
 
     # --- Method call with 1 arg: lambda x: x.startswith('foo') ---
     # LOAD_FAST, LOAD_ATTR(method), LOAD_CONST/LOAD_DEREF(arg), CALL 1
-    if (n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
-            and instrs[3][0] == 'CALL'):
+    if n == 4 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR" and instrs[3][0] == "CALL":
         method_name = instrs[1][1]
         arg = _resolve_value(instrs[2], func)
         if arg is not _UNRESOLVABLE:
@@ -307,8 +327,7 @@ def _analyze_simple(instrs, func):
 
     # --- Method call with 2 args: lambda x: x.replace('a', 'b') ---
     # LOAD_FAST, LOAD_ATTR(method), LOAD_CONST/LOAD_DEREF(arg1), LOAD_CONST/LOAD_DEREF(arg2), CALL 2
-    if (n == 5 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR'
-            and instrs[4][0] == 'CALL'):
+    if n == 5 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR" and instrs[4][0] == "CALL":
         method_name = instrs[1][1]
         arg1 = _resolve_value(instrs[2], func)
         arg2 = _resolve_value(instrs[3], func)
@@ -318,8 +337,12 @@ def _analyze_simple(instrs, func):
     # --- Side-effect method call on closure/global: lambda _: obj.method() ---
     # LOAD_DEREF/LOAD_GLOBAL(obj), LOAD_ATTR(method), CALL 0
     # x (LOAD_FAST) is never referenced — the lambda ignores its argument.
-    if (n == 3 and instrs[0][0] in ('LOAD_DEREF', 'LOAD_GLOBAL')
-            and instrs[1][0] == 'LOAD_ATTR' and instrs[2][0] == 'CALL'):
+    if (
+        n == 3
+        and instrs[0][0] in ("LOAD_DEREF", "LOAD_GLOBAL")
+        and instrs[1][0] == "LOAD_ATTR"
+        and instrs[2][0] == "CALL"
+    ):
         obj = _resolve_value(instrs[0], func)
         if obj is not _UNRESOLVABLE:
             return ("call_method0", obj, instrs[1][1])
@@ -327,17 +350,20 @@ def _analyze_simple(instrs, func):
     # --- Side-effect method call passing x: lambda x: obj.method(x) ---
     # LOAD_DEREF/LOAD_GLOBAL(obj), LOAD_ATTR(method), LOAD_FAST(x), CALL 1
     # The lambda's argument is passed directly to the method.
-    if (n == 4 and instrs[0][0] in ('LOAD_DEREF', 'LOAD_GLOBAL')
-            and instrs[1][0] == 'LOAD_ATTR'
-            and instrs[2][0] == 'LOAD_FAST'
-            and instrs[3][0] == 'CALL'):
+    if (
+        n == 4
+        and instrs[0][0] in ("LOAD_DEREF", "LOAD_GLOBAL")
+        and instrs[1][0] == "LOAD_ATTR"
+        and instrs[2][0] == "LOAD_FAST"
+        and instrs[3][0] == "CALL"
+    ):
         obj = _resolve_value(instrs[0], func)
         if obj is not _UNRESOLVABLE:
             return ("call_method1", obj, instrs[1][1])
 
     # --- Slice: lambda x: x[start:stop] ---
     # LOAD_FAST, LOAD_CONST(start), LOAD_CONST(stop), BINARY_SLICE
-    if n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[3][0] == 'BINARY_SLICE':
+    if n == 4 and instrs[0][0] == "LOAD_FAST" and instrs[3][0] == "BINARY_SLICE":
         start = _resolve_value(instrs[1], func)
         stop = _resolve_value(instrs[2], func)
         if start is not _UNRESOLVABLE and stop is not _UNRESOLVABLE:
@@ -348,24 +374,24 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x.attr <op> val  (Chain: AttrGetter → Compare/BinOp/Contains)
     # LOAD_FAST, LOAD_ATTR(name), LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/BINARY_OP/CONTAINS_OP/IS_OP
-    if n == 4 and instrs[0][0] == 'LOAD_FAST' and instrs[1][0] == 'LOAD_ATTR':
+    if n == 4 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR":
         attr_name = instrs[1][1]
         val = _resolve_value(instrs[2], func)
         if val is not _UNRESOLVABLE:
-            if instrs[3][0] == 'COMPARE_OP':
+            if instrs[3][0] == "COMPARE_OP":
                 op_name = instrs[3][1]
-                if op_name in ('==', '!=', '<', '>', '<=', '>='):
+                if op_name in ("==", "!=", "<", ">", "<=", ">="):
                     return ("chain", ("attrgetter", attr_name), ("compare", op_name, val))
-            if instrs[3][0] == 'BINARY_OP':
+            if instrs[3][0] == "BINARY_OP":
                 op_name = instrs[3][1]
-                if op_name in ('+', '-', '*', '/', '//', '%', '**'):
+                if op_name in ("+", "-", "*", "/", "//", "%", "**"):
                     return ("chain", ("attrgetter", attr_name), ("binop", op_name, val))
-            if instrs[3][0] == 'CONTAINS_OP':
+            if instrs[3][0] == "CONTAINS_OP":
                 if instrs[3][1] == 0:
                     return ("chain", ("attrgetter", attr_name), ("contains", val))
                 else:
                     return ("chain", ("attrgetter", attr_name), ("not_contains", val))
-            if instrs[3][0] == 'IS_OP':
+            if instrs[3][0] == "IS_OP":
                 if instrs[3][1] == 0:
                     return ("chain", ("attrgetter", attr_name), ("is", val))
                 else:
@@ -373,24 +399,24 @@ def _analyze_simple(instrs, func):
 
     # lambda x: x[k] <op> val  (Chain: ItemGetter → Compare/etc.)
     # LOAD_FAST, LOAD_CONST/LOAD_DEREF(k), BINARY_SUBSCR, LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/etc.
-    if n == 5 and instrs[0][0] == 'LOAD_FAST' and instrs[2][0] == 'BINARY_SUBSCR':
+    if n == 5 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "BINARY_SUBSCR":
         key = _resolve_value(instrs[1], func)
         val = _resolve_value(instrs[3], func)
         if key is not _UNRESOLVABLE and val is not _UNRESOLVABLE:
-            if instrs[4][0] == 'COMPARE_OP':
+            if instrs[4][0] == "COMPARE_OP":
                 op_name = instrs[4][1]
-                if op_name in ('==', '!=', '<', '>', '<=', '>='):
+                if op_name in ("==", "!=", "<", ">", "<=", ">="):
                     return ("chain", ("itemgetter", key), ("compare", op_name, val))
-            if instrs[4][0] == 'BINARY_OP':
+            if instrs[4][0] == "BINARY_OP":
                 op_name = instrs[4][1]
-                if op_name in ('+', '-', '*', '/', '//', '%', '**'):
+                if op_name in ("+", "-", "*", "/", "//", "%", "**"):
                     return ("chain", ("itemgetter", key), ("binop", op_name, val))
-            if instrs[4][0] == 'CONTAINS_OP':
+            if instrs[4][0] == "CONTAINS_OP":
                 if instrs[4][1] == 0:
                     return ("chain", ("itemgetter", key), ("contains", val))
                 else:
                     return ("chain", ("itemgetter", key), ("not_contains", val))
-            if instrs[4][0] == 'IS_OP':
+            if instrs[4][0] == "IS_OP":
                 if instrs[4][1] == 0:
                     return ("chain", ("itemgetter", key), ("is", val))
                 else:
@@ -398,48 +424,54 @@ def _analyze_simple(instrs, func):
 
     # lambda x: len(x) > 0 etc.  (Chain: Len → Compare)
     # LOAD_GLOBAL(len), LOAD_FAST, CALL 1, LOAD_CONST(val), COMPARE_OP
-    if (n == 5 and instrs[0][0] == 'LOAD_GLOBAL' and instrs[1][0] == 'LOAD_FAST'
-            and instrs[2][0] == 'CALL'):
+    if n == 5 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[2][0] == "CALL":
         resolved_func = _resolve_value(instrs[0], func)
         if resolved_func in (
-            _builtins.len, _builtins.str, _builtins.int, _builtins.float, _builtins.bool,
+            _builtins.len,
+            _builtins.str,
+            _builtins.int,
+            _builtins.float,
+            _builtins.bool,
             _builtins.type,
         ):
             val = _resolve_value(instrs[3], func)
             if val is not _UNRESOLVABLE:
                 first_op = {
-                    _builtins.len: "len", _builtins.str: "str", _builtins.int: "int",
-                    _builtins.float: "float", _builtins.bool: "bool",
+                    _builtins.len: "len",
+                    _builtins.str: "str",
+                    _builtins.int: "int",
+                    _builtins.float: "float",
+                    _builtins.bool: "bool",
                     _builtins.type: "type",
                 }[resolved_func]
-                if instrs[4][0] == 'COMPARE_OP':
+                if instrs[4][0] == "COMPARE_OP":
                     op_name = instrs[4][1]
-                    if op_name in ('==', '!=', '<', '>', '<=', '>='):
+                    if op_name in ("==", "!=", "<", ">", "<=", ">="):
                         return ("chain", (first_op,), ("compare", op_name, val))
-                if instrs[4][0] == 'BINARY_OP':
+                if instrs[4][0] == "BINARY_OP":
                     op_name = instrs[4][1]
-                    if op_name in ('+', '-', '*', '/', '//', '%', '**'):
+                    if op_name in ("+", "-", "*", "/", "//", "%", "**"):
                         return ("chain", (first_op,), ("binop", op_name, val))
 
     # --- Negate: lambda x: not <expr> ---
     # <expr instrs> + UNARY_NOT
-    if n >= 2 and instrs[-1][0] == 'UNARY_NOT':
+    if n >= 2 and instrs[-1][0] == "UNARY_NOT":
         inner = _analyze_simple(instrs[:-1], func)
         if inner is not None:
             return ("negate", inner)
 
     # --- Tuple/list construction: (x["a"], x["b"]) or [x.name, x.age] ---
     # Multiple LOAD_FAST + sub-op groups ending with BUILD_TUPLE/BUILD_LIST
-    if n >= 3 and instrs[-1][0] in ('BUILD_TUPLE', 'BUILD_LIST'):
+    if n >= 3 and instrs[-1][0] in ("BUILD_TUPLE", "BUILD_LIST"):
         count = instrs[-1][1]
         remaining = instrs[:-1]
         groups = []
         pos = 0
         for _ in range(count):
-            if pos >= len(remaining) or remaining[pos][0] != 'LOAD_FAST':
+            if pos >= len(remaining) or remaining[pos][0] != "LOAD_FAST":
                 break
             end = pos + 1
-            while end < len(remaining) and remaining[end][0] != 'LOAD_FAST':
+            while end < len(remaining) and remaining[end][0] != "LOAD_FAST":
                 end += 1
             sub = _analyze_simple(remaining[pos:end], func)
             if sub is None:
@@ -447,7 +479,7 @@ def _analyze_simple(instrs, func):
             groups.append(sub)
             pos = end
         if len(groups) == count and pos == len(remaining):
-            tag = "build_tuple" if instrs[-1][0] == 'BUILD_TUPLE' else "build_list"
+            tag = "build_tuple" if instrs[-1][0] == "BUILD_TUPLE" else "build_list"
             return (tag, *groups)
 
     return None
@@ -467,10 +499,10 @@ def _find_jump_split(instrs):
     best = None
     best_target = -1
     for i, instr in enumerate(instrs):
-        if instr[0] == 'POP_JUMP_IF_FALSE' and instr[1] > best_target:
+        if instr[0] == "POP_JUMP_IF_FALSE" and instr[1] > best_target:
             best_target = instr[1]
             best = (i, True)  # `and` short-circuits on False
-        elif instr[0] == 'POP_JUMP_IF_TRUE' and instr[1] > best_target:
+        elif instr[0] == "POP_JUMP_IF_TRUE" and instr[1] > best_target:
             best_target = instr[1]
             best = (i, False)  # `or` short-circuits on True
     return best
@@ -494,7 +526,7 @@ def _analyze_compound(instrs, func):
     # Find COPY before the jump
     copy_idx = None
     for i in range(jump_idx - 1, -1, -1):
-        if instrs[i][0] == 'COPY':
+        if instrs[i][0] == "COPY":
             copy_idx = i
             break
     if copy_idx is None:
@@ -504,9 +536,9 @@ def _analyze_compound(instrs, func):
 
     # Right side: everything after POP_TOP (which follows the jump)
     pop_idx = jump_idx + 1
-    if pop_idx >= len(instrs) or instrs[pop_idx][0] != 'POP_TOP':
+    if pop_idx >= len(instrs) or instrs[pop_idx][0] != "POP_TOP":
         return None
-    right_instrs = instrs[pop_idx + 1:]
+    right_instrs = instrs[pop_idx + 1 :]
 
     # Recursively analyze each side
     left = _analyze_expr(left_instrs, func)
@@ -565,7 +597,7 @@ def _analyze_lambda(func):
       ("unwrap", resolved_callable)
     """
     # Only plain Python functions carry bytecode to analyze
-    code = getattr(func, '__code__', None)
+    code = getattr(func, "__code__", None)
     if code is None:
         return None
     try:
@@ -605,7 +637,7 @@ def _analyze_code(func, code):
         return None
 
     # Reject multi-statement functions
-    if any(i[0] == 'STORE_FAST' for i in clean):
+    if any(i[0] == "STORE_FAST" for i in clean):
         return None
 
     # Reject exception handling
@@ -632,10 +664,11 @@ def _get_caller_location():
     except ValueError:
         return "<unknown>"
 
+
 def _reject_async(func, op):
     """Raise TypeError for async callables: akayu never awaits coroutines."""
     if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
-        name = getattr(func, '__qualname__', None) or repr(func)
+        name = getattr(func, "__qualname__", None) or repr(func)
         raise TypeError(
             f"{op}() got async function {name!r}, but akayu does not run coroutines. "
             "Pass a regular function; use prefetch() or par() for concurrent I/O."
@@ -649,44 +682,59 @@ def _build_map_func(func, args, kwargs):
 
     if kwargs:
         if args:
+
             def wrapper(x):
                 return func(x, *args, **kwargs)
+
             wrapper._akayu_inner = func
             wrapper._akayu_args = args
             return wrapper
         else:
+
             def wrapper(x):
                 return func(x, **kwargs)
+
             wrapper._akayu_inner = func
             return wrapper
     else:
         # only args
         def wrapper(x):
             return func(x, *args)
+
         wrapper._akayu_inner = func
         wrapper._akayu_args = args
         return wrapper
 
+
 def _build_starmap_func(func, args, kwargs):
     # args is tuple or None, kwargs is dict or None
     if not args and not kwargs:
+
         def wrapper_simple(x):
             return func(*x)
+
         return wrapper_simple
 
     if kwargs:
         if args:
+
             def wrapper(x):
                 return func(*x, *args, **kwargs)
+
             return wrapper
         else:
+
             def wrapper(x):
                 return func(*x, **kwargs)
+
             return wrapper
     else:
+
         def wrapper(x):
             return func(*x, *args)
+
         return wrapper
+
 
 _thread_pool = None
 # Per-node locks that serialize concurrent _update calls at par()/prefetch()
@@ -694,6 +742,7 @@ _thread_pool = None
 # id(node) leaked one lock per node and handed dead nodes' locks to new ones.
 _node_locks = weakref.WeakKeyDictionary()
 _node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
+
 
 def _get_global_pool():
     """Get or create the shared global thread pool for par() and prefetch().
@@ -707,6 +756,7 @@ def _get_global_pool():
         _thread_pool = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
     return _thread_pool
 
+
 def _get_node_lock(node):
     """Get or create the lock that serializes concurrent updates of a node."""
     lock = _node_locks.get(node)
@@ -717,16 +767,19 @@ def _get_node_lock(node):
                 lock = _node_locks[node] = threading.RLock()
     return lock
 
+
 def _parallel_execute(val, downstreams):
     """Execute downstream updates in parallel using a thread pool."""
     pool = _get_global_pool()
 
     def make_update_fn(d, v):
         ctx = contextvars.copy_context()
+
         def update_in_context():
             lock = _get_node_lock(d)
             with lock:
                 return ctx.run(d._update, v)
+
         return update_in_context
 
     futures = []
@@ -748,7 +801,9 @@ def _parallel_execute(val, downstreams):
 
     return None
 
-_INTERNAL_NAMES = frozenset(('_safe_update', '_safe_update_batch', '_strip_internal_frames'))
+
+_INTERNAL_NAMES = frozenset(("_safe_update", "_safe_update_batch", "_strip_internal_frames"))
+
 
 def _strip_internal_frames(exc):
     tb = exc.__traceback__
@@ -763,20 +818,24 @@ def _strip_internal_frames(exc):
     if not frames:
         return
     import types as _types
+
     new_tb = None
     for frame, lasti, lineno in reversed(frames):
         new_tb = _types.TracebackType(new_tb, frame, lasti, lineno)
     exc.__traceback__ = new_tb
+
 
 def _safe_update(node, val):
     lock = _get_node_lock(node)
     with lock:
         return node._update(val)
 
+
 def _safe_update_batch(node, items):
     lock = _get_node_lock(node)
     with lock:
         return node._update_batch(items)
+
 
 class _Profiler:
     """Context manager for profiling a pipeline.
@@ -813,13 +872,14 @@ class _PrefetchState:
 
     def __init__(self, func, size):
         import threading
+
         self.func = func
         self.size = size
         self.executor = _get_global_pool()  # Use shared pool
-        self.pending = {}    # {seq_num: future}
-        self.next_seq = 0    # next item sequence number
-        self.next_emit = 0   # next sequence to emit
-        self.ready = {}      # {seq_num: result} for completed out-of-order
+        self.pending = {}  # {seq_num: future}
+        self.next_seq = 0  # next item sequence number
+        self.next_emit = 0  # next sequence to emit
+        self.ready = {}  # {seq_num: result} for completed out-of-order
         self._lock = threading.Lock()  # Protect against concurrent access
 
     def update(self, item):
@@ -867,6 +927,7 @@ class _PrefetchState:
             # Return all in order
             return self._collect_ready()
 
+
 class _PrefetchFilterState:
     """State manager for prefetch filter operations.
 
@@ -879,13 +940,14 @@ class _PrefetchFilterState:
 
     def __init__(self, wrapped_predicate, size):
         import threading
+
         self.wrapped_predicate = wrapped_predicate
         self.size = size
         self.executor = _get_global_pool()  # Use shared pool
-        self.pending = {}    # {seq_num: future}
+        self.pending = {}  # {seq_num: future}
         self.next_seq = 0
         self.next_emit = 0
-        self.ready = {}      # {seq_num: (keep, value)}
+        self.ready = {}  # {seq_num: (keep, value)}
         self._lock = threading.Lock()  # Protect against concurrent access
 
     def update(self, item):
@@ -942,13 +1004,14 @@ class _PrefetchBatchMapState:
 
     def __init__(self, func, size):
         import threading
+
         self.func = func
         self.size = size
         self.executor = _get_global_pool()
-        self.pending = {}    # {seq_num: future}
+        self.pending = {}  # {seq_num: future}
         self.next_seq = 0
         self.next_emit = 0
-        self.ready = {}      # {seq_num: result}
+        self.ready = {}  # {seq_num: result}
         self._lock = threading.Lock()
 
     def _run_single(self, item):

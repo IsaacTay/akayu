@@ -191,10 +191,27 @@ def _subclass(probe):
 
 
 BUILDERS = [
-    _map, _filter, _sink_only, _compiled_chain, _unemitted, _collect,
-    _accumulate, _flatten, _batch_map, _chunk_by, _chunks_between, _zip,
-    _union, _combine_latest, _par, _prefetch_map, _prefetch_filter,
-    _flush_target, _emit_target, _multistream, _subclass,
+    _map,
+    _filter,
+    _sink_only,
+    _compiled_chain,
+    _unemitted,
+    _collect,
+    _accumulate,
+    _flatten,
+    _batch_map,
+    _chunk_by,
+    _chunks_between,
+    _zip,
+    _union,
+    _combine_latest,
+    _par,
+    _prefetch_map,
+    _prefetch_filter,
+    _flush_target,
+    _emit_target,
+    _multistream,
+    _subclass,
 ]
 
 
@@ -294,8 +311,14 @@ def _stress_pipelines():
         s.prefetch(3).map(step).sink(out.append)
         return s, out
 
-    return [("chain", chain), ("accumulate", accumulate), ("chunks", chunks),
-            ("zip", zipped), ("par", parallel), ("prefetch", prefetched)]
+    return [
+        ("chain", chain),
+        ("accumulate", accumulate),
+        ("chunks", chunks),
+        ("zip", zipped),
+        ("par", parallel),
+        ("prefetch", prefetched),
+    ]
 
 
 STRESS = _stress_pipelines()

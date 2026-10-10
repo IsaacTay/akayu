@@ -61,7 +61,7 @@ def main():
     print("\n--- Source location in error messages ---")
 
     source = akayu.Stream()
-    
+
     # This will fail
     source.map(lambda x: int("not_a_number")).sink(lambda x: None)
 
@@ -78,7 +78,7 @@ def main():
     print("\n--- Filter predicate errors ---")
 
     source = akayu.Stream()
-    
+
     def may_fail(x):
         if x == 0:
             raise ValueError("Cannot filter zero")

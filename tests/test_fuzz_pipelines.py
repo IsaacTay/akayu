@@ -10,9 +10,11 @@ def safe_inc(x):
         return tuple(safe_inc(i) for i in x)
     return x
 
+
 def safe_filter(x):
     # Randomly filter some out
     return True
+
 
 def test_fuzz_pipelines():
     """
@@ -25,6 +27,7 @@ def test_fuzz_pipelines():
         print(f"Fuzz iteration {i}")
         run_random_pipeline(seed=i)
 
+
 def run_random_pipeline(seed):
     random.seed(seed)
 
@@ -36,11 +39,22 @@ def run_random_pipeline(seed):
     num_ops = random.randint(10, 30)
 
     for _ in range(num_ops):
-        op_type = random.choice([
-            "map", "filter", "union", "zip", "combine_latest",
-            "par", "seq", "collect", "flatten", "accumulate",
-            "batch_map", "prefetch"
-        ])
+        op_type = random.choice(
+            [
+                "map",
+                "filter",
+                "union",
+                "zip",
+                "combine_latest",
+                "par",
+                "seq",
+                "collect",
+                "flatten",
+                "accumulate",
+                "batch_map",
+                "prefetch",
+            ]
+        )
 
         # Pick a random upstream node to attach to
         upstream = random.choice(streams)

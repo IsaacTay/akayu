@@ -11,19 +11,19 @@ import akayu
 def test_basic_extract():
     """Basic case: extract content between [ and ]"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "abc[def]ghi[jkl]mno":
         source.emit(ch)
     source.flush()
-    assert results == [('d', 'e', 'f'), ('j', 'k', 'l')]
+    assert results == [("d", "e", "f"), ("j", "k", "l")]
 
 
 def test_no_delimiters():
     """No delimiters → nothing emitted"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "abcdef":
@@ -35,7 +35,7 @@ def test_no_delimiters():
 def test_incomplete_no_close():
     """Incomplete chunk (no close) → discarded"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "abc[def":
@@ -47,7 +47,7 @@ def test_incomplete_no_close():
 def test_stray_close():
     """Stray ] without [ → ignored"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "a]b]c":
@@ -59,7 +59,7 @@ def test_stray_close():
 def test_empty_between():
     """Empty content between delimiters → not emitted"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "a[]b":
@@ -71,61 +71,58 @@ def test_empty_between():
 def test_multiple_opens_ignored():
     """Second [ inside is ignored (no nesting)"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "a[b[c]d":
         source.emit(ch)
     source.flush()
     # [ opens, buffers b, [ ignored, buffers c, ] emits (b,c), d is incomplete → discarded
-    assert results == [('b', '[', 'c')]
+    assert results == [("b", "[", "c")]
 
 
 def test_with_strings():
     """Works with string items (not just chars)"""
     source = akayu.Stream()
-    content = source.chunks_between(
-        lambda x: x == "START",
-        lambda x: x == "END"
-    )
+    content = source.chunks_between(lambda x: x == "START", lambda x: x == "END")
     results = []
     content.sink(results.append)
     for item in ["ignore", "START", "hello", "world", "END", "ignore2", "START", "foo", "END"]:
         source.emit(item)
     source.flush()
-    assert results == [('hello', 'world'), ('foo',)]
+    assert results == [("hello", "world"), ("foo",)]
 
 
 def test_compiled():
     """Works after compile()"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     source.compile()
     for ch in "abc[def]ghi[jkl]mno":
         source.emit(ch)
     source.flush()
-    assert results == [('d', 'e', 'f'), ('j', 'k', 'l')]
+    assert results == [("d", "e", "f"), ("j", "k", "l")]
 
 
 def test_chained_with_map():
     """Can chain .map() after chunks_between"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
-    joined = content.map(lambda t: ''.join(t))
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
+    joined = content.map(lambda t: "".join(t))
     results = []
     joined.sink(results.append)
     for ch in "abc[def]ghi[jkl]mno":
         source.emit(ch)
     source.flush()
-    assert results == ['def', 'jkl']
+    assert results == ["def", "jkl"]
 
 
 def test_chained_with_filter():
     """Can chain .filter() after chunks_between"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     filtered = content.filter(lambda t: len(t) > 2)
     results = []
     filtered.sink(results.append)
@@ -133,7 +130,7 @@ def test_chained_with_filter():
         source.emit(ch)
     source.flush()
     # (a,) filtered, (b,c) filtered, (d,e,f) passes, (g,) filtered
-    assert results == [('d', 'e', 'f')]
+    assert results == [("d", "e", "f")]
 
 
 def test_integer_stream():
@@ -141,7 +138,7 @@ def test_integer_stream():
     source = akayu.Stream()
     content = source.chunks_between(
         lambda x: x == 0,  # open on 0
-        lambda x: x == -1   # close on -1
+        lambda x: x == -1,  # close on -1
     )
     results = []
     content.sink(results.append)
@@ -154,13 +151,13 @@ def test_integer_stream():
 def test_consecutive_pairs():
     """Multiple consecutive delimiter pairs"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '<', lambda c: c == '>')
+    content = source.chunks_between(lambda c: c == "<", lambda c: c == ">")
     results = []
     content.sink(results.append)
     for ch in "<a><b><c>":
         source.emit(ch)
     source.flush()
-    assert results == [('a',), ('b',), ('c',)]
+    assert results == [("a",), ("b",), ("c",)]
 
 
 def test_multistream():
@@ -169,7 +166,7 @@ def test_multistream():
     s1 = source.map(lambda x: x)
     s2 = source.map(lambda x: x)
     ms = akayu.MultiStream([s1, s2])
-    extracted = ms.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    extracted = ms.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = extracted.to_list()
     source.compile()
     for ch in "a[b]c":
@@ -181,18 +178,18 @@ def test_multistream():
 def test_emit_batch():
     """Works with emit_batch"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     source.emit_batch(list("abc[def]ghi[jkl]mno"))
     source.flush()
-    assert results == [('d', 'e', 'f'), ('j', 'k', 'l')]
+    assert results == [("d", "e", "f"), ("j", "k", "l")]
 
 
 def test_drain_discards_incomplete():
     """drain() also discards incomplete chunks"""
     source = akayu.Stream()
-    content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    content = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     results = []
     content.sink(results.append)
     for ch in "abc[def":
@@ -208,10 +205,10 @@ def test_drain_discards_incomplete():
 @pytest.mark.parametrize(
     "open_, close",
     [
-        (lambda c: c == '[', ']'.__eq__),
-        ('['.__eq__, lambda c: c == ']'),
-        (lambda c: c == '[', functools.partial(operator.eq, ']')),
-        (functools.partial(operator.eq, '['), lambda c: c == ']'),
+        (lambda c: c == "[", "]".__eq__),
+        ("[".__eq__, lambda c: c == "]"),
+        (lambda c: c == "[", functools.partial(operator.eq, "]")),
+        (functools.partial(operator.eq, "["), lambda c: c == "]"),
     ],
     ids=["lambda/method", "method/lambda", "lambda/partial", "partial/lambda"],
 )
@@ -228,7 +225,7 @@ def test_mixed_callable_types(open_, close, compiled):
         source.compile()
     for ch in "a[bc]d":
         source.emit(ch)
-    assert results == [('b', 'c')]
+    assert results == [("b", "c")]
 
 
 @pytest.mark.parametrize("method", ["flush", "drain"])
@@ -236,20 +233,20 @@ def test_flush_resets_inside_state(method):
     """Discarding an incomplete chunk also returns to the outside state."""
     source = akayu.Stream()
     results = []
-    source.chunks_between(lambda c: c == '[', lambda c: c == ']').sink(results.append)
+    source.chunks_between(lambda c: c == "[", lambda c: c == "]").sink(results.append)
     for ch in "x[ab":
         source.emit(ch)
     getattr(source, method)()
     for ch in "cd]e[f]":
         source.emit(ch)
-    assert results == [('f',)]
+    assert results == [("f",)]
 
 
 def test_flush_reaches_downstream_collect():
     """flush() passes through chunks_between, so a downstream collect emits."""
     source = akayu.Stream()
     results = []
-    chunks = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
+    chunks = source.chunks_between(lambda c: c == "[", lambda c: c == "]")
     chunks.collect().sink(results.append)
     for ch in "[ab]x[cd":
         source.emit(ch)
@@ -257,11 +254,12 @@ def test_flush_reaches_downstream_collect():
     for ch in "[e]":
         source.emit(ch)
     source.flush()
-    assert results == [(('a', 'b'),), (('e',),)]
+    assert results == [(("a", "b"),), (("e",),)]
 
 
 def test_same_predicate_for_open_and_close():
     """One predicate can serve as both delimiters, e.g. quotes."""
+
     def is_quote(c):
         return c == '"'
 
@@ -270,7 +268,7 @@ def test_same_predicate_for_open_and_close():
     source.chunks_between(is_quote, is_quote).sink(results.append)
     for ch in 'say "hi" and "bye"':
         source.emit(ch)
-    assert results == [('h', 'i'), ('b', 'y', 'e')]
+    assert results == [("h", "i"), ("b", "y", "e")]
 
 
 def test_predicates_called_only_in_relevant_state():
@@ -279,18 +277,18 @@ def test_predicates_called_only_in_relevant_state():
 
     def is_open(c):
         open_calls.append(c)
-        return c == '['
+        return c == "["
 
     def is_close(c):
         close_calls.append(c)
-        return c == ']'
+        return c == "]"
 
     source = akayu.Stream()
     source.chunks_between(is_open, is_close).sink(lambda _: None)
     for ch in "a[bc]d":
         source.emit(ch)
-    assert open_calls == ['a', '[', 'd']
-    assert close_calls == ['b', 'c', ']']
+    assert open_calls == ["a", "[", "d"]
+    assert close_calls == ["b", "c", "]"]
 
 
 # --- Property test against a reference model ----------------------------------

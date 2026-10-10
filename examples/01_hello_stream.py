@@ -112,7 +112,7 @@ def main():
     batch_results = []
 
     source6 = akayu.Stream()
-    source6.map(lambda x: x ** 2).sink(batch_results.append)
+    source6.map(lambda x: x**2).sink(batch_results.append)
 
     source6.emit_batch([1, 2, 3, 4, 5])
 

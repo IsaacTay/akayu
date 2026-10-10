@@ -50,10 +50,7 @@ class TestLambdaCacheCorrectness:
         """Multiple different lambdas in same pipeline — cache handles all."""
         s = akayu.Stream()
         r = []
-        s.map(lambda x: x + 1)\
-         .map(lambda x: x * 2)\
-         .filter(lambda x: x > 5)\
-         .sink(r.append)
+        s.map(lambda x: x + 1).map(lambda x: x * 2).filter(lambda x: x > 5).sink(r.append)
         s.compile()
         s.emit(1)  # 1 -> 2 -> 4 -> filtered
         s.emit(3)  # 3 -> 4 -> 8 -> kept
@@ -90,8 +87,8 @@ class TestLambdaCacheCorrectness:
             r = []
             s.filter(f).sink(r.append)
             s.compile()
-            s.emit(type('Obj', (), {'value': -1})())
-            s.emit(type('Obj', (), {'value': 5})())
+            s.emit(type("Obj", (), {"value": -1})())
+            s.emit(type("Obj", (), {"value": 5})())
             assert len(r) == 1 and r[0].value == 5, f"Failed on iteration {_}"
 
     def test_isinstance_filter_cached(self):
@@ -110,6 +107,7 @@ class TestLambdaCacheCorrectness:
 
     def test_unanalyzable_cached_as_none(self):
         """Unanalyzable function is cached as None and doesn't break execution."""
+
         def custom(x):
             return complex_processing(x)
 
@@ -137,6 +135,7 @@ class TestBytecodeLengthFilter:
 
     def test_complex_function_still_works(self):
         """Functions exceeding the bytecode length limit still execute correctly."""
+
         # This function is too complex for bytecode analysis
         # but should still work as a regular map function
         def complex_func(x):

@@ -19,9 +19,12 @@ class TestMapErrors:
     def test_map_callback_raises_custom_exception(self):
         class CustomError(Exception):
             pass
+
         s = akayu.Stream()
+
         def raise_custom(x):
             raise CustomError("custom")
+
         s.map(raise_custom).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
@@ -36,15 +39,17 @@ class TestMapErrors:
 
     def test_map_callback_wrong_arity(self):
         s = akayu.Stream()
+
         def two_args(x, y):
             return x + y
+
         s.map(two_args).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
 
     def test_map_error_after_compile(self):
         s = akayu.Stream()
-        s.map(lambda x: 1/0).sink(lambda x: x)
+        s.map(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
@@ -53,8 +58,10 @@ class TestMapErrors:
 class TestFilterErrors:
     def test_filter_predicate_raises_exception(self):
         s = akayu.Stream()
+
         def bad_pred(x):
             raise ValueError("predicate fail")
+
         s.filter(bad_pred).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
@@ -79,7 +86,7 @@ class TestFilterErrors:
 
     def test_filter_error_after_compile(self):
         s = akayu.Stream()
-        s.filter(lambda x: 1/0).sink(lambda x: x)
+        s.filter(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
@@ -88,8 +95,10 @@ class TestFilterErrors:
 class TestSinkErrors:
     def test_sink_function_raises_exception(self):
         s = akayu.Stream()
+
         def bad_sink(x):
             raise RuntimeError("sink exploded")
+
         s.sink(bad_sink)
         with pytest.raises(Exception):
             s.emit(1)
@@ -97,10 +106,12 @@ class TestSinkErrors:
     def test_sink_modifies_state_then_raises(self):
         state = []
         s = akayu.Stream()
+
         def bad_sink(x):
             state.append(x)
             if x == 2:
                 raise ValueError("fail at 2")
+
         s.sink(bad_sink)
         try:
             s.emit_batch([1, 2, 3])
@@ -111,7 +122,7 @@ class TestSinkErrors:
 
     def test_sink_error_after_compile(self):
         s = akayu.Stream()
-        s.sink(lambda x: 1/0)
+        s.sink(lambda x: 1 / 0)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
@@ -126,8 +137,10 @@ class TestStarmapErrors:
 
     def test_starmap_callback_wrong_arity(self):
         s = akayu.Stream()
+
         def three_args(a, b, c):
             return a + b + c
+
         s.starmap(three_args).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit((1, 2))
@@ -135,8 +148,10 @@ class TestStarmapErrors:
     def test_starmap_after_flatten_non_uniform(self):
         s = akayu.Stream()
         inner = akayu.Stream()
+
         def bad_inner():
             return 42
+
         inner.map(bad_inner).sink(lambda x: None)
         s.map(lambda x: inner).flatten().starmap(lambda a, b: a + b).sink(lambda x: x)
         with pytest.raises(Exception):
@@ -146,16 +161,20 @@ class TestStarmapErrors:
 class TestBatchMapErrors:
     def test_batch_map_callback_raises_mid_batch(self):
         s = akayu.Stream()
+
         def bad_batch(items):
             raise RuntimeError("batch fail")
+
         s.batch_map(bad_batch).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit_batch([1, 2, 3])
 
     def test_batch_map_callback_returns_non_iterable(self):
         s = akayu.Stream()
+
         def bad_return(items):
             return 42
+
         s.batch_map(bad_return).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit_batch([1])
@@ -163,8 +182,10 @@ class TestBatchMapErrors:
     def test_batch_map_callback_returns_wrong_count(self):
         s = akayu.Stream()
         results = []
+
         def uneven_return(items):
             return [items[0]]
+
         s.batch_map(uneven_return).sink(results.append)
         s.emit_batch([1, 2, 3])
         s.flush()
@@ -187,26 +208,32 @@ class TestFlattenErrors:
 class TestAccumulateErrors:
     def test_accumulate_func_raises(self):
         s = akayu.Stream()
+
         def bad_acc(acc, x):
             raise ValueError("accumulate fail")
+
         s.accumulate(bad_acc, start=0).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
 
     def test_accumulate_returns_state_wrong_structure(self):
         s = akayu.Stream()
+
         def bad_return(acc, x):
             return "not a tuple"
+
         s.accumulate(bad_return, start=0, returns_state=True).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
 
     def test_accumulate_state_corruption(self):
         s = akayu.Stream()
+
         def corrupt_acc(acc, x):
             if x == 2:
                 return (acc, x)
             return (x, x)
+
         results = []
         s.accumulate(corrupt_acc, start=(0, 0), returns_state=True).sink(results.append)
         s.emit(1)
@@ -218,8 +245,10 @@ class TestAccumulateErrors:
 class TestChunkByErrors:
     def test_chunk_by_predicate_raises(self):
         s = akayu.Stream()
+
         def bad_pred(x):
             raise ValueError("chunk fail")
+
         s.chunk_by(bad_pred).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
@@ -242,7 +271,7 @@ class TestPrefetchErrors:
 
     def test_prefetch_callback_errors_sync(self):
         s = akayu.Stream()
-        s.prefetch(2).map(lambda x: 1/0).sink(lambda x: x)
+        s.prefetch(2).map(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         s.emit(1)
         with pytest.raises(Exception):
@@ -256,7 +285,7 @@ class TestParErrors:
         s = akayu.Stream()
         p = s.par()
         p.map(lambda x: x * 2).sink(results1.append)
-        p.map(lambda x: 1/0).sink(results2.append)
+        p.map(lambda x: 1 / 0).sink(results2.append)
         with pytest.raises(Exception):
             s.emit(10)
         assert results1 == [20]
@@ -264,7 +293,7 @@ class TestParErrors:
     def test_all_par_branches_raise(self):
         s = akayu.Stream()
         p = s.par()
-        p.map(lambda x: 1/0).sink(lambda x: x)
+        p.map(lambda x: 1 / 0).sink(lambda x: x)
         p.map(lambda x: int("bad")).sink(lambda x: x)
         with pytest.raises(Exception):
             s.emit(1)
@@ -274,7 +303,7 @@ class TestParErrors:
         s = akayu.Stream()
         p = s.par()
         branch_a = p.map(lambda x: x * 2)
-        branch_b = p.map(lambda x: 1/0)
+        branch_b = p.map(lambda x: 1 / 0)
         merged = akayu.union(branch_a, branch_b)
         merged.sink(results.append)
         with pytest.raises(Exception):
@@ -284,7 +313,7 @@ class TestParErrors:
     def test_error_in_compiled_par_graph(self):
         s = akayu.Stream()
         p = s.par()
-        p.map(lambda x: 1/0).sink(lambda x: x)
+        p.map(lambda x: 1 / 0).sink(lambda x: x)
         p.map(lambda x: x * 2).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
@@ -295,7 +324,7 @@ class TestParErrors:
         s = akayu.Stream()
         p = s.par()
         p.map(lambda x: x * 2).sink(results.append)
-        p.map(lambda x: x + 1 if x < 3 else 1/0).sink(lambda x: x)
+        p.map(lambda x: x + 1 if x < 3 else 1 / 0).sink(lambda x: x)
         s.emit(1)
         s.emit(2)
         with pytest.raises(Exception):
@@ -306,7 +335,7 @@ class TestParErrors:
         results = []
         s = akayu.Stream()
         p = s.par()
-        p.map(lambda x: x).map(lambda x: 1/0).sink(results.append)
+        p.map(lambda x: x).map(lambda x: 1 / 0).sink(results.append)
         p.map(lambda x: x * 2).sink(results.append)
         with pytest.raises(Exception):
             s.emit(1)
@@ -319,7 +348,7 @@ class TestUnionErrors:
         s2 = akayu.Stream()
         merged = akayu.union(s1, s2)
         merged.sink(results.append)
-        s2.map(lambda x: 1/0).sink(lambda x: x)
+        s2.map(lambda x: 1 / 0).sink(lambda x: x)
         s1.emit(1)
         with pytest.raises(Exception):
             s2.emit(2)
@@ -330,7 +359,7 @@ class TestUnionErrors:
         s2 = akayu.Stream()
         merged = akayu.union(s1, s2)
         merged.sink(results.append)
-        s2.map(lambda x: 1/0).sink(lambda x: x)
+        s2.map(lambda x: 1 / 0).sink(lambda x: x)
         s1.compile()
         s2.compile()
         with pytest.raises(Exception):
@@ -343,7 +372,7 @@ class TestCombineLatestErrors:
         s1 = akayu.Stream()
         s2 = akayu.Stream()
         s1.combine_latest(s2).sink(results.append)
-        s2.map(lambda x: 1/0).sink(lambda x: x)
+        s2.map(lambda x: 1 / 0).sink(lambda x: x)
         with pytest.raises(Exception):
             s2.emit(1)
 
@@ -352,7 +381,7 @@ class TestCombineLatestErrors:
         s1 = akayu.Stream()
         s2 = akayu.Stream()
         s1.combine_latest(s2).sink(results.append)
-        s2.map(lambda x: 1/0).sink(lambda x: x)
+        s2.map(lambda x: 1 / 0).sink(lambda x: x)
         s1.compile()
         s2.compile()
         with pytest.raises(Exception):
@@ -365,7 +394,7 @@ class TestZipErrors:
         s1 = akayu.Stream()
         s2 = akayu.Stream()
         s1.zip(s2).sink(results.append)
-        s2.map(lambda x: 1/0).sink(lambda x: x)
+        s2.map(lambda x: 1 / 0).sink(lambda x: x)
         s1.emit(1)
         with pytest.raises(Exception):
             s2.emit(2)
@@ -405,16 +434,20 @@ class TestCompileErrors:
 class TestEmitErrors:
     def test_reentrant_emit(self):
         s = akayu.Stream()
+
         def reentrant_emit(x):
             s.emit(x + 1)
+
         s.map(reentrant_emit).sink(lambda x: x)
         with pytest.raises(RuntimeError):
             s.emit(1)
 
     def test_reentrant_flush(self):
         s = akayu.Stream()
+
         def reentrant_flush(x):
             s.flush()
+
         s.map(reentrant_flush).sink(lambda x: x)
         with pytest.raises(RuntimeError):
             s.emit(1)
@@ -429,21 +462,21 @@ class TestEmitErrors:
 class TestCompiledPathErrors:
     def test_error_in_compiled_map_chain(self):
         s = akayu.Stream()
-        s.map(lambda x: x + 1).map(lambda x: 1/0).sink(lambda x: x)
+        s.map(lambda x: x + 1).map(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
 
     def test_error_in_compiled_filter(self):
         s = akayu.Stream()
-        s.filter(lambda x: x > 0).map(lambda x: 1/0).sink(lambda x: x)
+        s.filter(lambda x: x > 0).map(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
 
     def test_error_in_compiled_sink(self):
         s = akayu.Stream()
-        s.map(lambda x: x).sink(lambda x: 1/0)
+        s.map(lambda x: x).sink(lambda x: 1 / 0)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
@@ -453,7 +486,7 @@ class TestCompiledPathErrors:
         s = akayu.Stream()
         p = s.par()
         p.map(lambda x: x * 2).sink(results.append)
-        p.map(lambda x: 1/0).sink(lambda x: x)
+        p.map(lambda x: 1 / 0).sink(lambda x: x)
         s.compile()
         with pytest.raises(Exception):
             s.emit(1)
@@ -462,7 +495,7 @@ class TestCompiledPathErrors:
 class TestErrorMetadata:
     def test_error_message_contains_node_name(self):
         s = akayu.Stream()
-        s.map(lambda x: 1/0, stream_name="my_map_node").sink(lambda x: x)
+        s.map(lambda x: 1 / 0, stream_name="my_map_node").sink(lambda x: x)
         with pytest.raises(Exception) as exc:
             s.emit(1)
         assert "my_map_node" in str(exc.value)
@@ -470,8 +503,10 @@ class TestErrorMetadata:
     def test_error_has_cause_set(self):
         s = akayu.Stream()
         original = ValueError("original cause")
+
         def raise_cause(x):
             raise original
+
         s.map(raise_cause, stream_name="cause_node").sink(lambda x: x)
         with pytest.raises(Exception) as exc:
             s.emit(1)
@@ -479,7 +514,7 @@ class TestErrorMetadata:
 
     def test_error_message_contains_source_location(self):
         s = akayu.Stream()
-        s.map(lambda x: 1/0, stream_name="loc_node").sink(lambda x: x)
+        s.map(lambda x: 1 / 0, stream_name="loc_node").sink(lambda x: x)
         with pytest.raises(Exception) as exc:
             s.emit(1)
         msg = str(exc.value)
@@ -490,10 +525,12 @@ class TestPartialFailure:
     def test_pipeline_map_succeeds_filter_raises(self):
         results = []
         s = akayu.Stream()
+
         def bad_filter(x):
             if x == 2:
                 raise ValueError("filter fail at 2")
             return True
+
         s.map(lambda x: x * 10).filter(bad_filter).sink(results.append)
         s.emit(1)
         s.flush()
@@ -504,7 +541,7 @@ class TestPartialFailure:
         s = akayu.Stream()
         p = s.par()
         p.map(lambda x: x * 2).sink(results1.append)
-        p.map(lambda x: 1/0).sink(lambda x: x)
+        p.map(lambda x: 1 / 0).sink(lambda x: x)
         p.map(lambda x: x + 1).sink(results2.append)
         with pytest.raises(Exception):
             s.emit(10)
@@ -515,7 +552,7 @@ class TestPartialFailure:
         results = []
         s = akayu.Stream()
         s.map(lambda x: x * 2).sink(results.append)
-        s.map(lambda x: 1/0 if x > 5 else x).sink(lambda x: x)
+        s.map(lambda x: 1 / 0 if x > 5 else x).sink(lambda x: x)
         s.emit(1)
         s.emit(2)
         s.flush()

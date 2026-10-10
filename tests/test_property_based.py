@@ -445,7 +445,7 @@ class TestCombinatorProperties:
     def test_zip_pairing(self, values):
         n = len(values) // 2
         left = values[:n]
-        right = values[n:2*n] if len(values) > n else values
+        right = values[n : 2 * n] if len(values) > n else values
 
         s1 = akayu.Stream()
         s2 = akayu.Stream()
@@ -457,7 +457,7 @@ class TestCombinatorProperties:
             s1.emit(l)
             s2.emit(r)
 
-        expected = list(zip(left[:len(right)], right))
+        expected = list(zip(left[: len(right)], right))
         assert results == expected
 
     @settings(max_examples=50)
@@ -465,7 +465,7 @@ class TestCombinatorProperties:
     def test_zip_length(self, values):
         n = len(values) // 2
         left = values[:n]
-        right = values[n:2*n] if len(values) > n else values
+        right = values[n : 2 * n] if len(values) > n else values
 
         s1 = akayu.Stream()
         s2 = akayu.Stream()
@@ -757,7 +757,9 @@ class TestAccumulateProperties:
     def test_accumulate_returns_state(self, values):
         results = []
         s = akayu.Stream()
-        s.accumulate(lambda acc, x: (acc + x, acc + x), start=0, returns_state=True).sink(lambda x: results.append(x[1] if isinstance(x, tuple) else x))
+        s.accumulate(lambda acc, x: (acc + x, acc + x), start=0, returns_state=True).sink(
+            lambda x: results.append(x[1] if isinstance(x, tuple) else x)
+        )
         for v in values:
             s.emit(v)
 

@@ -41,8 +41,9 @@ class TestFuzzCompiledGraphs:
         num_ops = random.randint(5, 20)
         for _ in range(num_ops):
             upstream = random.choice(streams)
-            op = random.choice(["map", "filter", "sink", "accumulate", "flatten",
-                                "collect", "batch_map", "starmap", "chunk_by"])
+            op = random.choice(
+                ["map", "filter", "sink", "accumulate", "flatten", "collect", "batch_map", "starmap", "chunk_by"]
+            )
             try:
                 if op == "map":
                     s = upstream.map(_inc)
@@ -249,7 +250,7 @@ class TestFuzzSelfReferential:
                 if op in ("map", "filter"):
                     others = random.sample(streams, k=random.randint(1, min(3, len(streams))))
                     targets = [source, upstream] + others
-                    for t in targets[:random.randint(1, len(targets))]:
+                    for t in targets[: random.randint(1, len(targets))]:
                         if op == "map":
                             s = t.map(_inc)
                         else:
@@ -327,13 +328,15 @@ class TestFuzzEdgeEmissions:
         if random.random() < 0.5:
             source.compile()
 
-        pattern = random.choice([
-            "empty",
-            "single",
-            "batch_empty",
-            "batch_single",
-            "batch_many",
-        ])
+        pattern = random.choice(
+            [
+                "empty",
+                "single",
+                "batch_empty",
+                "batch_single",
+                "batch_many",
+            ]
+        )
 
         if pattern == "empty":
             pass
@@ -478,9 +481,22 @@ class TestFuzzEmitOnNonSource:
 
         for _ in range(random.randint(1, 10)):
             upstream = random.choice(streams)
-            op = random.choice(["map", "filter", "flatten", "collect", "par", "seq",
-                                "accumulate", "batch_map", "prefetch", "chunk_by",
-                                "starmap", "sink"])
+            op = random.choice(
+                [
+                    "map",
+                    "filter",
+                    "flatten",
+                    "collect",
+                    "par",
+                    "seq",
+                    "accumulate",
+                    "batch_map",
+                    "prefetch",
+                    "chunk_by",
+                    "starmap",
+                    "sink",
+                ]
+            )
             try:
                 if op == "map":
                     s = upstream.map(_inc)

@@ -27,14 +27,18 @@ def bench(name, fn, rounds=7):
 
 # ── isinstance filter pipeline ──
 
+
 def make_isinstance_batch(steps):
     """filter(lambda x: isinstance(x, int)) × steps → BuiltinOp::IsInstance"""
+
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.filter(lambda x: isinstance(x, int))
@@ -42,6 +46,7 @@ def make_isinstance_batch(steps):
         s.compile()
         s.emit_batch(list(range(N)))
         assert count == N
+
     return fn
 
 
@@ -49,9 +54,11 @@ def make_isinstance_emit(steps):
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.filter(lambda x: isinstance(x, int))
@@ -60,6 +67,7 @@ def make_isinstance_emit(steps):
         for i in range(N):
             s.emit(i)
         assert count == N
+
     return fn
 
 
@@ -76,19 +84,24 @@ def make_isinstance_python(steps):
             if keep:
                 count += 1
         assert count == N
+
     return fn
 
 
 # ── bool map pipeline (cheapest possible map) ──
 
+
 def make_bool_batch(steps):
     """map(bool) × steps → BuiltinOp::Bool (PyObject_IsTrue + singleton)"""
+
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.map(bool)
@@ -96,6 +109,7 @@ def make_bool_batch(steps):
         s.compile()
         s.emit_batch(list(range(N)))
         assert count == N
+
     return fn
 
 
@@ -103,9 +117,11 @@ def make_bool_emit(steps):
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.map(bool)
@@ -114,6 +130,7 @@ def make_bool_emit(steps):
         for i in range(N):
             s.emit(i)
         assert count == N
+
     return fn
 
 
@@ -126,18 +143,22 @@ def make_bool_python(steps):
                 x = bool(x)
             count += 1
         assert count == N
+
     return fn
 
 
 # ── type map pipeline (cheapest possible: just read ob_type) ──
 
+
 def make_type_batch(steps):
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.map(type)
@@ -145,6 +166,7 @@ def make_type_batch(steps):
         s.compile()
         s.emit_batch(list(range(N)))
         assert count == N
+
     return fn
 
 
@@ -152,9 +174,11 @@ def make_type_emit(steps):
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.map(type)
@@ -163,6 +187,7 @@ def make_type_emit(steps):
         for i in range(N):
             s.emit(i)
         assert count == N
+
     return fn
 
 
@@ -175,18 +200,22 @@ def make_type_python(steps):
                 x = type(x)
             count += 1
         assert count == N
+
     return fn
 
 
 # ── x+1 for comparison ──
 
+
 def make_add_batch(steps):
     def fn():
         s = akayu.Stream()
         count = 0
+
         def inc(x):
             nonlocal count
             count += 1
+
         node = s
         for _ in range(steps):
             node = node.map(lambda x: x + 1)
@@ -194,6 +223,7 @@ def make_add_batch(steps):
         s.compile()
         s.emit_batch(list(range(N)))
         assert count == N
+
     return fn
 
 
@@ -206,6 +236,7 @@ def make_add_python(steps):
                 x = x + 1
             count += 1
         assert count == N
+
     return fn
 
 
@@ -216,14 +247,14 @@ if __name__ == "__main__":
 
     pipelines = [
         ("isinstance filter", make_isinstance_batch, make_isinstance_emit, make_isinstance_python),
-        ("bool map",          make_bool_batch,       make_bool_emit,       make_bool_python),
-        ("type map",          make_type_batch,        make_type_emit,       make_type_python),
-        ("x+1 map",           make_add_batch,         None,                 make_add_python),
+        ("bool map", make_bool_batch, make_bool_emit, make_bool_python),
+        ("type map", make_type_batch, make_type_emit, make_type_python),
+        ("x+1 map", make_add_batch, None, make_add_python),
     ]
 
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"  Cheap builtin pipeline overhead  ({N:,} items, median of 7 runs)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
 
     all_results = {}
 
@@ -246,9 +277,9 @@ if __name__ == "__main__":
             print(f"  {steps:>5d}  {batch_ns:>8.1f}ns  {emit_str}  {py_ns:>8.1f}ns  {ratio:>9.2f}x")
 
     # ── Per-step marginal costs ──
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  Per-step marginal cost (1→20 avg, ns/item/step)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'pipeline':<20s}  {'batch':>8s}  {'emit':>8s}  {'python':>8s}  {'gap':>8s}")
 
     for name, _, make_emit, _ in pipelines:
@@ -262,9 +293,9 @@ if __name__ == "__main__":
             print(f"  {name:<20s}  {batch_d:>7.1f}   {'n/a':>7s}   {py_d:>7.1f}   {gap:>+7.1f}")
 
     # ── Fixed overhead (1-step baseline) ──
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print("  Fixed overhead at 1 step (ns/item)")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     print(f"  {'pipeline':<20s}  {'batch':>8s}  {'python':>8s}  {'overhead':>10s}")
     for name, _, _, _ in pipelines:
         b1 = all_results[(name, "batch", 1)]

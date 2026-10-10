@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import Optional
 import numpy as np
 
+
 @dataclass
 class ExerciseInfo:
     name: str
@@ -13,17 +14,20 @@ class ExerciseInfo:
     set: int
     addition_data: Optional[dict] = None
 
+
 @dataclass
 class Start:
     name: str
     timestamp: int
     set: int
 
+
 @dataclass
 class Stop:
     name: str
     timestamp: int
     set: int
+
 
 class FixedArray:
     _shape = None
@@ -34,14 +38,26 @@ class FixedArray:
     def __repr__(self):
         return f"{self.__class__.__name__}({self.data.tolist()})"
 
-class Rotmat(FixedArray): _shape = (3, 3)
-class Accel(FixedArray): _shape = (3,)
-class Gyro(FixedArray): _shape = (3,)
 
-class Timestamp(int): pass
+class Rotmat(FixedArray):
+    _shape = (3, 3)
+
+
+class Accel(FixedArray):
+    _shape = (3,)
+
+
+class Gyro(FixedArray):
+    _shape = (3,)
+
+
+class Timestamp(int):
+    pass
+
 
 def split_filter(stream, predicate, *args):
     return stream.filter(predicate, *args), stream.filter(lambda *args: not predicate(*args), *args)
+
 
 def test_combine_latest_no_emit_on():
     s1 = real_streamz.Stream()
@@ -64,6 +80,7 @@ def test_combine_latest_no_emit_on():
 
     assert sz_out == ak_out, f"combine_latest mismatch: streamz={sz_out}, akayu={ak_out}"
 
+
 def test_combine_latest_with_emit_on():
     s1 = real_streamz.Stream()
     s2 = real_streamz.Stream()
@@ -84,6 +101,7 @@ def test_combine_latest_with_emit_on():
     a1.emit(2)
 
     assert sz_out == ak_out, f"combine_latest emit_on mismatch: streamz={sz_out}, akayu={ak_out}"
+
 
 def test_combine_latest_with_emit_on_index():
     s1 = real_streamz.Stream()
@@ -111,24 +129,32 @@ def test_combine_latest_with_emit_on_index():
         else:
             raise
 
+
 def test_zip():
     s1 = real_streamz.Stream()
     s2 = real_streamz.Stream()
     z = real_streamz.zip(s1, s2)
     sz_out = []
     z.sink(sz_out.append)
-    s1.emit(1); s1.emit(2); s1.emit(3)
-    s2.emit("a"); s2.emit("b")
+    s1.emit(1)
+    s1.emit(2)
+    s1.emit(3)
+    s2.emit("a")
+    s2.emit("b")
 
     a1 = akayu.Stream()
     a2 = akayu.Stream()
     az = akayu.zip(a1, a2)
     ak_out = []
     az.sink(ak_out.append)
-    a1.emit(1); a1.emit(2); a1.emit(3)
-    a2.emit("a"); a2.emit("b")
+    a1.emit(1)
+    a1.emit(2)
+    a1.emit(3)
+    a2.emit("a")
+    a2.emit("b")
 
     assert sz_out == ak_out, f"zip mismatch: streamz={sz_out}, akayu={ak_out}"
+
 
 def test_fan_out_to_map_and_zip():
     source = real_streamz.Stream()
@@ -136,16 +162,21 @@ def test_fan_out_to_map_and_zip():
     zipped = real_streamz.zip(source, mapped)
     sz_out = []
     zipped.sink(sz_out.append)
-    source.emit(1); source.emit(2); source.emit(3)
+    source.emit(1)
+    source.emit(2)
+    source.emit(3)
 
     asource = akayu.Stream()
     amapped = asource.map(lambda x: x * 2)
     azipped = akayu.zip(asource, amapped)
     ak_out = []
     azipped.sink(ak_out.append)
-    asource.emit(1); asource.emit(2); asource.emit(3)
+    asource.emit(1)
+    asource.emit(2)
+    asource.emit(3)
 
     assert sz_out == ak_out, f"Fan-out diamond mismatch: streamz={sz_out}, akayu={ak_out}"
+
 
 def test_source_node_pattern():
     def source_fn(ex_start, ex_stop, *args):
@@ -156,23 +187,16 @@ def test_source_node_pattern():
             exe_start = events.filter(isinstance, Start)
             exe_stop = events.filter(isinstance, Stop)
             exe_chunk = real_streamz.combine_latest(exe_start, exe_stop).filter(
-                lambda x: (
-                    x[0].name == x[1].name
-                    and x[0].set == x[1].set
-                    and x[0].timestamp < x[1].timestamp
-                )
+                lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
             )
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 real_streamz.zip(exe_chunk, batched_imu)
-                .starmap(
-                    lambda exe_chunk, batched_imu: (
-                        [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                    )
-                )
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
                 .flatten()
             )
             return events
+
         return source_node
 
     def create_source_node_akayu(source_fn):
@@ -180,23 +204,16 @@ def test_source_node_pattern():
             exe_start = events.filter(isinstance, Start)
             exe_stop = events.filter(isinstance, Stop)
             exe_chunk = akayu.combine_latest(exe_start, exe_stop).filter(
-                lambda x: (
-                    x[0].name == x[1].name
-                    and x[0].set == x[1].set
-                    and x[0].timestamp < x[1].timestamp
-                )
+                lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
             )
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 akayu.zip(exe_chunk, batched_imu)
-                .starmap(
-                    lambda exe_chunk, batched_imu: (
-                        [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                    )
-                )
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
                 .flatten()
             )
             return events
+
         return source_node
 
     sz_events = [Start("exe1", 1000, 0), Stop("exe1", 2000, 0)]
@@ -215,6 +232,7 @@ def test_source_node_pattern():
 
     assert sz_out == ak_out, f"source_node pattern mismatch: streamz={sz_out}, akayu={ak_out}"
 
+
 def test_union_and_accumulate():
     s1 = real_streamz.Stream()
     s2 = real_streamz.Stream()
@@ -224,7 +242,9 @@ def test_union_and_accumulate():
     acc = merged.accumulate(lambda hist, x: ({**hist[0], x[0]: x[1]}, None), start=({}, None))
     sz_out = []
     acc.sink(sz_out.append)
-    s1.emit("a"); s2.emit("b"); s1.emit("c")
+    s1.emit("a")
+    s2.emit("b")
+    s1.emit("c")
 
     a1 = akayu.Stream()
     a2 = akayu.Stream()
@@ -234,26 +254,36 @@ def test_union_and_accumulate():
     aacc = amerged.accumulate(lambda hist, x: ({**hist[0], x[0]: x[1]}, None), start=({}, None))
     ak_out = []
     aacc.sink(ak_out.append)
-    a1.emit("a"); a2.emit("b"); a1.emit("c")
+    a1.emit("a")
+    a2.emit("b")
+    a1.emit("c")
 
-    assert [x[0] for x in sz_out] == [x[0] for x in ak_out], f"union/accumulate mismatch: streamz={[x[0] for x in sz_out]}, akayu={[x[0] for x in ak_out]}"
+    assert [x[0] for x in sz_out] == [x[0] for x in ak_out], (
+        f"union/accumulate mismatch: streamz={[x[0] for x in sz_out]}, akayu={[x[0] for x in ak_out]}"
+    )
+
 
 def test_collect_and_flush():
     s = real_streamz.Stream()
     collected = s.collect()
     sz_out = []
     collected.sink(sz_out.append)
-    s.emit(1); s.emit(2); s.emit(3)
+    s.emit(1)
+    s.emit(2)
+    s.emit(3)
     collected.flush()
 
     a = akayu.Stream()
     acollected = a.collect()
     ak_out = []
     acollected.sink(ak_out.append)
-    a.emit(1); a.emit(2); a.emit(3)
+    a.emit(1)
+    a.emit(2)
+    a.emit(3)
     acollected.flush()
 
     assert sz_out == ak_out, f"collect/flush mismatch: streamz={sz_out}, akayu={ak_out}"
+
 
 def test_split_filter():
     def sf_split_filter(stream, predicate, *args):
@@ -261,33 +291,47 @@ def test_split_filter():
 
     s = real_streamz.Stream()
     evens, odds = sf_split_filter(s, lambda x: x % 2 == 0)
-    sz_evens = []; sz_odds = []
-    evens.sink(sz_evens.append); odds.sink(sz_odds.append)
-    s.emit(1); s.emit(2); s.emit(3); s.emit(4)
+    sz_evens = []
+    sz_odds = []
+    evens.sink(sz_evens.append)
+    odds.sink(sz_odds.append)
+    s.emit(1)
+    s.emit(2)
+    s.emit(3)
+    s.emit(4)
 
     a = akayu.Stream()
     ak_evens, ak_odds = sf_split_filter(a, lambda x: x % 2 == 0)
-    ak_evens_out = []; ak_odds_out = []
-    ak_evens.sink(ak_evens_out.append); ak_odds.sink(ak_odds_out.append)
-    a.emit(1); a.emit(2); a.emit(3); a.emit(4)
+    ak_evens_out = []
+    ak_odds_out = []
+    ak_evens.sink(ak_evens_out.append)
+    ak_odds.sink(ak_odds_out.append)
+    a.emit(1)
+    a.emit(2)
+    a.emit(3)
+    a.emit(4)
 
     assert sz_evens == ak_evens_out, f"split_filter evens mismatch: streamz={sz_evens}, akayu={ak_evens_out}"
     assert sz_odds == ak_odds_out, f"split_filter odds mismatch: streamz={sz_odds}, akayu={ak_odds_out}"
+
 
 def test_starmap():
     s = real_streamz.Stream()
     sm = s.starmap(lambda a, b: a + b)
     sz_out = []
     sm.sink(sz_out.append)
-    s.emit((1, 2)); s.emit((3, 4))
+    s.emit((1, 2))
+    s.emit((3, 4))
 
     a = akayu.Stream()
     asm = a.starmap(lambda a, b: a + b)
     ak_out = []
     asm.sink(ak_out.append)
-    a.emit((1, 2)); a.emit((3, 4))
+    a.emit((1, 2))
+    a.emit((3, 4))
 
     assert sz_out == ak_out, f"starmap mismatch: streamz={sz_out}, akayu={ak_out}"
+
 
 def test_full_pipeline_comparison():
     def source_fn(ex_start, ex_stop, *args):
@@ -298,23 +342,16 @@ def test_full_pipeline_comparison():
             exe_start = events.filter(isinstance, Start)
             exe_stop = events.filter(isinstance, Stop)
             exe_chunk = real_streamz.combine_latest(exe_start, exe_stop).filter(
-                lambda x: (
-                    x[0].name == x[1].name
-                    and x[0].set == x[1].set
-                    and x[0].timestamp < x[1].timestamp
-                )
+                lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
             )
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 real_streamz.zip(exe_chunk, batched_imu)
-                .starmap(
-                    lambda exe_chunk, batched_imu: (
-                        [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                    )
-                )
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
                 .flatten()
             )
             return events
+
         return source_node
 
     def create_source_node_akayu(source_fn):
@@ -322,23 +359,16 @@ def test_full_pipeline_comparison():
             exe_start = events.filter(isinstance, Start)
             exe_stop = events.filter(isinstance, Stop)
             exe_chunk = akayu.combine_latest(exe_start, exe_stop).filter(
-                lambda x: (
-                    x[0].name == x[1].name
-                    and x[0].set == x[1].set
-                    and x[0].timestamp < x[1].timestamp
-                )
+                lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
             )
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 akayu.zip(exe_chunk, batched_imu)
-                .starmap(
-                    lambda exe_chunk, batched_imu: (
-                        [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                    )
-                )
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
                 .flatten()
             )
             return events
+
         return source_node
 
     events = [Start("exe1", 1000, 0), Stop("exe1", 2000, 0)]
@@ -357,25 +387,26 @@ def test_full_pipeline_comparison():
 
     assert sz_out == ak_out, f"full pipeline mismatch: streamz={sz_out}, akayu={ak_out}"
 
+
 def np_array_equal(a, b):
     if type(a) != type(b):
         return False
-    if hasattr(a, 'data'):
+    if hasattr(a, "data"):
         return np.array_equal(a.data, b.data)
     if isinstance(a, np.ndarray):
         return np.array_equal(a, b)
     return a == b
 
+
 def events_equal(ev_a, ev_b):
     if type(ev_a) != type(ev_b):
         return False
-    if hasattr(ev_a, 'data'):
+    if hasattr(ev_a, "data"):
         return np.array_equal(ev_a.data, ev_b.data)
     if isinstance(ev_a, (Start, Stop)):
-        return (ev_a.name == ev_b.name and
-                ev_a.timestamp == ev_b.timestamp and
-                ev_a.set == ev_b.set)
+        return ev_a.name == ev_b.name and ev_a.timestamp == ev_b.timestamp and ev_a.set == ev_b.set
     return ev_a == ev_b
+
 
 def lists_equal(l_a, l_b):
     if len(l_a) != len(l_b):
@@ -391,11 +422,14 @@ def lists_equal(l_a, l_b):
             return False
     return True
 
+
 def identity_calib(rotmats_list):
     return Rotmat(np.eye(3))
 
+
 def identity_apply(calib, data):
     return data
+
 
 def create_calibration_node_streamz(calib_func, apply_func):
     def split_filter(stream, predicate, *args):
@@ -414,10 +448,7 @@ def create_calibration_node_streamz(calib_func, apply_func):
         for exe_names in exe_names_list:
             standing_events, remainder = split_filter(
                 remainder,
-                lambda x, exe_names: (
-                    x[1].name in exe_names
-                    and (isinstance(x[1], Start) or isinstance(x[0], Stop))
-                ),
+                lambda x, exe_names: (x[1].name in exe_names and (isinstance(x[1], Start) or isinstance(x[0], Stop))),
                 exe_names,
             )
             standing_events = standing_events.map(lambda x: x[0])
@@ -426,9 +457,7 @@ def create_calibration_node_streamz(calib_func, apply_func):
             calib_stops = standing_events.filter(isinstance, Stop)
             calib_chunk = real_streamz.zip(calib_starts, calib_stops)
 
-            standing_data = standing_events.filter(
-                lambda x: not isinstance(x, ExerciseInfo)
-            )
+            standing_data = standing_events.filter(lambda x: not isinstance(x, ExerciseInfo))
             standing_rotmats = standing_data.filter(isinstance, Rotmat)
 
             standing_data = standing_data.collect()
@@ -442,12 +471,7 @@ def create_calibration_node_streamz(calib_func, apply_func):
             rotmats.append(standing_rotmats)
 
         events = remainder.map(lambda x: x[0]).filter(
-            lambda x: (
-                not (
-                    isinstance(x, ExerciseInfo)
-                    and any(x.name in exe_names for exe_names in exe_names_list)
-                )
-            )
+            lambda x: (not (isinstance(x, ExerciseInfo) and any(x.name in exe_names for exe_names in exe_names_list)))
         )
         calibs = real_streamz.zip(*rotmats).starmap(calib_func)
 
@@ -458,9 +482,7 @@ def create_calibration_node_streamz(calib_func, apply_func):
 
         tmp = real_streamz.zip(calibs, *flushed_events)
         calibs = tmp.map(lambda x: x[0])
-        exe_events_list = [
-            tmp.map(lambda x, i: x[i + 1], i) for i in range(len(flushed_events))
-        ]
+        exe_events_list = [tmp.map(lambda x, i: x[i + 1], i) for i in range(len(flushed_events))]
 
         init_calib = start_exe.accumulate(
             lambda hist, x: (x, x) if hist is None else (x, None),
@@ -473,9 +495,9 @@ def create_calibration_node_streamz(calib_func, apply_func):
 
         exe_events_flat = []
         for exe_events, calib_chunk in zip(exe_events_list, exe_chunk_list):
-            exe_events = real_streamz.combine_latest(
-                exe_events, calib_chunk, emit_on=exe_events
-            ).starmap(lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]])
+            exe_events = real_streamz.combine_latest(exe_events, calib_chunk, emit_on=exe_events).starmap(
+                lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]]
+            )
             exe_events = exe_events.flatten()
             exe_events_flat.append(exe_events)
 
@@ -486,7 +508,9 @@ def create_calibration_node_streamz(calib_func, apply_func):
         events = real_streamz.union(events, data)
 
         return events
+
     return calibration_node
+
 
 def create_calibration_node_akayu(calib_func, apply_func):
     def split_filter(stream, predicate, *args):
@@ -505,10 +529,7 @@ def create_calibration_node_akayu(calib_func, apply_func):
         for exe_names in exe_names_list:
             standing_events, remainder = split_filter(
                 remainder,
-                lambda x, exe_names: (
-                    x[1].name in exe_names
-                    and (isinstance(x[1], Start) or isinstance(x[0], Stop))
-                ),
+                lambda x, exe_names: (x[1].name in exe_names and (isinstance(x[1], Start) or isinstance(x[0], Stop))),
                 exe_names,
             )
             standing_events = standing_events.map(lambda x: x[0])
@@ -517,9 +538,7 @@ def create_calibration_node_akayu(calib_func, apply_func):
             calib_stops = standing_events.filter(isinstance, Stop)
             calib_chunk = akayu.zip(calib_starts, calib_stops)
 
-            standing_data = standing_events.filter(
-                lambda x: not isinstance(x, ExerciseInfo)
-            )
+            standing_data = standing_events.filter(lambda x: not isinstance(x, ExerciseInfo))
             standing_rotmats = standing_data.filter(isinstance, Rotmat)
 
             standing_data = standing_data.collect()
@@ -533,12 +552,7 @@ def create_calibration_node_akayu(calib_func, apply_func):
             rotmats.append(standing_rotmats)
 
         events = remainder.map(lambda x: x[0]).filter(
-            lambda x: (
-                not (
-                    isinstance(x, ExerciseInfo)
-                    and any(x.name in exe_names for exe_names in exe_names_list)
-                )
-            )
+            lambda x: (not (isinstance(x, ExerciseInfo) and any(x.name in exe_names for exe_names in exe_names_list)))
         )
         calibs = akayu.zip(*rotmats).starmap(calib_func)
 
@@ -549,9 +563,7 @@ def create_calibration_node_akayu(calib_func, apply_func):
 
         tmp = akayu.zip(calibs, *flushed_events)
         calibs = tmp.map(lambda x: x[0])
-        exe_events_list = [
-            tmp.map(lambda x, i: x[i + 1], i) for i in range(len(flushed_events))
-        ]
+        exe_events_list = [tmp.map(lambda x, i: x[i + 1], i) for i in range(len(flushed_events))]
 
         init_calib = start_exe.accumulate(
             lambda hist, x: (x, x) if hist is None else (x, None),
@@ -564,9 +576,9 @@ def create_calibration_node_akayu(calib_func, apply_func):
 
         exe_events_flat = []
         for exe_events, calib_chunk in zip(exe_events_list, exe_chunk_list):
-            exe_events = akayu.combine_latest(
-                exe_events, calib_chunk, emit_on=exe_events
-            ).starmap(lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]])
+            exe_events = akayu.combine_latest(exe_events, calib_chunk, emit_on=exe_events).starmap(
+                lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]]
+            )
             exe_events = exe_events.flatten()
             exe_events_flat.append(exe_events)
 
@@ -577,6 +589,7 @@ def create_calibration_node_akayu(calib_func, apply_func):
         events = akayu.union(events, data)
 
         return events
+
     return calibration_node
 
 
@@ -593,25 +606,18 @@ def test_create_calibration_node_with_single_exercise():
     ]
 
     sz_source = real_streamz.Stream()
-    sz_node = create_calibration_node_streamz(identity_calib, identity_apply)(
-        sz_source.flatten(), "standing", "lunge"
-    )
+    sz_node = create_calibration_node_streamz(identity_calib, identity_apply)(sz_source.flatten(), "standing", "lunge")
     sz_out = []
     sz_node.sink(sz_out.append)
     sz_source.emit(events)
 
     ak_source = akayu.Stream()
-    ak_node = create_calibration_node_akayu(identity_calib, identity_apply)(
-        ak_source.flatten(), "standing", "lunge"
-    )
+    ak_node = create_calibration_node_akayu(identity_calib, identity_apply)(ak_source.flatten(), "standing", "lunge")
     ak_out = []
     ak_node.sink(ak_out.append)
     ak_source.emit(events)
 
-    assert lists_equal(sz_out, ak_out), (
-        f"single exercise calibration mismatch:\n"
-        f"streamz={sz_out}\nakayu={ak_out}"
-    )
+    assert lists_equal(sz_out, ak_out), f"single exercise calibration mismatch:\nstreamz={sz_out}\nakayu={ak_out}"
 
 
 def test_create_calibration_node_with_multiple_exercises():
@@ -647,10 +653,7 @@ def test_create_calibration_node_with_multiple_exercises():
     ak_node.sink(ak_out.append)
     ak_source.emit(events)
 
-    assert lists_equal(sz_out, ak_out), (
-        f"multi-exercise calibration mismatch:\n"
-        f"streamz={sz_out}\nakayu={ak_out}"
-    )
+    assert lists_equal(sz_out, ak_out), f"multi-exercise calibration mismatch:\nstreamz={sz_out}\nakayu={ak_out}"
 
 
 def test_create_calibration_node_multiple_exercise_groups():
@@ -671,25 +674,18 @@ def test_create_calibration_node_multiple_exercise_groups():
     ]
 
     sz_source = real_streamz.Stream()
-    sz_node = create_calibration_node_streamz(identity_calib, identity_apply)(
-        sz_source.flatten(), "standing", "lunge"
-    )
+    sz_node = create_calibration_node_streamz(identity_calib, identity_apply)(sz_source.flatten(), "standing", "lunge")
     sz_out = []
     sz_node.sink(sz_out.append)
     sz_source.emit(events)
 
     ak_source = akayu.Stream()
-    ak_node = create_calibration_node_akayu(identity_calib, identity_apply)(
-        ak_source.flatten(), "standing", "lunge"
-    )
+    ak_node = create_calibration_node_akayu(identity_calib, identity_apply)(ak_source.flatten(), "standing", "lunge")
     ak_out = []
     ak_node.sink(ak_out.append)
     ak_source.emit(events)
 
-    assert lists_equal(sz_out, ak_out), (
-        f"multi-exercise-group calibration mismatch:\n"
-        f"streamz={sz_out}\nakayu={ak_out}"
-    )
+    assert lists_equal(sz_out, ak_out), f"multi-exercise-group calibration mismatch:\nstreamz={sz_out}\nakayu={ak_out}"
 
 
 if __name__ == "__main__":
@@ -729,23 +725,16 @@ def create_source_node_streamz(source_fn):
         exe_start = events.filter(isinstance, Start)
         exe_stop = events.filter(isinstance, Stop)
         exe_chunk = real_streamz.combine_latest(exe_start, exe_stop).filter(
-            lambda x: (
-                x[0].name == x[1].name
-                and x[0].set == x[1].set
-                and x[0].timestamp < x[1].timestamp
-            )
+            lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
         )
         batched_imu = exe_chunk.starmap(source_fn, *args)
         events = (
             real_streamz.zip(exe_chunk, batched_imu)
-            .starmap(
-                lambda exe_chunk, batched_imu: (
-                    [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                )
-            )
+            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
             .flatten()
         )
         return events
+
     return source_node
 
 
@@ -754,23 +743,16 @@ def create_source_node_akayu(source_fn):
         exe_start = events.filter(isinstance, Start)
         exe_stop = events.filter(isinstance, Stop)
         exe_chunk = akayu.combine_latest(exe_start, exe_stop).filter(
-            lambda x: (
-                x[0].name == x[1].name
-                and x[0].set == x[1].set
-                and x[0].timestamp < x[1].timestamp
-            )
+            lambda x: (x[0].name == x[1].name and x[0].set == x[1].set and x[0].timestamp < x[1].timestamp)
         )
         batched_imu = exe_chunk.starmap(source_fn, *args)
         events = (
             akayu.zip(exe_chunk, batched_imu)
-            .starmap(
-                lambda exe_chunk, batched_imu: (
-                    [exe_chunk[0]] + batched_imu + [exe_chunk[1]]
-                )
-            )
+            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
             .flatten()
         )
         return events
+
     return source_node
 
 
@@ -826,7 +808,7 @@ def merge_tagged_events(hist, event):
             hist[k].append([e])
         else:
             hist[k][-1].append(e)
-    
+
     outs = []
     while True:
         if all(len(h) > 0 and _is_exercise_info(h[0]) for h in hist.values()):
@@ -859,9 +841,7 @@ def merge_tagged_events(hist, event):
 
 def make_merge_node(streamz_lib):
     def merge_node(*events_arr):
-        events_tagged_arr = [
-            events.map(lambda x, i: (i, x), i) for i, events in enumerate(events_arr)
-        ]
+        events_tagged_arr = [events.map(lambda x, i: (i, x), i) for i, events in enumerate(events_arr)]
         events_tagged = streamz_lib.union(*events_tagged_arr)
         merged_events_tagged = (
             events_tagged.accumulate(
@@ -872,12 +852,11 @@ def make_merge_node(streamz_lib):
             .filter(len)
             .flatten()
         )
-        exe_info, events_tagged = split_filter(
-            merged_events_tagged, _is_exercise_info
-        )
+        exe_info, events_tagged = split_filter(merged_events_tagged, _is_exercise_info)
         events = events_tagged.map(lambda x: x[1]).flatten()
         events = streamz_lib.union(exe_info, events)
         return events
+
     return merge_node
 
 
@@ -888,28 +867,36 @@ merge_node_akayu = make_merge_node(akayu)
 def flush_segments_streamz(segment_events):
     segment_collect = {k: events.collect() for k, events in segment_events.items()}
     segment_results = {}
+
     def _assign(k, x):
         segment_results[k] = x
+
     for k, events in segment_collect.items():
         events.sink(lambda x, k: _assign(k, x), k)
+
     def flush():
         for events in segment_collect.values():
             events.flush()
         return segment_results
+
     return SimpleNamespace(flush=flush)
 
 
 def flush_segments_akayu(segment_events):
     segment_collect = {k: events.collect() for k, events in segment_events.items()}
     segment_results = {}
+
     def _assign(k, x):
         segment_results[k] = x
+
     for k, events in segment_collect.items():
         events.sink(lambda x, k: _assign(k, x), k)
+
     def flush():
         for events in segment_collect.values():
             events.flush()
         return segment_results
+
     return SimpleNamespace(flush=flush)
 
 
@@ -1022,7 +1009,7 @@ def test_source_v1_flow_merge_two_sources():
     ]
 
     def mock_uls_fn(start, stop, session_path, segment):
-        return [Timestamp(start.timestamp + 100), Image(np.zeros((4,4)))]
+        return [Timestamp(start.timestamp + 100), Image(np.zeros((4, 4)))]
 
     def mock_imu_fn(start, stop, session_path, segment):
         return [Timestamp(start.timestamp + 50), Rotmat(np.eye(3))]
@@ -1072,11 +1059,7 @@ def test_source_v1_flow_multi_segment_multi_exercise():
     for segment in segments:
         sz_summary = exercise_event_summary(sz_result[segment])
         ak_summary = exercise_event_summary(ak_result[segment])
-        assert sz_summary == ak_summary, (
-            f"Segment {segment} mismatch:\n"
-            f"  streamz: {sz_summary}\n"
-            f"  akayu:  {ak_summary}"
-        )
+        assert sz_summary == ak_summary, f"Segment {segment} mismatch:\n  streamz: {sz_summary}\n  akayu:  {ak_summary}"
 
     for segment in segments:
         sz_starts = [e for e in sz_result[segment] if isinstance(e, Start)]
@@ -1110,11 +1093,7 @@ def test_source_v1_flow_two_segments_two_exercises():
     for segment in segments:
         sz_summary = exercise_event_summary(sz_result[segment])
         ak_summary = exercise_event_summary(ak_result[segment])
-        assert sz_summary == ak_summary, (
-            f"Segment {segment} mismatch:\n"
-            f"  streamz: {sz_summary}\n"
-            f"  akayu:  {ak_summary}"
-        )
+        assert sz_summary == ak_summary, f"Segment {segment} mismatch:\n  streamz: {sz_summary}\n  akayu:  {ak_summary}"
 
     for segment in segments:
         sz_starts = [e for e in sz_result[segment] if isinstance(e, Start)]
@@ -1181,7 +1160,7 @@ def test_source_v1_flow_simple_node():
     ]
 
     def mock_fn(start, stop, session_path, segment):
-        return [Timestamp(start.timestamp + 100), Image(np.zeros((4,4)))]
+        return [Timestamp(start.timestamp + 100), Image(np.zeros((4, 4)))]
 
     sz_source = real_streamz.Stream()
     sz_events = sz_source.map(lambda _: exercises).flatten()

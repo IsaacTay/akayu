@@ -199,6 +199,7 @@ def test_auto_node_name_partial_itself_fails():
 def test_auto_node_name_builtin():
     """Builtin functions (e.g. str) get their name in the node."""
     s = akayu.Stream()
+
     # str() won't fail, so chain with a failing sink
     def fail_sink(x):
         raise ValueError("sink fail")
@@ -553,5 +554,3 @@ def test_narrowing_with_extra_args():
         s.emit(1)
     msg = str(exc.value)
     assert "map(add_n)" in msg
-
-

@@ -15,9 +15,7 @@ def test_benchmark_throughput(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
-            inc_count
-        )
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
 
         for i in range(500000):
             s.emit(i)
@@ -30,8 +28,7 @@ def test_benchmark_throughput(benchmark):
 
 
 def test_benchmark_throughput_sync_flag(benchmark):
-    """
-    """
+    """ """
 
     def run_pipeline():
         s = akayu.Stream()
@@ -42,9 +39,7 @@ def test_benchmark_throughput_sync_flag(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
-            inc_count
-        )
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
 
         for i in range(500000):
             s.emit(i)
@@ -69,9 +64,7 @@ def test_benchmark_batch_throughput(benchmark):
             nonlocal count
             count += 1
 
-        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(
-            inc_count
-        )
+        s.map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(lambda x: x / 2).sink(inc_count)
 
         # Emit in batches of 1000
         batch = list(range(1000))
@@ -83,7 +76,6 @@ def test_benchmark_batch_throughput(benchmark):
     # pytest-benchmark will run this multiple times
     result = benchmark(run_pipeline)
     assert result == 250000
-
 
 
 def test_benchmark_pure_python(benchmark):
@@ -126,9 +118,9 @@ def test_benchmark_expansion_emit(benchmark):
         # Expansion: 1 item -> 100 items
         # Total: 5000 inputs * 100 expansion = 500,000 operations downstream
         # Pipeline: map(expand) -> flatten -> map -> filter -> map -> sink
-        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
-            lambda x: x % 2 == 0
-        ).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(
+            lambda x: x / 2
+        ).sink(inc_count)
 
         for i in range(5000):
             s.emit(i)
@@ -156,9 +148,9 @@ def test_benchmark_expansion_batch(benchmark):
         # Expansion: 1 item -> 100 items
         # Total: 5000 inputs * 100 expansion = 500,000 operations downstream
         # Pipeline: map(expand) -> flatten -> map -> filter -> map -> sink
-        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
-            lambda x: x % 2 == 0
-        ).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(
+            lambda x: x / 2
+        ).sink(inc_count)
 
         # Single batch of 5000 items
         batch = list(range(5000))
