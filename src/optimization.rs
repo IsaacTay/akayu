@@ -334,14 +334,17 @@ impl Stream {
         for (i, node_py) in chain_node_refs.iter().enumerate() {
             let mut node = node_py.borrow_mut(py);
             let node_id = std::ptr::from_ref(&*node) as usize;
-            let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember);
-            let name = std::mem::take(&mut node.name);
-            let source_location = std::mem::take(&mut node.source_location);
+            let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
+            let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember { was_sink });
+            // Members keep their name and downstreams: data never reaches them
+            // (the head propagates straight to the tail's downstreams), but a
+            // flush() called on a member must still reach what lies below it.
+            let name = node.name.clone();
+            let source_location = node.source_location.clone();
             let builtin_op = node.builtin_op.take();
             let cached_vectorcall = node.cached_vectorcall.take();
             let flush_target = node.flush_target.take();
             let emit_target = node.emit_target.take();
-            node.downstreams.clear();
             steps.push(ChainNode {
                 logic,
                 name,
@@ -354,8 +357,10 @@ impl Stream {
             });
         }
 
-        // Set head node's logic to Chain, downstreams to tail's downstreams
+        // Set head node's logic to Chain, downstreams to tail's downstreams,
+        // and name it after its steps.
         let mut head = start_py.borrow_mut(py);
+        head.name = steps.iter().map(|step| step.name.as_str()).collect::<Vec<_>>().join(" -> ");
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_ref(py)).collect();
         drop(head);
@@ -580,7 +585,8 @@ impl Stream {
             for node_py_ref in &buffer_path[..buffer_path.len().saturating_sub(1)] {
                 let mut node = node_py_ref.borrow_mut(py);
                 let node_id = std::ptr::from_ref(&*node) as usize;
-                let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember);
+                let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
+                let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember { was_sink });
                 let name = std::mem::take(&mut node.name);
                 let source_location = std::mem::take(&mut node.source_location);
                 let builtin_op = node.builtin_op.take();
@@ -603,7 +609,7 @@ impl Stream {
             // Extract predicate from Filter
             let predicate = {
                 let mut filter_node = filter_py.borrow_mut(py);
-                let pred = match std::mem::replace(&mut filter_node.logic, NodeLogic::ChainMember) {
+                let pred = match std::mem::replace(&mut filter_node.logic, NodeLogic::ChainMember { was_sink: false }) {
                     NodeLogic::Filter { predicate } => predicate,
                     _ => unreachable!(),
                 };
@@ -648,7 +654,7 @@ impl Stream {
             // If buffer_path had intermediate nodes, mark the Collect as orphaned
             if buffer_path.len() > 1 {
                 let mut collect_node = collect_py.borrow_mut(py);
-                collect_node.logic = NodeLogic::ChainMember;
+                collect_node.logic = NodeLogic::ChainMember { was_sink: false };
                 collect_node.downstreams.clear();
             }
 

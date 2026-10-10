@@ -626,7 +626,7 @@ pub(crate) fn apply_logic(
             Ok(StepResult::Value(val))
         }
 
-        NodeLogic::ChainMember => unreachable!("ChainMember should never be executed directly"),
+        NodeLogic::ChainMember { .. } => unreachable!("ChainMember should never be executed directly"),
 
         _ => unreachable!("apply_logic called with non-chainable variant"),
     }
@@ -889,7 +889,7 @@ pub(crate) fn apply_logic_batch(
             Ok(BatchStepResult::Items(batch))
         }
 
-        NodeLogic::ChainMember => unreachable!("ChainMember should never be executed directly"),
+        NodeLogic::ChainMember { .. } => unreachable!("ChainMember should never be executed directly"),
 
         _ => unreachable!("apply_logic_batch called with non-chainable variant"),
     }

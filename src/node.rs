@@ -76,7 +76,10 @@ pub enum NodeLogic {
         steps: Vec<ChainNode>,
     },
     /// Sentinel replacing logic in nodes absorbed into a Chain.
-    ChainMember,
+    ChainMember {
+        /// The member was a Sink, so flushing it directly is not a mistake.
+        was_sink: bool,
+    },
     /// Buffers items until a predicate matches, then emits the buffer as a tuple.
     /// Fused from `collect() + filter(pred).sink(flush)` patterns at compile time,
     /// or created directly via `chunk_by(pred)`.

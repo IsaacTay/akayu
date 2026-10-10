@@ -118,7 +118,7 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
         | NodeLogic::Zip { .. }
         | NodeLogic::Parallel
         | NodeLogic::Prefetch { .. }
-        | NodeLogic::ChainMember => Ok(()),
+        | NodeLogic::ChainMember { .. } => Ok(()),
     }
 }
 

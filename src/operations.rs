@@ -114,8 +114,21 @@ impl Stream {
         )
     }
 
-    fn flush_inner(&mut self, py: Python) -> PyResult<()> {
+    /// Flush with the re-entrancy guard. `warn_if_noop` is true only for the
+    /// node the user called `flush()` on: nodes reached by propagation are
+    /// expected to be leaves and must not warn.
+    pub(crate) fn flush_guarded(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
+        let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
+        if self.flushing {
+            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
+        }
+        self.flushing = true;
+        let result = self.flush_inner(py, warn_if_noop);
+        self.flushing = false;
+        result
+    }
 
+    fn flush_inner(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
         // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
         let has_buffer = matches!(
             self.logic,
@@ -126,8 +139,16 @@ impl Stream {
                 | NodeLogic::PrefetchFilter { .. }
                 | NodeLogic::PrefetchBatchMap { .. }
         );
-        let is_sink = matches!(self.logic, NodeLogic::Sink { .. });
-        if !has_buffer && self.downstreams.is_empty() && !is_sink {
+        let is_sink = match &self.logic {
+            NodeLogic::Sink { .. } => true,
+            // A fused chain ending in a sink is a sink
+            NodeLogic::Chain { steps } => {
+                matches!(steps.last().map(|step| &step.logic), Some(NodeLogic::Sink { .. }))
+            }
+            NodeLogic::ChainMember { was_sink } => *was_sink,
+            _ => false,
+        };
+        if warn_if_noop && !has_buffer && self.downstreams.is_empty() && !is_sink {
             let msg = format!(
                 "flush() called on '{}' which has no buffer and no downstreams — \
                  did you mean to call flush() on a collect() node?",
@@ -185,7 +206,7 @@ impl Stream {
         if should_propagate {
             for downstream in &self.downstreams {
                 let mut d = downstream.borrow_mut(py);
-                d.flush(py, vec![], None)?;
+                d.flush_guarded(py, false)?;
             }
         }
         Ok(())
@@ -934,14 +955,7 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
-        if self.flushing {
-            return Err(StreamError::ReentrantFlush(self.name.clone()).into());
-        }
-        self.flushing = true;
-        let result = self.flush_inner(py);
-        self.flushing = false;
-        result
+        self.flush_guarded(py, true)
     }
 
     /// Recursively flush this node and all downstream nodes.
