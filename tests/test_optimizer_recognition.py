@@ -71,3 +71,21 @@ def test_unrecognized_lambda_is_left_alone():
 )
 def test_defaulted_parameters_are_constants(func, expected):
     assert _analyze_lambda(func) == expected
+
+
+@pytest.mark.parametrize(
+    ("func", "expected"),
+    [
+        (lambda x: x % 2 == 0, ("chain", ("binop", "%", 2), ("compare", "==", 0))),
+        (lambda x: x * 2 + 1, ("chain", ("binop", "*", 2), ("binop", "+", 1))),
+        (lambda x: x["a"]["b"], ("chain", ("itemgetter", "a"), ("itemgetter", "b"))),
+        (lambda x: x.a.b, ("chain", ("attrgetter", "a"), ("attrgetter", "b"))),
+        (lambda x: str(x).upper(), ("chain", ("str",), ("method0", "upper"))),
+        (lambda x: x.strip().lower(), ("chain", ("method0", "strip"), ("method0", "lower"))),
+        (lambda x: 0 < x < 10, None),  # comparison chains branch
+        (lambda x: x * x, None),  # the item twice
+    ],
+    ids=["mod-eq", "mul-add", "item-item", "attr-attr", "str-method", "method-method", "cmp-chain", "x-twice"],
+)
+def test_step_chains_recognized(func, expected):
+    assert _analyze_lambda(func) == expected

@@ -581,13 +581,54 @@ def _analyze_compound(instrs, func):
 
 
 def _analyze_expr(instrs, func):
-    """Analyze an expression — tries compound first, then simple."""
+    """Analyze an expression — tries compound first, then simple, then a
+    longer chain of single steps."""
     # Try compound (and/or) first
     compound = _analyze_compound(instrs, func)
     if compound is not None:
         return compound
-    # Fall back to simple
-    return _analyze_simple(instrs, func)
+    simple = _analyze_simple(instrs, func)
+    if simple is not None:
+        return simple
+    return _analyze_postfix(instrs, func)
+
+
+_ITEM = ("LOAD_FAST", None)  # stands for the previous step's result
+
+
+def _analyze_postfix(instrs, func):
+    """The item, or builtin(item), followed by a sequence of steps that each
+    take the previous result as their only input: `x % 2 == 0`,
+    `x["a"]["b"]`, `x.a.b`, `str(x).upper()`, `x.strip().lower()`.
+
+    Each step is matched by the single-step patterns (`_analyze_simple` on
+    the step's instructions after a load of the item), longest first so a
+    method call isn't read as an attribute. Returns nested ("chain", a, b)
+    tuples, applied left to right as Python evaluates them, or None.
+    """
+    if len(instrs) >= 3 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[2] == ("CALL", 1):
+        head = _analyze_simple(instrs[:3], func)  # len(x), str(x), ...
+        pos = 3
+    elif instrs and instrs[0][0] == "LOAD_FAST":
+        head, pos = None, 1
+    else:
+        return None
+    steps = [head] if head is not None else []
+    while pos < len(instrs):
+        for size in range(min(5, len(instrs) - pos), 0, -1):
+            step = _analyze_simple([_ITEM, *instrs[pos : pos + size]], func)
+            if step is not None:
+                steps.append(step)
+                pos += size
+                break
+        else:
+            return None
+    if len(steps) < 2:
+        return None
+    result = steps[-1]
+    for step in reversed(steps[:-1]):
+        result = ("chain", step, result)
+    return result
 
 
 # Flags for bail-out checks
