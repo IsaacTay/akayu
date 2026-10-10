@@ -50,9 +50,7 @@ def check_mermaid(files):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Validate Mermaid diagrams in markdown files."
-    )
+    parser = argparse.ArgumentParser(description="Validate Mermaid diagrams in markdown files.")
     parser.add_argument(
         "files",
         nargs="*",

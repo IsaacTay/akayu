@@ -12,6 +12,7 @@ def test_fuzz_dynamic_topology():
     for seed in range(20):
         run_dynamic_fuzz(seed)
 
+
 def run_dynamic_fuzz(seed):
     random.seed(seed)
     source = Stream()

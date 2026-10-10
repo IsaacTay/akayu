@@ -17,13 +17,13 @@ def test_benchmark_split_expansion(benchmark):
             count += 1
 
         # Branch 1
-        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
-            lambda x: x % 2 == 0
-        ).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(
+            lambda x: x / 2
+        ).sink(inc_count)
         # Branch 2 (Force split logic)
-        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(
-            lambda x: x % 2 == 0
-        ).map(lambda x: x / 2).sink(inc_count)
+        s.map(lambda x: [x] * 100).flatten().map(lambda x: x + 1).filter(lambda x: x % 2 == 0).map(
+            lambda x: x / 2
+        ).sink(inc_count)
 
         # Emit 2500 items.
         # Each splits to 2 branches.

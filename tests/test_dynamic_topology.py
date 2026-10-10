@@ -24,6 +24,7 @@ def test_add_node_after_emit():
     assert results1 == [2, 3]
     assert results2 == [20]
 
+
 def test_add_chain_after_emit():
     """Test extending a chain after emit."""
     source = Stream()
@@ -43,6 +44,7 @@ def test_add_chain_after_emit():
     # n1 processes 2 -> 3, sinks to results
     assert results == [3]
 
+
 def test_split_optimization_interleaved():
     """Test if optimization logic breaks when adding nodes interleaved with emits."""
     source = Stream()
@@ -50,11 +52,11 @@ def test_split_optimization_interleaved():
     r2 = []
 
     # Branch 1
-    n1 = source.map(lambda x: x + 1) # map1
-    n1.map(lambda x: x * 2).sink(r1.append) # map2, should fuse with map1 if optimized
+    n1 = source.map(lambda x: x + 1)  # map1
+    n1.map(lambda x: x * 2).sink(r1.append)  # map2, should fuse with map1 if optimized
 
     # Emit - triggers optimization on source and reachable nodes
-    source.emit(1) # 1 -> +1 -> *2 = 4
+    source.emit(1)  # 1 -> +1 -> *2 = 4
     assert r1 == [4]
 
     # Add Branch 2 to n1 (which might have been fused/modified?)

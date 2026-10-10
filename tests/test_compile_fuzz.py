@@ -394,7 +394,9 @@ class TestCompileFuzz:
                 if rng.random() < 0.1:
                     next_layer.append(node.collect())
                 if rng.random() < 0.1:
-                    next_layer.append(node.chunk_by(lambda x: isinstance(x, int) and x == -1, include_delimiter=True).map(tuple))
+                    next_layer.append(
+                        node.chunk_by(lambda x: isinstance(x, int) and x == -1, include_delimiter=True).map(tuple)
+                    )
 
             while len(next_layer) > 20:
                 n = rng.randint(2, min(5, len(next_layer)))
@@ -455,7 +457,9 @@ class TestCompileFuzz:
                 if rng.random() < 0.15:
                     next_layer.append(node.collect())
                 if rng.random() < 0.1:
-                    next_layer.append(node.chunk_by(lambda x: isinstance(x, int) and x == -1, include_delimiter=True).map(tuple))
+                    next_layer.append(
+                        node.chunk_by(lambda x: isinstance(x, int) and x == -1, include_delimiter=True).map(tuple)
+                    )
                 if rng.random() < 0.08:
                     next_layer.append(node.accumulate(_last, start=None).map(_id).filter(_true))
                 if rng.random() < 0.05:
@@ -479,6 +483,7 @@ class TestCompileFuzz:
             node.sink(lambda x: None)
 
         import time
+
         t0 = time.perf_counter()
         sources[0].compile()
         t1 = time.perf_counter()

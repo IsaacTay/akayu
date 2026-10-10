@@ -656,11 +656,7 @@ class TestDictModeTransforms:
 
     def test_chaining_preserves_keys(self):
         sources = _dict_sources(["a", "b", "c"])
-        result = (
-            MultiStream(sources)
-            .map(lambda x: x * 2)
-            .filter(lambda x: x > 5)
-        )
+        result = MultiStream(sources).map(lambda x: x * 2).filter(lambda x: x > 5)
         assert result.keyed
         assert list(result.keys()) == ["a", "b", "c"]
 
@@ -965,4 +961,3 @@ class TestMultiStreamProfile:
         with profilers["temp"]:
             sources["temp"].emit(42)
         assert profilers["temp"].report is not None
-

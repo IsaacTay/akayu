@@ -22,6 +22,8 @@ dependencies = []
 [tool.ruff]
 target-version = "py313"
 line-length = 120
+# pipeline/ is a vendored copy of application code, used only as a test fixture
+extend-exclude = ["pipeline"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "SIM", "B", "C4", "PERF", "RUF", "ARG", "PLC", "PLE", "PLW", "TCH", "FURB", "PTH", "SLOT", "FLY"]

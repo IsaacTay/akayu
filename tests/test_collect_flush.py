@@ -6,6 +6,7 @@ from akayu import Stream
 # External flush (called after emits, not from within the graph)
 # ---------------------------------------------------------------------------
 
+
 class TestExternalFlush:
     """flush() called manually from outside the graph."""
 
@@ -128,6 +129,7 @@ class TestExternalFlush:
 # Multi-stage collect (chained collects)
 # ---------------------------------------------------------------------------
 
+
 class TestMultiStageCollect:
     """Multiple collect nodes in sequence or branching patterns."""
 
@@ -242,13 +244,14 @@ class TestMultiStageCollect:
 # Collect with transforms
 # ---------------------------------------------------------------------------
 
+
 class TestCollectWithTransforms:
     """collect() combined with map/filter in the pipeline."""
 
     def test_map_before_collect(self):
         s = Stream()
         results = []
-        c = s.map(lambda x: x ** 2).collect()
+        c = s.map(lambda x: x**2).collect()
         c.sink(results.append)
 
         s.emit(1)
@@ -318,6 +321,7 @@ class TestCollectWithTransforms:
 # ---------------------------------------------------------------------------
 # In-graph flush (filter→sink pattern triggering flush)
 # ---------------------------------------------------------------------------
+
 
 class TestInGraphFlush:
     """Flush triggered from within the graph via filter→sink."""
@@ -444,6 +448,7 @@ class TestInGraphFlush:
 # Compiled vs uncompiled consistency
 # ---------------------------------------------------------------------------
 
+
 class TestCompiledConsistency:
     """Ensure compiled and uncompiled produce identical results."""
 
@@ -515,8 +520,8 @@ class TestCompiledConsistency:
 # Edge cases
 # ---------------------------------------------------------------------------
 
-class TestCollectFlushEdgeCases:
 
+class TestCollectFlushEdgeCases:
     def test_collect_no_downstreams(self):
         """Collect with no sink — flush shouldn't crash."""
         s = Stream()
@@ -624,6 +629,7 @@ class TestCollectFlushEdgeCases:
 # Warning on no-op flush
 # ---------------------------------------------------------------------------
 
+
 class TestFlushWarning:
     """flush() on a leaf non-buffering node should emit a UserWarning."""
 
@@ -677,6 +683,7 @@ class TestFlushWarning:
 # ---------------------------------------------------------------------------
 # drain() — recursive flush
 # ---------------------------------------------------------------------------
+
 
 class TestDrain:
     """drain() recursively flushes this node and all descendants."""
@@ -778,6 +785,7 @@ class TestDrain:
 # Re-entrant flush detection
 # ---------------------------------------------------------------------------
 
+
 class TestReentrantFlush:
     """Re-entrant flush/drain must raise a clear error, not hang or UB."""
 
@@ -834,6 +842,7 @@ class TestReentrantFlush:
         c = s.collect()
 
         call_count = [0]
+
         def maybe_reentrant(t):
             call_count[0] += 1
             if call_count[0] == 1:

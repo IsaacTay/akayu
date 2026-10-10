@@ -74,7 +74,7 @@ def main():
     # Using map (processes one at a time)
     results_map = []
     source_map = akayu.Stream()
-    source_map.map(lambda x: x ** 0.5).sink(results_map.append)
+    source_map.map(lambda x: x**0.5).sink(results_map.append)
 
     start = time.perf_counter()
     source_map.emit_batch(data)
@@ -83,7 +83,7 @@ def main():
     # Using batch_map (processes entire batch at once)
     results_batch = []
     source_batch = akayu.Stream()
-    source_batch.batch_map(lambda batch: [x ** 0.5 for x in batch]).sink(results_batch.append)
+    source_batch.batch_map(lambda batch: [x**0.5 for x in batch]).sink(results_batch.append)
 
     start = time.perf_counter()
     source_batch.emit_batch(data)
@@ -100,12 +100,7 @@ def main():
     # emits its elements individually
     print("\n--- flatten() for nested data ---")
 
-    nested_data = [
-        [1, 2, 3],
-        [4, 5],
-        [],
-        [6, 7, 8, 9]
-    ]
+    nested_data = [[1, 2, 3], [4, 5], [], [6, 7, 8, 9]]
 
     flat_results = []
 
@@ -155,10 +150,7 @@ def main():
         records = []
         for student in batch:
             for score in student["scores"]:
-                records.append({
-                    "student": student["name"],
-                    "score": score
-                })
+                records.append({"student": student["name"], "score": score})
         return records
 
     source.batch_map(process_batch).flatten().sink(student_records.append)

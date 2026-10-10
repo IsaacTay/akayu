@@ -23,6 +23,7 @@ from akayu import Stream, union
 # SECTION: Testing Individual Operations
 # =============================================================================
 
+
 class TestMapOperation(unittest.TestCase):
     """Test map() operation in isolation"""
 
@@ -81,17 +82,14 @@ class TestFilterOperation(unittest.TestCase):
 # SECTION: Testing Pipeline Components
 # =============================================================================
 
+
 class TestPipelineComponents(unittest.TestCase):
     """Test combined pipeline components"""
 
     def test_pipeline_transform_and_filter(self):
         results = []
         source = Stream()
-        (
-            source.map(lambda x: x * 2)
-                  .filter(lambda x: x > 5)
-                  .sink(results.append)
-        )
+        (source.map(lambda x: x * 2).filter(lambda x: x > 5).sink(results.append))
 
         source.emit_batch([1, 2, 3, 4, 5])
 
@@ -140,6 +138,7 @@ class TestAccumulateOperation(unittest.TestCase):
 # SECTION: Testing Parallel Branches
 # =============================================================================
 
+
 class TestParallelBranches(unittest.TestCase):
     """Test par() and parallel execution"""
 
@@ -180,6 +179,7 @@ class TestParallelBranches(unittest.TestCase):
 # SECTION: Testing Async Operations
 # =============================================================================
 
+
 class TestAsyncOperations(unittest.TestCase):
     """Test async stream operations"""
 
@@ -216,6 +216,7 @@ class TestAsyncOperations(unittest.TestCase):
 # =============================================================================
 # SECTION: Testing with Mocks
 # =============================================================================
+
 
 class TestWithMocks(unittest.TestCase):
     """Test using mock objects"""
@@ -259,6 +260,7 @@ class TestWithMocks(unittest.TestCase):
 # SECTION: Testing Compile Behavior
 # =============================================================================
 
+
 class TestCompiledStreams(unittest.TestCase):
     """Test compiled stream behavior"""
 
@@ -295,6 +297,7 @@ class TestCompiledStreams(unittest.TestCase):
 # =============================================================================
 # SECTION: Property-Based Testing Ideas
 # =============================================================================
+
 
 class TestPropertyBasedPatterns(unittest.TestCase):
     """Patterns for property-based testing with streams"""
@@ -347,6 +350,7 @@ class TestPropertyBasedPatterns(unittest.TestCase):
 # SECTION: Integration Test Example
 # =============================================================================
 
+
 class TestEndToEndPipeline(unittest.TestCase):
     """Integration tests for complete pipelines"""
 
@@ -361,9 +365,7 @@ class TestEndToEndPipeline(unittest.TestCase):
         valid_readings = []
 
         source = Stream()
-        source.map(lambda r: r["temperature"]) \
-              .filter(lambda t: -50 <= t <= 100) \
-              .sink(valid_readings.append)
+        source.map(lambda r: r["temperature"]).filter(lambda t: -50 <= t <= 100).sink(valid_readings.append)
 
         for reading in sensor_readings:
             source.emit(reading)
