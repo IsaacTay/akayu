@@ -4,6 +4,7 @@ Before, `s.map(async_fn)` silently emitted un-awaited coroutine objects.
 """
 
 import functools
+import inspect
 
 import pytest
 
@@ -21,6 +22,15 @@ async def async_gen_fn(x):
 class Service:
     async def fetch(self, x):
         return x
+
+
+def _marked(x):
+    return x
+
+
+# A plain function marked as a coroutine function: the native fast path must
+# defer it to inspect rather than wave it through.
+inspect.markcoroutinefunction(_marked)
 
 
 def _ops(fn):
@@ -46,6 +56,7 @@ ASYNC_CALLABLES = {
     "async generator function": async_gen_fn,
     "partial of async": functools.partial(async_fn),
     "bound async method": Service().fetch,
+    "markcoroutinefunction": _marked,
 }
 
 
@@ -70,6 +81,7 @@ class Callable:
 SYNC_CALLABLES = {
     "lambda": lambda x: x,
     "builtin": abs,
+    "bound builtin method": {3: 3}.get,
     "partial": functools.partial(max, 0),
     "callable object": Callable(),
 }

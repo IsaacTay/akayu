@@ -1,5 +1,4 @@
 import builtins as _builtins
-import contextlib
 import contextvars
 import dis
 import functools
@@ -135,7 +134,30 @@ _KNOWN_BUILTINS = {
 _UNRESOLVABLE = object()  # sentinel
 
 
-def _resolve_value(instr, func):
+class _Bindings:
+    """The function under analysis, plus every value resolved from it.
+
+    The analyzer passes this where it used to pass the function; the recorded
+    values decide whether a cached result applies to another function with
+    the same code (see _analyze_lambda).
+    """
+
+    __slots__ = ("deps", "func")
+
+    def __init__(self, func):
+        self.func = func
+        self.deps = []
+
+
+def _resolve_value(instr, ctx):
+    """Resolve a value from an instruction + the function under analysis,
+    recording it as a dependency of the result."""
+    value = _resolve(instr, ctx.func)
+    ctx.deps.append((instr, value))
+    return value
+
+
+def _resolve(instr, func):
     """Resolve a value from an instruction + function context.
 
     instr is a (opname, argval) tuple from _fast_extract.
@@ -569,10 +591,17 @@ _CO_ASYNC_GENERATOR = 0x200
 _CO_VARARGS = 0x04
 _CO_VARKEYWORDS = 0x08
 
-# Cache for _analyze_lambda results, weakly keyed by the function object so an
-# entry dies with its function. (Keying by id(func) let a new function that
-# landed at a freed function's address pick up the old function's analysis.)
-_analysis_cache = weakref.WeakKeyDictionary()
+# _analyze_lambda results by code object, each with the values the analysis
+# resolved from closures and globals. Another function with the same code (a
+# request handler's fresh lambdas) reuses a result only if those resolve to the
+# very same objects. Keyed by id(code) for speed (a WeakKeyDictionary hashes and
+# compares code objects by value); each entry holds a weak reference that must
+# still point at the same code, since a freed object's id can be reused, and
+# whose callback removes the entry when the code dies.
+_analysis_cache = {}
+# Results kept per code object: a closure over per-call values (a threshold, a
+# lookup table) adds one per distinct binding, so the oldest are dropped.
+_MAX_RESULTS_PER_CODE = 8
 
 # Maximum bytecode length for analyzable patterns.
 # The most complex analyzable pattern (compound and/or with chained sub-expressions)
@@ -599,19 +628,37 @@ def _analyze_lambda(func):
     code = getattr(func, "__code__", None)
     if code is None:
         return None
-    try:
-        return _analysis_cache[func]
-    except KeyError:
-        pass
-    except TypeError:  # not weak-referenceable or not hashable: skip the cache
-        return _analyze_code(func, code)
-    result = _analyze_code(func, code)
-    with contextlib.suppress(TypeError):
-        _analysis_cache[func] = result
+    results = _cached_results(code)
+    for deps, result in results:
+        if _bindings_match(deps, func):
+            return result
+    ctx = _Bindings(func)
+    result = _analyze_code(func, code, ctx)
+    results.append((tuple(ctx.deps), result))
+    del results[:-_MAX_RESULTS_PER_CODE]
     return result
 
 
-def _analyze_code(func, code):
+def _cached_results(code):
+    """The cached (deps, result) list for `code`, created empty if needed."""
+    key = id(code)
+    entry = _analysis_cache.get(key)
+    if entry is None or entry[0]() is not code:
+        entry = (weakref.ref(code, lambda _, key=key: _analysis_cache.pop(key, None)), [])
+        _analysis_cache[key] = entry
+    return entry[1]
+
+
+def _bindings_match(deps, func):
+    # A loop, not all(<genexpr>): this runs on every compile() and the
+    # generator costs more than the (usually empty) check.
+    for instr, value in deps:  # noqa: SIM110
+        if _resolve(instr, func) is not value:
+            return False
+    return True
+
+
+def _analyze_code(func, code, ctx):
     """Uncached body of _analyze_lambda."""
     # Must be single-arg, no *args/**kwargs
     if code.co_argcount != 1:
@@ -645,7 +692,7 @@ def _analyze_code(func, code):
     # For compound expressions, each sub-expression can reference x once
     # We'll let the recursive analyzer handle this naturally
 
-    return _analyze_expr(clean, func)
+    return _analyze_expr(clean, ctx)
 
 
 def _reject_async(func, op):

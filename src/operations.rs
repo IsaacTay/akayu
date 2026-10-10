@@ -21,11 +21,15 @@ fn wrap_func(
     kwargs: Option<Py<PyDict>>,
     builder: &Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let args_opt = if args.bind(py).is_empty() {
-        None
-    } else {
-        Some(args)
-    };
+    let no_args = args.bind(py).is_empty();
+    // _build_map_func returns func itself when there's nothing to bind: skip the call.
+    if no_args
+        && kwargs.as_ref().is_none_or(|k| k.bind(py).is_empty())
+        && builder.is(get_build_map_func()?)
+    {
+        return Ok(func);
+    }
+    let args_opt = if no_args { None } else { Some(args) };
     builder.call1(py, (func, args_opt, kwargs))
 }
 
