@@ -335,9 +335,10 @@ impl Stream {
         let mut head = start_py.borrow_mut(py);
         head.name = steps
             .iter()
-            .map(|step| step.name.as_str())
+            .map(|step| &*step.name)
             .collect::<Vec<_>>()
-            .join(" -> ");
+            .join(" -> ")
+            .into();
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
         drop(head);
@@ -383,7 +384,7 @@ impl Stream {
             let mut node = node_py.borrow_mut(py);
 
             // 1. Detect builtin fast-path (may mutate logic via "unwrap" on Map nodes)
-            node.builtin_op = detect_builtin_for_logic(py, &mut node.logic).map(Box::new);
+            node.builtin_op = detect_builtin_for_logic(py, &mut node.logic);
 
             // 2. Detect flush targets (Sink nodes calling .flush() on Collect nodes)
             if let NodeLogic::Sink { ref func } = node.logic
@@ -642,7 +643,7 @@ impl Stream {
                     include_delimiter: true,
                     pre_buffer_chain,
                 }));
-                chunk_node.name = format!("chunk_by[fused]({})", filter_name);
+                chunk_node.name = format!("chunk_by[fused]({})", filter_name).into();
                 chunk_node.source_location = filter_source;
                 chunk_node.downstreams = collect_downstreams.into();
             }
