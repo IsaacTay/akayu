@@ -52,6 +52,10 @@ independent of machine load:
   idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
 - `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary
   operator), `max(acc, x)`, `min(acc, x)`: 27% less per item, 50% less in batches.
+- `compile()` turns `sink(lst.append)` on a list into a direct append (2-5% per item), and when
+  it proves the branches below a branch point independent (native steps only, each branch
+  appending to its own list), `emit_batch()` gives each branch the whole batch: 39% less per
+  item when splitting a stream into lists.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
 - 45% less memory per node (565 -> 309 bytes; compiled 518 -> 304); `compile()` frees the nodes

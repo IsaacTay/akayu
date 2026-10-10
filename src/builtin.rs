@@ -320,9 +320,19 @@ fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<Arc<Builti
 }
 
 /// Detect builtin fast-path for a Sink function (no extra args).
-fn detect_sink_builtin(func: &Py<PyAny>) -> Option<BuiltinOp> {
+fn detect_sink_builtin(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
     if get_builtin_print().is_ok_and(|b| func.is(b)) {
         return Some(BuiltinOp::Print);
+    }
+    // lst.append on an exact list (a subclass may override append)
+    // SAFETY: GIL held; a type check on a live object.
+    if unsafe { pyo3::ffi::PyCFunction_Check(func.as_ptr()) } != 0 {
+        let func = func.bind(py);
+        let owner = func.getattr_opt(pyo3::intern!(py, "__self__")).ok()??;
+        let name = func.getattr_opt(pyo3::intern!(py, "__name__")).ok()??;
+        if owner.is_exact_instance_of::<pyo3::types::PyList>() && name.eq("append").ok()? {
+            return Some(BuiltinOp::ListAppend(owner.unbind()));
+        }
     }
     None
 }
@@ -339,7 +349,7 @@ pub(crate) fn detect_builtin_for_logic(
         NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
         NodeLogic::ChunkBy(chunk) => detect_filter_builtin(py, &chunk.predicate),
         NodeLogic::ExtractBetween(_) => None,
-        NodeLogic::Sink { func } => detect_sink_builtin(func).map(Arc::new),
+        NodeLogic::Sink { func } => detect_sink_builtin(py, func).map(Arc::new),
         NodeLogic::Accumulate {
             func,
             returns_state: false,

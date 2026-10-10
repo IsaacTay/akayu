@@ -9,7 +9,7 @@ use crate::builtin::{
     detect_flush_target_from_func, extract_vectorcall_for_logic,
 };
 use crate::lock::Downstream;
-use crate::node::{ChainNode, ChunkByState, NodeLogic};
+use crate::node::{BuiltinOp, ChainNode, ChunkByState, NodeLogic};
 use crate::{Stream, StreamPtr};
 
 impl Stream {
@@ -86,6 +86,31 @@ impl Stream {
             node.needs_lock = false;
             for d in &mut node.downstreams {
                 d.lock = Arc::clone(&lock);
+            }
+        }
+    }
+
+    /// Mark branch points whose branches compile() can prove independent, so
+    /// emit_batch can give each branch the whole batch instead of passing
+    /// items through the branches one at a time.
+    ///
+    /// Branches are independent when every node in them is a native step (a
+    /// recognised map/filter/accumulate operation, or a sink appending to a
+    /// list): no Python function runs, so the only effects are the appends,
+    /// and each list is appended to by one branch only. No node may have a
+    /// second parent, a flush/emit shortcut, or a lock. The order of work
+    /// across branches is then unobservable, except through the data's own
+    /// dunder methods, or which items a failing batch had processed.
+    pub(crate) fn mark_independent_fanouts(&mut self, py: Python, all_nodes: &[Py<Self>]) {
+        self.batch_fanout = !self.needs_lock && independent_branches(py, &self.downstreams);
+        for node_py in all_nodes {
+            let Ok(node) = node_py.try_borrow(py) else {
+                continue;
+            };
+            let independent = !node.needs_lock && independent_branches(py, &node.downstreams);
+            drop(node);
+            if let Ok(mut node) = node_py.try_borrow_mut(py) {
+                node.batch_fanout = independent;
             }
         }
     }
@@ -725,5 +750,61 @@ impl Stream {
                     .retain(|d| d.as_ptr() as usize != filter_ptr);
             }
         }
+    }
+}
+
+/// See `Stream::mark_independent_fanouts`.
+fn independent_branches(py: Python, edges: &[Downstream]) -> bool {
+    let mut lists = HashSet::new();
+    edges.len() >= 2
+        && edges
+            .iter()
+            .all(|d| native_subtree(py, &d.node, &mut lists))
+}
+
+fn native_subtree(py: Python, node_py: &Py<Stream>, lists: &mut HashSet<usize>) -> bool {
+    let Ok(node) = node_py.try_borrow(py) else {
+        return false;
+    };
+    if node.needs_lock
+        || node.flush_target.is_some()
+        || node.emit_target.is_some()
+        || node.parents.lock().unwrap().len() != 1
+    {
+        return false;
+    }
+    let native = match &node.logic {
+        NodeLogic::Chain { steps } => steps.iter().all(|step| {
+            step.flush_target.is_none()
+                && step.emit_target.is_none()
+                && native_step(&step.logic, step.builtin_op.as_deref(), lists)
+        }),
+        logic => native_step(logic, node.builtin_op.as_deref(), lists),
+    };
+    native
+        && node
+            .downstreams
+            .iter()
+            .all(|d| native_subtree(py, &d.node, lists))
+}
+
+/// A step compile() turned into a native operation; sinks must append to a
+/// list no other sink in these branches appends to.
+fn native_step(logic: &NodeLogic, op: Option<&BuiltinOp>, lists: &mut HashSet<usize>) -> bool {
+    use BuiltinOp::{AccumBinOp, AccumBinOpConst, AccumMax, AccumMin, ListAppend, Print};
+    match (logic, op) {
+        (NodeLogic::Map { .. } | NodeLogic::Filter { .. }, Some(op)) => !matches!(
+            op,
+            Print | ListAppend(_) | AccumBinOp(_) | AccumBinOpConst(..) | AccumMax | AccumMin
+        ),
+        (
+            NodeLogic::Accumulate {
+                returns_state: false,
+                ..
+            },
+            Some(AccumBinOp(_) | AccumBinOpConst(..) | AccumMax | AccumMin),
+        ) => true,
+        (NodeLogic::Sink { .. }, Some(ListAppend(list))) => lists.insert(list.as_ptr() as usize),
+        _ => false,
     }
 }

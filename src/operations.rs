@@ -62,6 +62,7 @@ impl Stream {
                 cached_vectorcall: None,
                 compiled_chainable,
                 compiled_filter_fast,
+                batch_fanout: false,
                 flush_target: None,
                 emit_target: None,
                 flushing: false,
@@ -231,6 +232,7 @@ impl Stream {
             cached_vectorcall: None,
             compiled_chainable: false,
             compiled_filter_fast: false,
+            batch_fanout: false,
             flush_target: None,
             emit_target: None,
             flushing: false,
@@ -1237,6 +1239,7 @@ impl Stream {
         let all_nodes = this.optimize_topology_full(py, source_py_ptr);
 
         this.freeze_all(py, &all_nodes);
+        this.mark_independent_fanouts(py, &all_nodes);
 
         drop(this);
         Ok(slf.clone().unbind())
