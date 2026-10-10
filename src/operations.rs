@@ -7,11 +7,11 @@ use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{
     capture_source_location, check_not_compiled, get_build_map_func, get_build_starmap_func,
-    get_func_name, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
-    get_prefetch_state_class, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
+    get_func_name, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
 use crate::lock::{Downstream, NodeLock};
 use crate::node::NodeLogic;
+use crate::prefetch::{PrefetchKind, Prefetcher};
 
 /// Wrap a function with additional args/kwargs using the build_map_func helper.
 fn wrap_func(
@@ -97,9 +97,7 @@ impl Stream {
             NodeLogic::Collect { .. }
                 | NodeLogic::ChunkBy { .. }
                 | NodeLogic::ExtractBetween { .. }
-                | NodeLogic::PrefetchMap { .. }
-                | NodeLogic::PrefetchFilter { .. }
-                | NodeLogic::PrefetchBatchMap { .. }
+                | NodeLogic::Prefetched { .. }
         );
         let is_sink = match &self.logic {
             NodeLogic::Sink { .. } => true,
@@ -141,17 +139,11 @@ impl Stream {
                 buffer.clear();
                 *inside = false;
             }
-            NodeLogic::PrefetchMap { state, .. }
-            | NodeLogic::PrefetchFilter { state, .. }
-            | NodeLogic::PrefetchBatchMap { state, .. } => {
-                let results = wrap_error(
-                    py,
-                    state.call_method0(py, "flush"),
-                    &self.name,
-                    &self.source_location,
-                )?;
-                for result in results.bind(py).try_iter()? {
-                    self.propagate(py, result?.into())?;
+            NodeLogic::Prefetched { prefetcher } => {
+                let results =
+                    wrap_error(py, prefetcher.flush(py), &self.name, &self.source_location)?;
+                for result in results {
+                    self.propagate(py, result)?;
                 }
             }
             _ => {}
@@ -197,17 +189,11 @@ impl Stream {
                 buffer.clear();
                 *inside = false;
             }
-            NodeLogic::PrefetchMap { state, .. }
-            | NodeLogic::PrefetchFilter { state, .. }
-            | NodeLogic::PrefetchBatchMap { state, .. } => {
-                let results = wrap_error(
-                    py,
-                    state.call_method0(py, "flush"),
-                    &self.name,
-                    &self.source_location,
-                )?;
-                for result in results.bind(py).try_iter()? {
-                    self.propagate(py, result?.into())?;
+            NodeLogic::Prefetched { prefetcher } => {
+                let results =
+                    wrap_error(py, prefetcher.flush(py), &self.name, &self.source_location)?;
+                for result in results {
+                    self.propagate(py, result)?;
                 }
             }
             _ => {}
@@ -310,11 +296,8 @@ impl Stream {
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
-            let state = get_prefetch_state_class()?.call1(py, (&wrapped_func, size))?;
-            this.logic = NodeLogic::PrefetchMap {
-                func: wrapped_func,
-                size,
-                state,
+            this.logic = NodeLogic::Prefetched {
+                prefetcher: Prefetcher::new(wrapped_func, PrefetchKind::Map, size),
             };
             this.name = format!("prefetch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
@@ -502,11 +485,8 @@ impl Stream {
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
-            let state = get_prefetch_batch_map_state_class()?.call1(py, (&wrapped_func, size))?;
-            this.logic = NodeLogic::PrefetchBatchMap {
-                func: wrapped_func,
-                size,
-                state,
+            this.logic = NodeLogic::Prefetched {
+                prefetcher: Prefetcher::new(wrapped_func, PrefetchKind::BatchMap, size),
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
@@ -574,17 +554,8 @@ impl Stream {
         let wrapped_predicate = wrap_func(py, predicate, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
-            let wrapper_code = "lambda p: lambda x: (p(x), x)";
-            let builtins = py.import("builtins")?;
-            let eval_fn = builtins.getattr("eval")?;
-            let make_wrapper = eval_fn.call1((wrapper_code,))?;
-            let wrapped_pred = make_wrapper.call1((&wrapped_predicate,))?;
-            let state = get_prefetch_filter_state_class()?.call1(py, (&wrapped_pred, size))?;
-
-            this.logic = NodeLogic::PrefetchFilter {
-                predicate: wrapped_pred.unbind(),
-                size,
-                state,
+            this.logic = NodeLogic::Prefetched {
+                prefetcher: Prefetcher::new(wrapped_predicate, PrefetchKind::Filter, size),
             };
             this.name = format!("prefetch_filter({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();

@@ -15,6 +15,8 @@
   `MultiStream.filter()`'s argument is named `predicate`, like `Stream.filter()`.
 - `Stream.update()` / `update_batch()` are internal and renamed `_update()` / `_update_batch()`.
 - numpy and scipy are no longer installed with akayu; it never used them.
+- `prefetch()` functions run in a copy of the caller's `contextvars` context (they used to see
+  the worker thread's), like `par()` branches. The last `par()` branch runs on the calling thread.
 
 ### Added
 
@@ -24,6 +26,24 @@
 - `akayu.__version__`.
 - Faster `compile()` through cached lambda analysis.
 - Linux aarch64 wheels from `just publish`.
+
+### Performance
+
+Measured in instructions per item with `scripts/bench_cost.py` (`just bench-cost`), which is
+independent of machine load:
+
+- `emit()` took a Python `threading.RLock` through by-name method calls: ~3,600 instructions per
+  emit, more than the rest of a short pipeline. A Rust lock replaces it: a map-filter-sink
+  pipeline costs 55% less per item.
+- `par()` and `prefetch()` use a Rust thread pool instead of `ThreadPoolExecutor`: ~95% fewer
+  instructions per item (`par()`: 199,000 -> 7,000).
+- Module-level `union()` and `par()` convergence points lock in Rust instead of through a
+  Python helper per item: `union()` costs 87-92% less per item.
+- `zip()` / `combine_latest()` no longer pack and unpack an `(index, value)` tuple per item:
+  78% / 71% less per item, 65% less in batches.
+- Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
+  lambdas with the same code (a request handler building a pipeline per call).
+- 13% less memory per node.
 
 ### Fixed
 
@@ -36,6 +56,11 @@
 - `from_text_file()` no longer loses lines emitted before the pipeline is attached, or swallows errors.
 - par()/prefetch() per-node locks are released with their node.
 - The type stub matches the runtime API (checked with stubtest), and every documentation example runs.
+- A failed `prefetch()` item raises once; it used to be re-raised by every later `emit()`/`flush()`.
+- Nested `par()` much wider than the thread pool deadlocked (40 outer branches on 16 workers,
+  each waiting on inner branches queued behind the others); it now completes.
+- Nodes created by `zip()`, `union()`, `combine_latest()` and `MultiStream` report the user's
+  source line (in errors and profiles) instead of a line inside akayu.
 
 ## 1.0.0
 

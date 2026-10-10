@@ -90,26 +90,3 @@ impl Deref for Downstream {
         &self.node
     }
 }
-
-/// A callable that runs one `par()` branch on a worker thread: takes the
-/// branch's lock, then updates it. Replaces a Python closure, a weak-keyed
-/// lock lookup and a Python lock per branch per item.
-#[pyclass(frozen)]
-pub(crate) struct BranchUpdate(Downstream);
-
-impl BranchUpdate {
-    pub(crate) fn new(edge: Downstream) -> Self {
-        Self(edge)
-    }
-}
-
-#[pymethods]
-impl BranchUpdate {
-    fn __call__(&self, py: Python, val: Py<PyAny>) -> PyResult<()> {
-        self.0.locked_update(py, val)
-    }
-
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        visit.call(&self.0.node)
-    }
-}

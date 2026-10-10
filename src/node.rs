@@ -45,29 +45,10 @@ pub enum NodeLogic {
     Prefetch {
         size: usize,
     },
-    /// Prefetch map: processes items concurrently while preserving order
-    PrefetchMap {
-        #[allow(dead_code)] // Stored for debugging/inspection
-        func: Py<PyAny>,
-        #[allow(dead_code)] // Stored for debugging/inspection
-        size: usize,
-        state: Py<PyAny>, // Python _PrefetchState object
-    },
-    /// Prefetch filter: filters items concurrently while preserving order
-    PrefetchFilter {
-        #[allow(dead_code)] // Stored for debugging/inspection
-        predicate: Py<PyAny>,
-        #[allow(dead_code)] // Stored for debugging/inspection
-        size: usize,
-        state: Py<PyAny>, // Python _PrefetchState object
-    },
-    /// Prefetch batch_map: processes batches concurrently while preserving order
-    PrefetchBatchMap {
-        #[allow(dead_code)] // Stored for debugging/inspection
-        func: Py<PyAny>,
-        #[allow(dead_code)] // Stored for debugging/inspection
-        size: usize,
-        state: Py<PyAny>, // Python _PrefetchBatchMapState object
+    /// A map, filter or batch_map after prefetch(n): runs its function ahead
+    /// on the thread pool while preserving order.
+    Prefetched {
+        prefetcher: crate::prefetch::Prefetcher,
     },
     /// Compiled chain: a linear segment of chainable nodes extracted at compile time.
     /// Eliminates per-node borrow_mut/drop/propagate overhead by processing all steps

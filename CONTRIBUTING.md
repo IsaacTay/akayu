@@ -156,14 +156,16 @@ together with the quick tests and the documentation checks; run it before submit
     - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas.
     - `node.rs`: the node and builtin-operation types.
     - `gc.rs`: garbage-collection support, so stream graphs are freed.
+    - `lock.rs`: the per-node lock behind `emit()`/`flush()` and shared children.
+    - `pool.rs`, `prefetch.rs`: the thread pool behind `par()` and `prefetch()`.
     - `profiling.rs`, `error.rs`, `helpers.rs`: profiling, errors and shared helpers.
-    - `akayu.py`: Python helpers embedded in the extension (thread pool, lambda analysis); importable as `akayu._helpers`.
+    - `akayu.py`: Python helpers embedded in the extension (lambda analysis, wrappers, profiler); importable as `akayu._helpers`.
 - `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`.
 - `tests/`: the `pytest` suite. Benchmarks (`test_*benchmark*.py`) and `test_memory_leak.py` are skipped by `just test-quick`.
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
 - `docs/`: the documentation site (`mkdocs.yml`); `just docs-check` runs its code blocks.
 - `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
-- `scripts/`: development scripts (Mermaid validation, aarch64 cross-build).
+- `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, aarch64 cross-build).
 - `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
 
 ### Python Package Structure (maturin convention)

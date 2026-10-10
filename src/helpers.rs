@@ -26,13 +26,6 @@ macro_rules! define_py_helper {
 define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(REJECT_ASYNC, get_reject_async);
-define_py_helper!(PARALLEL_EXECUTE, get_parallel_execute);
-define_py_helper!(PREFETCH_STATE_CLASS, get_prefetch_state_class);
-define_py_helper!(PREFETCH_FILTER_STATE_CLASS, get_prefetch_filter_state_class);
-define_py_helper!(
-    PREFETCH_BATCH_MAP_STATE_CLASS,
-    get_prefetch_batch_map_state_class
-);
 define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
 define_py_helper!(BUILTIN_LEN, get_builtin_len);
 define_py_helper!(BUILTIN_STR, get_builtin_str);
@@ -439,17 +432,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
-    let parallel_execute = helpers_module.getattr("_parallel_execute")?;
-    let prefetch_state_class = helpers_module.getattr("_PrefetchState")?;
-    let prefetch_filter_state_class = helpers_module.getattr("_PrefetchFilterState")?;
-    let prefetch_batch_map_state_class = helpers_module.getattr("_PrefetchBatchMapState")?;
 
     let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
-    let _ = PARALLEL_EXECUTE.set(parallel_execute.unbind());
-    let _ = PREFETCH_STATE_CLASS.set(prefetch_state_class.unbind());
-    let _ = PREFETCH_FILTER_STATE_CLASS.set(prefetch_filter_state_class.unbind());
-    let _ = PREFETCH_BATCH_MAP_STATE_CLASS.set(prefetch_batch_map_state_class.unbind());
 
     let profiler_class = helpers_module.getattr("_Profiler")?;
     let _ = PROFILER_CLASS.set(profiler_class.unbind());

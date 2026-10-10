@@ -301,6 +301,31 @@ Benchmark showing minimal overhead when combining:
 | `prefetch(4)` alone     | ~135ms                         |
 | `par()` + `prefetch(4)` | ~136ms                         |
 
+### Context, Errors and Nesting
+
+- Each `par()` branch and each prefetched call runs in a copy of the calling thread's `contextvars` context: values set before `emit()` are visible, and changes made inside don't leak back.
+- The last `par()` branch runs on the calling thread. A thread waiting for its branches or prefetched items runs any of them that no worker has started yet, so nesting `par()` deeper than the pool can't deadlock.
+- `par()` waits for every branch, then raises the error of the first failing branch (in the order the branches were added). A failed prefetched item raises once, from the `emit()` or `flush()` that reaches it; later items carry on.
+- Ctrl+C interrupts a thread that is waiting for branches or prefetched items.
+
+```python
+import contextvars
+
+import akayu
+
+request_id = contextvars.ContextVar("request_id")
+seen = []
+
+source = akayu.Stream()
+p = source.par()
+p.map(lambda x: seen.append(("a", request_id.get())))
+p.map(lambda x: seen.append(("b", request_id.get())))
+
+request_id.set("req-1")
+source.emit(1)
+assert sorted(seen) == [("a", "req-1"), ("b", "req-1")]
+```
+
 ## Flush for Prefetch
 
 When using `prefetch()`, call `flush()` to wait for all in-flight items to complete:
