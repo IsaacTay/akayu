@@ -30,7 +30,14 @@ def _recipes():
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(ROOT)))
 def test_referenced_paths_exist(doc):
     text = doc.read_text()
-    missing = [p for p in PATH_RE.findall(text) if "*" not in p and not (ROOT / p).exists()]
+    # Backticked paths, plus scripts named in python/pytest commands (code blocks).
+    named = PATH_RE.findall(text) + [
+        p
+        for line in text.splitlines()
+        if re.search(r"\b(?:pytest|python)\b", line)
+        for p in re.findall(r"(?:tests|scripts|examples)/[\w./-]+\.py", line)
+    ]
+    missing = [p for p in named if "*" not in p and not (ROOT / p).exists()]
     assert not missing, f"{doc.name} references missing paths: {missing}"
 
 
