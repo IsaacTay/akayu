@@ -23,16 +23,15 @@ test-quick: build
     uv run python -m pytest tests/ -v \
         --ignore=tests/test_benchmark.py \
         --ignore=tests/test_benchmark_split.py \
-        --ignore=tests/test_ops_benchmark.py \
-        --ignore=tests/test_concurrency_benchmark.py \
-        --ignore=tests/test_memory_comparison.py \
         --ignore=tests/test_memory_leak.py \
-        --ignore=tests/test_comparison.py \
-        --ignore=tests/test_compile_benchmark.py
+        --ignore=tests/test_compile_benchmark.py \
+        --ignore=tests/test_lambda_benchmark.py \
+        --ignore=tests/test_vectorcall_benchmark.py
 
 # Run benchmarks only
 bench: build-release
-    uv run python -m pytest tests/test_benchmark.py tests/test_complex_benchmark.py tests/test_compile_benchmark.py -v
+    uv run python -m pytest tests/test_benchmark.py tests/test_benchmark_split.py tests/test_compile_benchmark.py \
+        tests/test_lambda_benchmark.py tests/test_vectorcall_benchmark.py -v
 
 # Run clippy lints
 clippy:
@@ -182,4 +181,4 @@ test-compat:
 # Run backward compatibility tests (Python 3.8) - Standard (Non-Nix)
 # Usage: just test-compat-std
 test-compat-std:
-    uv run --python 3.8 python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_complex_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_ops_benchmark.py --ignore=tests/test_concurrency_benchmark.py --ignore=tests/test_benchmark_split.py
+    uv run --python 3.8 python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_benchmark_split.py --ignore=tests/test_lambda_benchmark.py --ignore=tests/test_vectorcall_benchmark.py

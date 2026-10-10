@@ -66,7 +66,7 @@ fi
 
 # Running all tests might be slow (benchmarks), skip them for compat check
 echo -e "${GREEN}Running tests (skipping benchmarks)...${NC}"
-run_py38 "python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_complex_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_ops_benchmark.py --ignore=tests/test_concurrency_benchmark.py --ignore=tests/test_benchmark_split.py"
+run_py38 "python -m pytest tests/ -v --ignore=tests/test_benchmark.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_benchmark_split.py --ignore=tests/test_lambda_benchmark.py --ignore=tests/test_vectorcall_benchmark.py"
 
 
 echo -e "${GREEN}Success! akayu is compatible with Python 3.8${NC}"
