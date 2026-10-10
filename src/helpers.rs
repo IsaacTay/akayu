@@ -45,6 +45,7 @@ define_py_helper!(OPERATOR_ITEMGETTER, get_operator_itemgetter);
 define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
 define_py_helper!(ANALYZE_LAMBDA, get_analyze_lambda);
+define_py_helper!(ANALYZE_ACCUMULATE, get_analyze_accumulate);
 
 pub(crate) fn resolve_stream_name(
     stream_name: Option<String>,
@@ -442,6 +443,8 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let analyze_lambda = helpers_module.getattr("_analyze_lambda")?;
     let _ = ANALYZE_LAMBDA.set(analyze_lambda.unbind());
+    let analyze_accumulate = helpers_module.getattr("_analyze_accumulate")?;
+    let _ = ANALYZE_ACCUMULATE.set(analyze_accumulate.unbind());
 
     // Cache builtin references for fast-path detection
     let builtins = py.import("builtins")?;

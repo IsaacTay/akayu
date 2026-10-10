@@ -46,6 +46,8 @@ independent of machine load:
   positional ones. `starmap(func)` star-calls natively: 13-17% less.
 - `compile()` also optimizes lambdas with defaulted extra parameters, the `lambda x, k=k:`
   idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
+- `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary
+  operator), `max(acc, x)`, `min(acc, x)`: 27% less per item, 50% less in batches.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
 - 45% less memory per node (565 -> 313 bytes); `compile()` frees the nodes it fuses into chains

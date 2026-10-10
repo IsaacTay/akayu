@@ -26,6 +26,7 @@ use crate::node::{BuiltinOp, ChainNode, ChunkByState, ExtractBetweenState, NodeL
 fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
     match op {
         BuiltinOp::IsInstance(obj)
+        | BuiltinOp::AccumBinOpConst(_, obj)
         | BuiltinOp::Is(obj)
         | BuiltinOp::IsNot(obj)
         | BuiltinOp::ItemGetter(obj)
@@ -69,7 +70,10 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         | BuiltinOp::Tuple
         | BuiltinOp::List
         | BuiltinOp::Set
-        | BuiltinOp::FrozenSet => Ok(()),
+        | BuiltinOp::FrozenSet
+        | BuiltinOp::AccumBinOp(_)
+        | BuiltinOp::AccumMax
+        | BuiltinOp::AccumMin => Ok(()),
     }
 }
 

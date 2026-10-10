@@ -180,6 +180,50 @@ fn star_call(py: Python, func: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<Py<PyAny>>
     .map(Bound::unbind)
 }
 
+/// `a <op> b` through the number protocol, as the `BINARY_OP` bytecode does.
+fn binary_op(py: Python, op: &BinaryOp, a: &Py<PyAny>, b: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    use pyo3::ffi;
+    let (a, b) = (a.as_ptr(), b.as_ptr());
+    // SAFETY: GIL held; both operands are live; each returns a new reference or NULL.
+    let result = unsafe {
+        match op {
+            BinaryOp::Add => ffi::PyNumber_Add(a, b),
+            BinaryOp::Sub => ffi::PyNumber_Subtract(a, b),
+            BinaryOp::Mul => ffi::PyNumber_Multiply(a, b),
+            BinaryOp::TrueDiv => ffi::PyNumber_TrueDivide(a, b),
+            BinaryOp::FloorDiv => ffi::PyNumber_FloorDivide(a, b),
+            BinaryOp::Mod => ffi::PyNumber_Remainder(a, b),
+            BinaryOp::Pow => ffi::PyNumber_Power(a, b, ffi::Py_None()),
+        }
+    };
+    // SAFETY: as above.
+    unsafe { Bound::from_owned_ptr_or_err(py, result) }.map(Bound::unbind)
+}
+
+/// The next accumulate state from a recognised accumulate function, or
+/// `None` for ops that aren't accumulate patterns.
+fn apply_accumulate(
+    py: Python,
+    op: &BuiltinOp,
+    state: &Py<PyAny>,
+    x: &Py<PyAny>,
+) -> Option<PyResult<Py<PyAny>>> {
+    Some(match op {
+        BuiltinOp::AccumBinOp(bin_op) => binary_op(py, bin_op, state, x),
+        BuiltinOp::AccumBinOpConst(bin_op, c) => binary_op(py, bin_op, state, c),
+        // As builtins.max(state, x): x replaces state only if strictly greater.
+        BuiltinOp::AccumMax => x
+            .bind(py)
+            .gt(state.bind(py))
+            .map(|greater| if greater { x } else { state }.clone_ref(py)),
+        BuiltinOp::AccumMin => x
+            .bind(py)
+            .lt(state.bind(py))
+            .map(|less| if less { x } else { state }.clone_ref(py)),
+        _ => return None,
+    })
+}
+
 /// Apply a `BuiltinOp` to a single value, returning the result.
 ///
 /// This is the recursive workhorse for Chain, And, Or, Negate.
@@ -282,23 +326,7 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
         },
 
         // --- Phase 2 variants ---
-        BuiltinOp::BinOp(bin_op, rhs) => unsafe {
-            let result = match bin_op {
-                BinaryOp::Add => pyo3::ffi::PyNumber_Add(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::Sub => pyo3::ffi::PyNumber_Subtract(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::Mul => pyo3::ffi::PyNumber_Multiply(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::TrueDiv => pyo3::ffi::PyNumber_TrueDivide(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::FloorDiv => pyo3::ffi::PyNumber_FloorDivide(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::Mod => pyo3::ffi::PyNumber_Remainder(x.as_ptr(), rhs.as_ptr()),
-                BinaryOp::Pow => {
-                    pyo3::ffi::PyNumber_Power(x.as_ptr(), rhs.as_ptr(), pyo3::ffi::Py_None())
-                }
-            };
-            if result.is_null() {
-                return Err(PyErr::fetch(py));
-            }
-            Ok(Py::from_owned_ptr(py, result))
-        },
+        BuiltinOp::BinOp(bin_op, rhs) => binary_op(py, bin_op, x, rhs),
         BuiltinOp::Compare(cmp_op, rhs) => {
             let r = unsafe {
                 pyo3::ffi::PyObject_RichCompareBool(x.as_ptr(), rhs.as_ptr(), cmp_op.to_ffi())
@@ -391,6 +419,13 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
                 apply_builtin(py, b, x)
             }
         }
+        // Detected only for accumulate nodes, which use apply_accumulate.
+        BuiltinOp::AccumBinOp(_)
+        | BuiltinOp::AccumBinOpConst(..)
+        | BuiltinOp::AccumMax
+        | BuiltinOp::AccumMin => Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "akayu internal error: accumulate op applied to a single value",
+        )),
     }
 }
 
@@ -661,7 +696,11 @@ fn apply_logic_general(
             returns_state,
         } => {
             let t = prof_start(profiling);
-            let result = vectorcall2(py, func, state, &x);
+            let result = ctx
+                .builtin_op
+                .as_deref()
+                .and_then(|op| apply_accumulate(py, op, state, &x))
+                .unwrap_or_else(|| vectorcall2(py, func, state, &x));
             let ft = if let Some(t) = t {
                 t.elapsed()
             } else {
@@ -866,7 +905,11 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = items;
             for x in &mut output {
-                let result = vectorcall2(py, func, state, x);
+                let result = ctx
+                    .builtin_op
+                    .as_deref()
+                    .and_then(|op| apply_accumulate(py, op, state, x))
+                    .unwrap_or_else(|| vectorcall2(py, func, state, x));
                 let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
                 if *returns_state {
                     let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;

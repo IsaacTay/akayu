@@ -721,6 +721,56 @@ def _analyze_code(func, code, ctx):
     return _analyze_expr(_bind_defaults(clean, code), ctx)
 
 
+_ACCUMULATE_OPS = frozenset(("+", "-", "*", "/", "//", "%", "**"))
+
+
+def _analyze_accumulate(func):
+    """Recognise an accumulate function `f(acc, x)` that has a native form.
+
+    Returns ("acc_binop", op) for `acc <op> x`, ("acc_binop_const", op, value)
+    for `acc <op> value`, ("acc_max",) / ("acc_min",) for `max(acc, x)` /
+    `min(acc, x)`, or None. Like the map/filter analysis this runs at compile()
+    time and snapshots closure and global values.
+    """
+    code = getattr(func, "__code__", None)
+    if code is None or code.co_argcount != 2 or code.co_kwonlyargcount:
+        return None
+    if code.co_flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
+        return None
+    if len(code.co_code) > _MAX_BYTECODE_LEN:
+        return None
+    clean = _clean_instructions(func)
+    if not clean or len(clean) > 6:
+        return None
+    acc, item = code.co_varnames[:2]
+    instrs = []
+    for op, av in clean:
+        if op == "LOAD_FAST_LOAD_FAST":
+            instrs += [("LOAD_FAST", code.co_varnames[av >> 4]), ("LOAD_FAST", code.co_varnames[av & 15])]
+        else:
+            instrs.append((op, av))
+    ops = [op for op, _ in instrs]
+    if ops == ["LOAD_FAST", "LOAD_FAST", "BINARY_OP"] and instrs[2][1] in _ACCUMULATE_OPS:
+        if (instrs[0][1], instrs[1][1]) == (acc, item):
+            return ("acc_binop", instrs[2][1])
+        return None
+    if ops[0::2] == ["LOAD_FAST", "BINARY_OP"] and len(ops) == 3 and instrs[0][1] == acc:
+        value = _resolve(instrs[1], func)
+        if value is not _UNRESOLVABLE and instrs[2][1] in _ACCUMULATE_OPS:
+            return ("acc_binop_const", instrs[2][1], value)
+        return None
+    if ops == ["LOAD_GLOBAL", "LOAD_FAST", "LOAD_FAST", "CALL"] and instrs[3][1] == 2:
+        if (instrs[1][1], instrs[2][1]) != (acc, item):
+            return None
+        # The global as the function sees it: its module first, then builtins.
+        fn = func.__globals__.get(instrs[0][1], getattr(_builtins, instrs[0][1], None))
+        if fn is _builtins.max:
+            return ("acc_max",)
+        if fn is _builtins.min:
+            return ("acc_min",)
+    return None
+
+
 def _reject_async(func, op):
     """Raise TypeError for async callables: akayu never awaits coroutines."""
     if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
