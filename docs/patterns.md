@@ -24,7 +24,11 @@ print(results)  # [6, 8, 10, 12, 14, 16, 18]
 
 Branch to multiple consumers with `par()`:
 
+<!--pytest.mark.skip-->
+
 ```python
+import akayu
+
 source = akayu.Stream()
 
 # Fan out to three independent sinks
@@ -41,6 +45,8 @@ source.compile()
 Running aggregation with `accumulate()`:
 
 ```python
+import akayu
+
 source = akayu.Stream()
 
 # Running sum
@@ -59,17 +65,19 @@ source.emit_batch([1, 2, 3, 4, 5])
 Use `union()` to inject test data without modifying your pipeline:
 
 ```python
-# Your pipeline
+import akayu
+
+
+def build(source):
+    """Build the pipeline on any source, so tests can use a fresh one."""
+    return source.map(lambda x: x * 2).filter(lambda x: x > 2)
+
+
+# In a test: build on a fresh source, collect the output, assert on it
 source = akayu.Stream()
-pipeline = source.map(process).filter(validate).sink(results)
-
-# Test injection point via union
-test_source = akayu.Stream()
-test_pipeline = pipeline.union(test_source)
-
-# Test with synthetic data
-test_source.emit_batch(test_data)
-assert results == expected
+results = build(source).to_list()
+source.emit_batch([1, 2, 3])
+assert results == [4, 6]
 ```
 
 ## Injecting Data Midway (The "Side-Door" Pattern)
@@ -108,20 +116,24 @@ import akayu
 main_source = akayu.Stream(name="main")
 debug_source = akayu.Stream(name="debug")
 
-# Standard pipeline flow
-pipeline = main_source.map(validate_data)
+# Standard pipeline flow: validation drops negative values
+pipeline = main_source.filter(lambda x: x >= 0)
 
 # Merge debug source before the expensive processing step
-# Both valid main data AND debug data will flow into process_data
-processing = pipeline.union(debug_source).map(process_data).sink(print)
+# Both valid main data AND debug data will flow into the processing step
+processed = []
+pipeline.union(debug_source).map(lambda x: x * 10).sink(processed.append)
 
 main_source.compile()
 
 # Normal operation
-main_source.emit(user_data)
+main_source.emit(5)
+main_source.emit(-3)  # rejected by validation
 
 # Test/Debug operation (skips validation)
-debug_source.emit(test_vector)
+debug_source.emit(-1)
+
+assert processed == [50, -10]
 ```
 
 ## Concurrency Strategies
@@ -132,8 +144,8 @@ Choosing between `par()` and `prefetch()` depends on your bottleneck.
 
 Use `prefetch()` when your pipeline is bound by latency (waiting for external resources) rather than CPU work.
 
-*   **Best For**: API calls, Database queries, File downloads.
-*   **Pros**: Simple syntax, strictly preserves order, controls concurrency limit.
+- **Best For**: API calls, Database queries, File downloads.
+- **Pros**: Simple syntax, strictly preserves order, controls concurrency limit.
 
 ```mermaid
 flowchart LR
@@ -142,7 +154,11 @@ flowchart LR
     M --> Sink:::sink
 ```
 
+<!--pytest.mark.skip-->
+
 ```python
+import akayu
+
 source = akayu.Stream()
 # Keep 4 requests in flight at once
 source.prefetch(4).map(requests.get).sink(save_response)
@@ -152,7 +168,7 @@ source.prefetch(4).map(requests.get).sink(save_response)
 
 Use `par()` combined with `zip()` or `union()` when you need to perform multiple independent analyses on the same data item.
 
-*   **Best For**: Multi-model inference, enriching data from multiple sources.
+- **Best For**: Multi-model inference, enriching data from multiple sources.
 
 ```mermaid
 flowchart TD
@@ -170,16 +186,25 @@ flowchart TD
 ```
 
 ```python
+import akayu
+
 source = akayu.Stream()
 p = source.par()
 
 # Independent checks running in parallel
-risk = p.map(check_risk)
-fraud = p.map(check_fraud)
-compliance = p.map(check_compliance)
+risk = p.map(lambda order: order["amount"] > 1000)
+fraud = p.map(lambda order: order["country"] not in {"US", "CA"})
+compliance = p.map(lambda order: "id" in order)
 
 # Wait for all 3 to finish, then combine results
-akayu.zip(risk, fraud, compliance).map(make_decision).sink(print)
+decisions = []
+akayu.zip(risk, fraud, compliance).map(
+    lambda checks: "review" if checks[0] or checks[1] or not checks[2] else "approve"
+).sink(decisions.append)
+
+source.emit({"id": 1, "amount": 50, "country": "US"})
+source.emit({"id": 2, "amount": 5000, "country": "US"})
+assert decisions == ["approve", "review"]
 ```
 
 ## Batch Processing Integration
@@ -195,7 +220,11 @@ flowchart LR
     B --> Sink:::sink
 ```
 
+<!-- pytest-codeblocks:importorskip(numpy) -->
+
 ```python
+import akayu
+
 import numpy as np
 
 source = akayu.Stream()
@@ -205,10 +234,12 @@ def vector_op(batch):
     arr = np.array(batch)
     return arr * 2  # Vectorized multiplication
 
-source.batch_map(vector_op).sink(store_results)
+results = []
+source.batch_map(vector_op).sink(results.append)
 
 # Efficiently push chunks of data
-source.emit_batch(large_data_chunk)
+source.emit_batch([0, 1, 2, 3, 4])
+assert [int(x) for x in results] == [0, 2, 4, 6, 8]
 ```
 
 ## Anti-Patterns
@@ -217,12 +248,16 @@ source.emit_batch(large_data_chunk)
 
 Attempting to modify the graph after `compile()` will crash your application.
 
+<!--pytest.mark.xfail(strict=True)-->
+
 ```python
+import akayu
+
 s = akayu.Stream()
-s.map(f1)
+s.map(lambda x: x + 1)
 s.compile()
 
-s.map(f2)  # ❌ RuntimeError: Graph is locked
+s.map(lambda x: x * 2)  # ❌ RuntimeError: Graph is locked
 ```
 
 **Fix**: Define the entire topology before calling compile.
@@ -230,6 +265,8 @@ s.map(f2)  # ❌ RuntimeError: Graph is locked
 ### 2. The Trivial Parallelism
 
 Using `par()` for cheap operations (like simple arithmetic) often makes code *slower* due to thread switching overhead.
+
+<!--pytest.mark.skip-->
 
 ```python
 # ❌ Anti-Pattern: Parallelizing trivial math

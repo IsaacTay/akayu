@@ -4,25 +4,27 @@ akayu is a Rust-powered drop-in replacement for [streamz](https://github.com/pyt
 
 ## Quick Comparison
 
-| streamz | akayu | Notes |
-|---------|-------|-------|
-| `source.emit(x)` | `source.emit(x)` | Same API |
-| `source.map(f)` | `source.map(f)` | Same API |
-| `source.filter(f)` | `source.filter(f)` | Same API |
-| `source.accumulate(f)` | `source.accumulate(f)` | Same API |
-| `source.sink(f)` | `source.sink(f)` | Same API |
-| N/A | `source.compile()` | **New** — enables optimizations |
-| `Stream()` | `akayu.Stream()` | Import via `import akayu` |
-| N/A | `source.emit_batch([...])` | **New** — bulk emit |
-| N/A | `source.batch_map(f)` | **New** — vectorized transform |
-| N/A | `source.prefetch(n)` | **New** — ordered concurrency |
-| `source.par()` | `source.par()` | Same API |
+| streamz                | akayu                      | Notes                           |
+| ---------------------- | -------------------------- | ------------------------------- |
+| `source.emit(x)`       | `source.emit(x)`           | Same API                        |
+| `source.map(f)`        | `source.map(f)`            | Same API                        |
+| `source.filter(f)`     | `source.filter(f)`         | Same API                        |
+| `source.accumulate(f)` | `source.accumulate(f)`     | Same API                        |
+| `source.sink(f)`       | `source.sink(f)`           | Same API                        |
+| N/A                    | `source.compile()`         | **New** — enables optimizations |
+| `Stream()`             | `akayu.Stream()`           | Import via `import akayu`       |
+| N/A                    | `source.emit_batch([...])` | **New** — bulk emit             |
+| N/A                    | `source.batch_map(f)`      | **New** — vectorized transform  |
+| N/A                    | `source.prefetch(n)`       | **New** — ordered concurrency   |
+| `source.par()`         | `source.par()`             | Same API                        |
 
 ## Key Differences
 
 ### 1. Import Style
 
 ```python
+from akayu import Stream
+
 # streamz
 from streamz import Stream
 
@@ -36,17 +38,20 @@ source = akayu.Stream()
 **streamz** has no compile step — graphs are always dynamic.
 
 **akayu** has an optional `compile()` step that:
+
 - Fuses operator chains (`map.map.map` → single fused op)
 - Locks the graph (prevents accidental mutation)
 - Initializes state for accumulate nodes
 
 ```python
+import akayu
+
 source = akayu.Stream()
-source.map(f1).map(f2).map(f3).sink(print)
+source.map(lambda x: x + 1).map(lambda x: x * 2).map(str).sink(print)
 
 # Optional but recommended for production
 source.compile()
-source.emit_batch(data)
+source.emit_batch([1, 2, 3])
 ```
 
 ### 3. emit() to Non-Source Nodes
@@ -55,7 +60,11 @@ source.emit_batch(data)
 
 **akayu** only allows emit to **source nodes** (created with `Stream()`). This is an intentional design choice for clarity.
 
+<!--pytest.mark.skip-->
+
 ```python
+import akayu
+
 # streamz: may work in simple cases
 mapped = source.map(f)
 mapped.emit(x)  # sometimes works, behavior varies
@@ -66,12 +75,12 @@ mapped.emit(x)  # ❌ RuntimeError: Cannot emit to non-source node
 
 ### 4. Performance Characteristics
 
-| Scenario | streamz | akayu |
-|----------|---------|-------|
-| Simple pipeline | Baseline | ~3x faster |
-| Deep chains (10+ ops) | Baseline | ~3.2x faster |
-| Branching/merging | Baseline | ~2.5-3.7x faster |
-| Batch processing | slower | optimized with `emit_batch` |
+| Scenario              | streamz  | akayu                       |
+| --------------------- | -------- | --------------------------- |
+| Simple pipeline       | Baseline | ~3x faster                  |
+| Deep chains (10+ ops) | Baseline | ~3.2x faster                |
+| Branching/merging     | Baseline | ~2.5-3.7x faster            |
+| Batch processing      | slower   | optimized with `emit_batch` |
 
 ## What's the Same
 
@@ -95,6 +104,8 @@ mapped.emit(x)  # ❌ RuntimeError: Cannot emit to non-source node
 ### streamz
 
 ```python
+from akayu import Stream
+
 from streamz import Stream
 
 source = Stream()

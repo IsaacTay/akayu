@@ -12,6 +12,8 @@ A Rust-powered Python library for high-performance stream data processing. Built
 
 ## Quick Install + Hello World
 
+<!--pytest.mark.skip-->
+
 ```bash
 pip install akayu
 ```

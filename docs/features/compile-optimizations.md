@@ -9,7 +9,9 @@ When you call `.compile()`, akayu:
 1. **Freezes the topology** - Prevents further modifications to the stream graph
 1. **Applies chain fusion** - Combines consecutive operations into single nodes
 1. **Marks convergence points** - Identifies nodes that need thread-safe locking for `par()` + `prefetch()` combinations
-<!-- pytest-codeblocks:skip -->
+
+<!--pytest.mark.skip-->
+
 ```python
 source = akayu.Stream()
 source.map(f1).map(f2).filter(p).sink(print)
@@ -34,7 +36,9 @@ When you call `.compile()` on a source stream:
 - Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on *any* node in that graph will raise a `RuntimeError`.
 
 ### Example of Modifying a Compiled Graph
-<!-- pytest-codeblocks:skip -->
+
+<!--pytest.mark.skip-->
+
 ```python
 source = akayu.Stream()
 branch = source.map(lambda x: x + 1)
@@ -266,7 +270,9 @@ flowchart TD
 ```
 
 Each branch after the split is optimized independently (green nodes are fused), but `f1` stays separate.
-<!-- pytest-codeblocks:skip -->
+
+<!--pytest.mark.skip-->
+
 ```python
 source = akayu.Stream()
 branch = source.map(f1)

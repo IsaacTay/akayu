@@ -217,7 +217,7 @@ class Stream:
         Any remaining items in the buffer are emitted on `flush()`.
 
         Args:
-            func: Function that returns True for delimiter items.
+            predicate: Function that returns True for delimiter items.
             include_delimiter: If True, the delimiter item is included
                 in the emitted tuple. If False, it is excluded.
 
