@@ -7,16 +7,21 @@ from typing import (
     Iterable,
     Iterator,
     Sequence,
+    Self,
     TypeVar,
     Union,
+    final,
     overload,
 )
 
-T = TypeVar("T")
-U = TypeVar("U")
+from typing_extensions import disjoint_base
+
+_T = TypeVar("_T")
+_U = TypeVar("_U")
 
 _StreamOrMultiStream = Union["Stream", "MultiStream"]
 
+@final
 class ProfileReport:
     """Profiling report for a pipeline execution.
 
@@ -65,6 +70,7 @@ class ProfileReport:
         """Return string representation of the profile report."""
         ...
 
+@disjoint_base
 class Stream:
     """A reactive stream for processing data through a pipeline of operations.
 
@@ -82,7 +88,7 @@ class Stream:
         ```
     """
 
-    def __init__(self, name: str | None = None) -> None:
+    def __new__(cls, name: str | None = None) -> Self:
         """Create a new source Stream.
 
         Args:
@@ -99,7 +105,7 @@ class Stream:
         """True if the stream graph is compiled (frozen)."""
         ...
 
-    def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
+    def map(self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element in the stream.
 
         Args:
@@ -132,7 +138,7 @@ class Stream:
         """
         ...
 
-    def starmap(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
+    def starmap(self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element, unpacking the element as arguments.
 
         Similar to map, but each element is unpacked with *element before
@@ -150,7 +156,7 @@ class Stream:
         ...
 
     def batch_map(
-        self, func: Callable[[list[Any]], Iterable[T]], *args: Any, stream_name: str | None = None, **kwargs: Any
+        self, func: Callable[[list[Any]], Iterable[_T]], *args: Any, stream_name: str | None = None, **kwargs: Any
     ) -> Stream:
         """Apply a batch-aware function to process entire batches at once.
 
@@ -337,10 +343,10 @@ class Stream:
 
     def accumulate(
         self,
-        func: Callable[[T, Any], T],
-        start: T,
-        returns_state: bool = False,
+        func: Callable[[_T, Any], _T],
+        start: _T,
         *,
+        returns_state: bool = False,
         stream_name: str | None = None,
     ) -> Stream:
         """Accumulate values using a function, emitting each intermediate state.
@@ -604,9 +610,7 @@ class MultiStream:
     @overload
     def __init__(self, streams: Sequence[Stream]) -> None: ...
     @overload
-    def __init__(self, streams: dict[str, Stream]) -> None: ...
-
-    def __init__(self, streams: Sequence[Stream] | dict[str, Stream]) -> None:
+    def __init__(self, streams: dict[str, Stream]) -> None:
         """Create a MultiStream batch from a sequence or dict of Stream instances.
 
         Args:
@@ -635,9 +639,7 @@ class MultiStream:
     @overload
     def __getitem__(self, key: slice) -> MultiStream: ...
     @overload
-    def __getitem__(self, key: str) -> Stream: ...
-
-    def __getitem__(self, key: int | slice | str) -> Stream | MultiStream:
+    def __getitem__(self, key: str) -> Stream:
         """Get stream(s) by index, slice, or key.
 
         In list mode: supports int and slice only. str raises TypeError.
@@ -702,7 +704,7 @@ class MultiStream:
         """Return string representation."""
         ...
 
-    def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+    def map(self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
         """Apply a map to each stream in the batch."""
         ...
 
@@ -717,11 +719,13 @@ class MultiStream:
         """Apply a sink to each stream in the batch."""
         ...
 
-    def starmap(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+    def starmap(self, func: Callable[..., _T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
         """Apply a starmap to each stream in the batch."""
         ...
 
-    def accumulate(self, func: Callable[[T, Any], T], start: T, returns_state: bool = False, *, stream_name: str | None = None, **kwargs: Any) -> MultiStream:
+    def accumulate(
+        self, func: Callable[[_T, Any], _T], start: _T, *, returns_state: bool = False, stream_name: str | None = None
+    ) -> MultiStream:
         """Apply an accumulate to each stream in the batch."""
         ...
 
@@ -734,7 +738,7 @@ class MultiStream:
         ...
 
     def batch_map(
-        self, func: Callable[[list[Any]], Iterable[T]], *args: Any,
+        self, func: Callable[[list[Any]], Iterable[_T]], *args: Any,
         stream_name: str | None = None, **kwargs: Any,
     ) -> MultiStream:
         """Apply a batch_map to each stream in the batch."""
@@ -750,11 +754,6 @@ class MultiStream:
         """Apply chunks_between to each stream in the batch."""
         ...
 
-    @overload
-    def to_list(self) -> list[list[Any]]: ...
-    @overload
-    def to_list(self) -> dict[str, list[Any]]: ...
-
     def to_list(self) -> list[list[Any]] | dict[str, list[Any]]:
         """Collect each stream into a list.
 
@@ -762,11 +761,6 @@ class MultiStream:
         In dict mode: returns dict of lists.
         """
         ...
-
-    @overload
-    def to_set(self) -> list[set[Any]]: ...
-    @overload
-    def to_set(self) -> dict[str, set[Any]]: ...
 
     def to_set(self) -> list[set[Any]] | dict[str, set[Any]]:
         """Collect each stream into a set.
@@ -851,11 +845,9 @@ class MultiStream:
         ...
 
 @overload
-def union(*streams: Stream) -> Stream: ...
+def union(*streams: Stream) -> Stream: ...  # type: ignore[overload-overlap]
 @overload
-def union(*streams: _StreamOrMultiStream) -> MultiStream: ...
-
-def union(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
+def union(*streams: _StreamOrMultiStream) -> MultiStream:
     """Merge multiple streams into one with broadcasting support.
 
     Requires at least two streams.
@@ -873,17 +865,12 @@ def union(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
     ...
 
 @overload
-def combine_latest(*streams: Stream, emit_on: Stream | list[Stream] | None = None) -> Stream: ...
+def combine_latest(*streams: Stream, emit_on: Stream | list[Stream] | None = None) -> Stream: ...  # type: ignore[overload-overlap]
 @overload
 def combine_latest(
     *streams: _StreamOrMultiStream,
     emit_on: _StreamOrMultiStream | list[_StreamOrMultiStream] | None = None,
-) -> MultiStream: ...
-
-def combine_latest(
-    *streams: _StreamOrMultiStream,
-    emit_on: _StreamOrMultiStream | list[_StreamOrMultiStream] | None = None,
-) -> Stream | MultiStream:
+) -> MultiStream:
     """Combine the latest values from multiple streams with broadcasting support.
 
     Requires at least two streams.
@@ -903,11 +890,9 @@ def combine_latest(
     ...
 
 @overload
-def zip(*streams: Stream) -> Stream: ...
+def zip(*streams: Stream) -> Stream: ...  # type: ignore[overload-overlap]
 @overload
-def zip(*streams: _StreamOrMultiStream) -> MultiStream: ...
-
-def zip(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
+def zip(*streams: _StreamOrMultiStream) -> MultiStream:
     """Zip multiple streams together with broadcasting support.
 
     Requires at least two streams.
@@ -924,35 +909,65 @@ def zip(*streams: _StreamOrMultiStream) -> Stream | MultiStream:
     """
     ...
 
-def to_text_file(
-    stream: Stream,
-    filename: str,
-    mode: str = "a",
-    encoding: str = "utf-8",
-) -> Stream:
-    """Write stream elements to a text file.
+def to_text_file(data: Any, path: str) -> None:
+    """Append `str(data)` and a newline to a file, creating it if needed.
 
-    Each element is converted to a string and written as a line.
+    Meant to be used as a sink::
+
+        source.sink(akayu.to_text_file, path="output.txt")
 
     Args:
-        stream: Source stream.
-        filename: Path to output file.
-        mode: File mode ('w' for write, 'a' for append). Default 'a'.
-        encoding: File encoding. Default 'utf-8'.
-
-    Returns:
-        A new Stream (for chaining).
+        data: The item to write.
+        path: The file to append to.
     """
     ...
 
-def from_text_file(filename: str, encoding: str = "utf-8") -> Stream:
-    """Create a stream that reads lines from a text file.
+class TextFileSource(Stream):
+    """A source Stream that emits the lines of a text file.
+
+    Created by `from_text_file()`. Build the pipeline first, then call
+    `start()`: lines are read in a background thread and emitted in order,
+    without their line endings. `join()` waits for the last line and
+    re-raises any error from reading the file or from the pipeline.
+    """
+
+    path: str
+    interval: float | None
+
+    def __new__(cls, path: str, interval: float | None = None) -> Self: ...
+    def __init__(self, path: str, interval: float | None = None) -> None: ...
+    def start(self) -> Self:
+        """Start reading the file in a background thread. Returns self."""
+        ...
+
+    def join(self, timeout: float | None = None) -> None:
+        """Wait until every line has been emitted, re-raising any error."""
+        ...
+
+def from_text_file(path: str, interval: float | None = None) -> TextFileSource:
+    """Create a source Stream that emits the lines of a text file.
+
+    Nothing is read until `start()` is called, so build the pipeline first::
+
+        source = akayu.from_text_file("data.txt")
+        source.map(str.upper).sink(print)
+        source.start().join()
 
     Args:
-        filename: Path to input file.
-        encoding: File encoding. Default 'utf-8'.
-
-    Returns:
-        A new Stream. Call emit(None) to trigger reading the file.
+        path: The file to read (UTF-8).
+        interval: Optional delay in seconds between emitting lines. The file
+            is read once; lines appended later are not picked up.
     """
     ...
+
+__all__ = [
+    "MultiStream",
+    "ProfileReport",
+    "Stream",
+    "TextFileSource",
+    "combine_latest",
+    "from_text_file",
+    "to_text_file",
+    "union",
+    "zip",
+]

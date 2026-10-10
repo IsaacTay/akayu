@@ -1,16 +1,12 @@
 //! Python FFI helpers and utility functions.
 
 use pyo3::prelude::*;
-use pyo3::types::PyString;
 use std::ffi::CString;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::sync::OnceLock;
-use std::thread;
-use std::time::Duration;
 
 use crate::error::StreamError;
-use crate::{NodeLogic, Stream};
 
 /// Defines a static Python helper reference and its getter function.
 macro_rules! define_py_helper {
@@ -306,109 +302,6 @@ pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
 
     writeln!(file, "{output}")?;
     Ok(())
-}
-
-#[pyfunction]
-#[pyo3(signature = (path, interval=None))]
-/// Create a Stream that emits lines from a text file.
-///
-/// Reads the file line by line in a background thread and emits each line
-/// as a string to the returned stream. The file is watched and re-watched
-/// if an interval is specified.
-///
-/// # Arguments
-///
-/// * `path` - The file path to read from.
-/// * `interval` - Optional delay in seconds between emitting lines. If None,
-///   the file is read once and the stream closes. If specified, the file
-///   is watched and new lines are emitted as they appear.
-///
-/// # Returns
-///
-/// A Stream that will emit each line from the file.
-///
-/// # Examples
-///
-/// ```python
-/// import akayu
-/// # Read file once
-/// source = akayu.from_text_file("data.txt")
-/// result = []
-/// source.sink(result.append)
-/// # result contains all lines from data.txt
-///
-/// # Watch file for changes
-/// source = akayu.from_text_file("log.txt", interval=0.5)
-/// source.sink(print)  # prints new lines as they appear
-/// ```
-pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResult<Py<Stream>> {
-    let source_location = capture_source_location(py);
-    let stream = Py::new(
-        py,
-        Stream {
-            logic: NodeLogic::Source,
-            downstreams: Vec::new(),
-            parents: std::sync::Mutex::new(Vec::new()),
-            name: "file_source".to_string(),
-            frozen: false,
-            needs_lock: false,
-            par_branches_marked: false,
-            compiled: false,
-            source_location,
-            builtin_op: None,
-            cached_vectorcall: None,
-            compiled_chainable: false,
-            compiled_filter_fast: false,
-            compiled_downstream_ptrs: Vec::new(),
-            flush_target: None,
-            emit_target: None,
-            flushing: false,
-            emitting: std::sync::atomic::AtomicBool::new(false),
-            emit_lock: py.import("threading").unwrap().getattr("RLock").unwrap().call0().unwrap().unbind(),
-            convergence_checked: false,
-        },
-    )?;
-    let stream_clone = stream.clone_ref(py);
-
-    thread::spawn(move || {
-        // Wrap entire thread in Python::attach so stream_clone drops with GIL held
-        Python::attach(move |py| {
-            // Open file with GIL released
-            let file = match py.detach(|| std::fs::File::open(&path)) {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("Error opening file {path}: {e}");
-                    return;
-                }
-            };
-            let mut reader = BufReader::new(file);
-            let mut line_buf = String::new();
-
-            loop {
-                line_buf.clear();
-                // Read line with GIL released
-                let bytes_read = py.detach(|| reader.read_line(&mut line_buf));
-
-                match bytes_read {
-                    Ok(0) | Err(_) => break, // EOF or error
-                    Ok(_) => {
-                        let text = line_buf.trim_end_matches('\n');
-                        if let Ok(s) = stream_clone.try_borrow_mut(py) {
-                            let py_str = PyString::new(py, text);
-                            let _ = s.emit(py, py_str.into());
-                        }
-
-                        if let Some(delay) = interval {
-                            py.detach(|| thread::sleep(Duration::from_secs_f64(delay)));
-                        }
-                    }
-                }
-            }
-            // stream_clone dropped here with GIL held
-        });
-    });
-
-    Ok(stream)
 }
 
 /// Initialize Python helper functions from embedded Python code.

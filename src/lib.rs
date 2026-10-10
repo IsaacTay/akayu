@@ -27,7 +27,7 @@ mod profiling;
 
 // Re-exports
 pub use combinators::{combine_latest, union, zip};
-pub use helpers::{from_text_file, to_text_file};
+pub use helpers::to_text_file;
 pub use node::{BuiltinOp, NodeLogic};
 
 /// A raw pointer to a downstream `Stream`, cached at freeze time to bypass
@@ -123,7 +123,6 @@ fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Stream>()?;
     m.add_class::<profiling::ProfileReport>()?;
     m.add_function(wrap_pyfunction!(to_text_file, m)?)?;
-    m.add_function(wrap_pyfunction!(from_text_file, m)?)?;
     m.add_function(wrap_pyfunction!(union, m)?)?;
     m.add_function(wrap_pyfunction!(combine_latest, m)?)?;
     m.add_function(wrap_pyfunction!(zip, m)?)?;

@@ -1,0 +1,3 @@
+# The compiled extension module is an implementation detail: its public API is
+# re-exported from, and typed in, python/akayu/__init__.pyi.
+akayu.akayu

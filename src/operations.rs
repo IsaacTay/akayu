@@ -404,7 +404,7 @@ impl Stream {
     ///
     /// * `ValueError` - If `n` is 0.
     /// * `RuntimeError` - If the stream graph is already compiled.
-    #[pyo3(name = "prefetch", signature = (n, stream_name=None))]
+    #[pyo3(name = "prefetch", signature = (n, *, stream_name=None))]
     pub fn prefetch(
         slf: &Bound<'_, Self>,
         py: Python,
@@ -671,7 +671,7 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
-    #[pyo3(signature = (stream_name=None))]
+    #[pyo3(signature = (*, stream_name=None))]
     pub fn flatten(
         slf: &Bound<'_, Self>,
         py: Python,
@@ -723,7 +723,7 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
-    #[pyo3(signature = (stream_name=None))]
+    #[pyo3(signature = (*, stream_name=None))]
     pub fn collect(
         slf: &Bound<'_, Self>,
         py: Python,
@@ -1119,7 +1119,7 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
-    #[pyo3(signature = (func, start, returns_state=false, stream_name=None))]
+    #[pyo3(signature = (func, start, *, returns_state=false, stream_name=None))]
     pub fn accumulate(
         slf: &Bound<'_, Self>,
         py: Python,

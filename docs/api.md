@@ -108,3 +108,7 @@ heading_level: 3
 ::: akayu.from_text_file
 options:
 heading_level: 3
+
+::: akayu.TextFileSource
+options:
+heading_level: 3

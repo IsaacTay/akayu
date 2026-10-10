@@ -900,6 +900,7 @@ impl Stream {
     // Complexity is inherent to dispatching across 20+ NodeLogic variants;
     // each arm is simple and independent.
     #[allow(clippy::cognitive_complexity)]
+    #[pyo3(name = "_update_batch")]
     pub fn update_batch(
         &mut self,
         py: Python,
@@ -1297,6 +1298,7 @@ impl Stream {
         self.propagate_batch(py, output_batch)
     }
 
+    #[pyo3(name = "_update")]
     pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
