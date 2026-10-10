@@ -121,7 +121,7 @@ assert sorted(results) == [x * x for x in range(100)]
 
 | Library       | Performance               | Async                                 | Rust Backend | Learning Curve |
 | ------------- | ------------------------- | ------------------------------------- | ------------ | -------------- |
-| **akayu**     | High (~20-60x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
+| **akayu**     | High (~30-60x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
 | **streamz**   | Medium                    | ✅                                    | ❌           | Low            |
 | **RxPY**      | Medium                    | ❌                                    | ❌           | Medium         |
 | **aiostream** | Medium                    | ✅                                    | ❌           | Low            |

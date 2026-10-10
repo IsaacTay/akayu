@@ -77,9 +77,9 @@ mapped.emit(x)  # ❌ RuntimeError: Cannot emit to non-source node
 
 | Scenario              | streamz  | akayu (compiled)            |
 | --------------------- | -------- | --------------------------- |
-| Deep chains (10 maps) | Baseline | ~51x faster                 |
-| Branching             | Baseline | ~30-44x faster              |
-| Merging               | Baseline | ~30-60x faster              |
+| Deep chains (10 maps) | Baseline | ~58x faster                 |
+| Branching             | Baseline | ~34-45x faster              |
+| Merging               | Baseline | ~32-63x faster              |
 | Batch processing      | slower   | optimized with `emit_batch` |
 
 See [Benchmarks](benchmarks.md) for the measurements.

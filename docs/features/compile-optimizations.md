@@ -89,7 +89,7 @@ This reduces:
 - Python function call overhead
 - Memory allocations for intermediate values
 
-**Benchmark impact**: a compiled pipeline of 10 chained maps runs about 51x faster than streamz (see [Benchmarks](../benchmarks.md)); fusion makes the 10 nodes one.
+**Benchmark impact**: a compiled pipeline of 10 chained maps runs about 58x faster than streamz (see [Benchmarks](../benchmarks.md)); fusion makes the 10 nodes one.
 
 ## Filter Fusion
 

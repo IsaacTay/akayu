@@ -10,10 +10,10 @@ described under [Benchmark Details](#benchmark-details).
 
 | Topology Type | Scenario                    | Speedup over streamz |
 | ------------- | --------------------------- | -------------------- |
-| Deep Chains   | 10 chained maps             | **~51x**             |
-| Branching     | Fan-out, diamond            | **~30x - 44x**       |
-| Merging       | Union, zip, combine_latest  | **~30x - 60x**       |
-| Complex DAG   | Split, flatten, union mixed | **~30x**             |
+| Deep Chains   | 10 chained maps             | **~58x**             |
+| Branching     | Fan-out, diamond            | **~34x - 45x**       |
+| Merging       | Union, zip, combine_latest  | **~32x - 63x**       |
+| Complex DAG   | Split, flatten, union mixed | **~31x**             |
 
 ## Complex Flow Topologies (500k items)
 
@@ -23,22 +23,22 @@ program.
 
 | Topology                                        | akayu (ms) | akayu `emit_batch` (ms) | streamz (ms) | Pure Python (ms) | vs streamz     |
 | ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | -------------- |
-| [Deep pipeline (10 maps)](#deep-pipeline)       |        373 |                     264 |       19,066 |              240 | **51x faster** |
-| [Diamond (split → union)](#diamond)             |        226 |                     215 |        9,888 |               80 | **44x faster** |
-| [Fan-out (5 branches)](#fan-out)                |        603 |                     595 |       18,224 |              264 | **30x faster** |
-| [Complex DAG](#complex-dag)                     |        481 |                     428 |       14,254 |              106 | **30x faster** |
-| [Multi-union (4 sources)](#multi-union)         |        129 |                       - |        7,653 |               44 | **60x faster** |
-| [Accumulate (3 branches)](#accumulate-branches) |        318 |                       - |        9,124 |              123 | **29x faster** |
-| [Zip (3 sources)](#zip)                         |        208 |                       - |        9,390 |               51 | **45x faster** |
-| [Combine latest (3 sources)](#combine-latest)   |        142 |                       - |        4,290 |               51 | **30x faster** |
+| [Deep pipeline (10 maps)](#deep-pipeline)       |        319 |                     255 |       18,656 |              253 | **58x faster** |
+| [Diamond (split → union)](#diamond)             |        215 |                     198 |        9,778 |               80 | **45x faster** |
+| [Fan-out (5 branches)](#fan-out)                |        516 |                     508 |       17,509 |              262 | **34x faster** |
+| [Complex DAG](#complex-dag)                     |        453 |                     416 |       14,142 |              107 | **31x faster** |
+| [Multi-union (4 sources)](#multi-union)         |        122 |                       - |        7,654 |               45 | **63x faster** |
+| [Accumulate (3 branches)](#accumulate-branches) |        307 |                       - |        9,013 |              122 | **29x faster** |
+| [Zip (3 sources)](#zip)                         |        203 |                       - |        9,202 |               50 | **45x faster** |
+| [Combine latest (3 sources)](#combine-latest)   |        132 |                       - |        4,232 |               50 | **32x faster** |
 
 **Observations:**
 
-- akayu is 22x - 60x faster than streamz on every topology.
+- akayu is 29x - 63x faster than streamz on every topology.
 - Most of akayu's remaining time is CPython running the pipeline's own functions: measured in
   instructions, akayu's own code is about 17% of a plain pipeline. The gap to hand-written Python
   is mostly the function calls a hand-written loop doesn't make.
-- `emit_batch()` helps most on long linear chains (deep pipeline: 373 -> 264 ms). Below a
+- `emit_batch()` helps most on long linear chains (deep pipeline: 319 -> 255 ms). Below a
   fan-out, items still go through the branches one at a time, so batching gains little there.
 
 ## Running Benchmarks
