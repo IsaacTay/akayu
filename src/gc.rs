@@ -75,9 +75,10 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
 
 fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
     match logic {
-        NodeLogic::Map { func } | NodeLogic::Sink { func } | NodeLogic::BatchMap { func } => {
-            visit.call(func)
-        }
+        NodeLogic::Map { func }
+        | NodeLogic::StarMap { func }
+        | NodeLogic::Sink { func }
+        | NodeLogic::BatchMap { func } => visit.call(func),
         NodeLogic::Filter { predicate } => visit.call(predicate),
         // `state` is replaced on every item, so it is not visited.
         NodeLogic::Accumulate { func, .. } => visit.call(func),
