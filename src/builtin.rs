@@ -5,11 +5,11 @@ use pyo3::types::{PyString, PyTuple};
 
 use crate::Stream;
 use crate::helpers::{
-    get_analyze_lambda, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
-    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list, get_builtin_print,
-    get_builtin_set, get_builtin_str, get_builtin_tuple, get_builtin_type, get_operator_attrgetter,
-    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
-    get_operator_truth,
+    get_analyze_accumulate, get_analyze_lambda, get_builtin_bool, get_builtin_float,
+    get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
+    get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
+    get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
+    get_operator_itemgetter, get_operator_not, get_operator_truth,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, NodeLogic};
 
@@ -313,6 +313,37 @@ pub(crate) fn detect_builtin_for_logic(py: Python, logic: &mut NodeLogic) -> Opt
         NodeLogic::ChunkBy(chunk) => detect_filter_builtin(py, &chunk.predicate),
         NodeLogic::ExtractBetween(_) => None,
         NodeLogic::Sink { func } => detect_sink_builtin(func),
+        NodeLogic::Accumulate {
+            func,
+            returns_state: false,
+            ..
+        } => detect_accumulate_builtin(py, func),
+        _ => None,
+    }
+}
+
+/// Native form of an accumulate function: `acc <op> x`, `acc <op> const`,
+/// `max(acc, x)` or `min(acc, x)` (see `_analyze_accumulate`).
+fn detect_accumulate_builtin(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
+    // SAFETY: GIL held; a type check on a live object.
+    if unsafe { pyo3::ffi::PyFunction_Check(func.as_ptr()) } == 0 {
+        return None;
+    }
+    let result = get_analyze_accumulate().ok()?.call1(py, (func,)).ok()?;
+    let tuple = result.bind(py).cast::<PyTuple>().ok()?;
+    let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
+    match tag.as_str() {
+        "acc_binop" => {
+            let op: String = tuple.get_item(1).ok()?.extract().ok()?;
+            Some(BuiltinOp::AccumBinOp(parse_binary_op(&op)?))
+        }
+        "acc_binop_const" => {
+            let op: String = tuple.get_item(1).ok()?.extract().ok()?;
+            let value = tuple.get_item(2).ok()?.unbind();
+            Some(BuiltinOp::AccumBinOpConst(parse_binary_op(&op)?, value))
+        }
+        "acc_max" => Some(BuiltinOp::AccumMax),
+        "acc_min" => Some(BuiltinOp::AccumMin),
         _ => None,
     }
 }

@@ -203,6 +203,16 @@ pub enum BuiltinOp {
     And(Box<BuiltinOp>, Box<BuiltinOp>),
     /// <A> or <B> — short-circuit evaluation
     Or(Box<BuiltinOp>, Box<BuiltinOp>),
+
+    // --- accumulate(func) patterns, applied to (state, x) ---
+    /// state <binop> x
+    AccumBinOp(BinaryOp),
+    /// state <binop> const
+    AccumBinOpConst(BinaryOp, Py<PyAny>),
+    /// max(state, x)
+    AccumMax,
+    /// min(state, x)
+    AccumMin,
 }
 
 /// Binary arithmetic operations for `BuiltinOp::BinOp`.

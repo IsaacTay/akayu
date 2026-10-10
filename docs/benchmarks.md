@@ -28,7 +28,7 @@ program.
 | [Fan-out (5 branches)](#fan-out)                |        603 |                     595 |       18,224 |              264 | **30x faster** |
 | [Complex DAG](#complex-dag)                     |        481 |                     428 |       14,254 |              106 | **30x faster** |
 | [Multi-union (4 sources)](#multi-union)         |        129 |                       - |        7,653 |               44 | **60x faster** |
-| [Accumulate (3 branches)](#accumulate-branches) |        422 |                       - |        9,124 |              119 | **22x faster** |
+| [Accumulate (3 branches)](#accumulate-branches) |        318 |                       - |        9,124 |              123 | **29x faster** |
 | [Zip (3 sources)](#zip)                         |        208 |                       - |        9,390 |               51 | **45x faster** |
 | [Combine latest (3 sources)](#combine-latest)   |        142 |                       - |        4,290 |               51 | **30x faster** |
 
