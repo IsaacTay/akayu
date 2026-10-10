@@ -44,6 +44,9 @@ independent of machine load:
 - `map`/`filter`/`sink`/`batch_map(func, *args, **kwargs)` bind the extra arguments natively instead
   of calling a Python wrapper per item: 81% less per item with keyword arguments, 40% with
   positional ones. `starmap(func)` star-calls natively: 13-17% less.
+- `compile()` recognizes chains of simple steps such as `x % 2 == 0`, `x * 2 + 1`, `x["a"]["b"]`,
+  `x.a.b`, `str(x).upper()` and `x.strip().lower()` (each step was already supported alone):
+  20-34% less per item for pipelines that use them.
 - `compile()` also optimizes lambdas with defaulted extra parameters, the `lambda x, k=k:`
   idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
 - `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary
