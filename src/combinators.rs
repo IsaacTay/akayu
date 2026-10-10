@@ -7,7 +7,7 @@ use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{capture_source_location, check_not_compiled};
 use crate::lock::Downstream;
-use crate::node::NodeLogic;
+use crate::node::{CombineLatestState, NodeLogic};
 
 // Stream methods for combinators
 #[pymethods]
@@ -253,10 +253,10 @@ impl Stream {
 
         let node = Self::make_node(
             py,
-            NodeLogic::CombineLatest {
+            NodeLogic::CombineLatest(Box::new(CombineLatestState {
                 state: (0..total_sources).map(|_| None).collect(),
                 emit_on_indices,
-            },
+            })),
             "combine_latest".to_string(),
             source_location.clone(),
         )?;
@@ -557,10 +557,10 @@ pub fn combine_latest(
     let total_sources = streams.len();
     let node = Stream::make_node(
         py,
-        NodeLogic::CombineLatest {
+        NodeLogic::CombineLatest(Box::new(CombineLatestState {
             state: (0..total_sources).map(|_| None).collect(),
             emit_on_indices,
-        },
+        })),
         "combine_latest".to_string(),
         source_location.clone(),
     )?;

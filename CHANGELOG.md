@@ -43,7 +43,8 @@ independent of machine load:
   78% / 71% less per item, 65% less in batches.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
-- 13% less memory per node.
+- 41% less memory per node (565 -> 332 bytes), and `emit_batch()` map/filter/accumulate stages
+  reuse one buffer instead of allocating one per stage.
 
 ### Fixed
 

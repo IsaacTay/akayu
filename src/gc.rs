@@ -21,7 +21,7 @@ use pyo3::prelude::*;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::Stream;
-use crate::node::{BuiltinOp, ChainNode, NodeLogic};
+use crate::node::{BuiltinOp, ChainNode, ChunkByState, ExtractBetweenState, NodeLogic};
 
 fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
     match op {
@@ -86,17 +86,19 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
         NodeLogic::Chain { steps } => steps
             .iter()
             .try_for_each(|step| visit_chain_node(step, visit)),
-        NodeLogic::ChunkBy {
-            predicate,
-            pre_buffer_chain,
-            ..
-        } => {
+        NodeLogic::ChunkBy(boxed) => {
+            let ChunkByState {
+                predicate,
+                pre_buffer_chain,
+                ..
+            } = &**boxed;
             visit.call(predicate)?;
             pre_buffer_chain
                 .iter()
                 .try_for_each(|step| visit_chain_node(step, visit))
         }
-        NodeLogic::ExtractBetween { open, close, .. } => {
+        NodeLogic::ExtractBetween(boxed) => {
+            let ExtractBetweenState { open, close, .. } = &**boxed;
             visit.call(open)?;
             visit.call(close)
         }
@@ -105,7 +107,7 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
         | NodeLogic::Flatten
         | NodeLogic::Collect { .. }
         | NodeLogic::Tag { .. }
-        | NodeLogic::CombineLatest { .. }
+        | NodeLogic::CombineLatest(_)
         | NodeLogic::Zip { .. }
         | NodeLogic::Parallel
         | NodeLogic::Prefetch { .. }

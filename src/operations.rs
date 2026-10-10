@@ -10,7 +10,7 @@ use crate::helpers::{
     get_func_name, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
 use crate::lock::{Downstream, NodeLock};
-use crate::node::NodeLogic;
+use crate::node::{ChunkByState, ExtractBetweenState, NodeLogic};
 use crate::prefetch::{PrefetchKind, Prefetcher};
 
 /// Wrap a function with additional args/kwargs using the build_map_func helper.
@@ -52,8 +52,8 @@ impl Stream {
             py,
             Self {
                 logic,
-                downstreams: Vec::new(),
-                parents: std::sync::Mutex::new(Vec::new()),
+                downstreams: crate::Downstreams::new(),
+                parents: std::sync::Mutex::new(crate::Parents::new()),
                 name,
                 frozen: false,
                 needs_lock: false,
@@ -95,8 +95,8 @@ impl Stream {
         let has_buffer = matches!(
             self.logic,
             NodeLogic::Collect { .. }
-                | NodeLogic::ChunkBy { .. }
-                | NodeLogic::ExtractBetween { .. }
+                | NodeLogic::ChunkBy(_)
+                | NodeLogic::ExtractBetween(_)
                 | NodeLogic::Prefetched { .. }
         );
         let is_sink = match &self.logic {
@@ -127,14 +127,16 @@ impl Stream {
                 let tuple = PyTuple::new(py, items)?;
                 self.propagate(py, tuple.into())?;
             }
-            NodeLogic::ChunkBy { buffer, .. } => {
+            NodeLogic::ChunkBy(boxed) => {
+                let ChunkByState { buffer, .. } = &mut **boxed;
                 if !buffer.is_empty() {
                     let items = std::mem::take(buffer);
                     let tuple = PyTuple::new(py, items)?;
                     self.propagate(py, tuple.into())?;
                 }
             }
-            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+            NodeLogic::ExtractBetween(boxed) => {
+                let ExtractBetweenState { buffer, inside, .. } = &mut **boxed;
                 // Discard the incomplete chunk and return to the outside state
                 buffer.clear();
                 *inside = false;
@@ -158,7 +160,7 @@ impl Stream {
         // flush, so stopping here would silently swallow the flush.
         let should_propagate = !matches!(
             self.logic,
-            NodeLogic::Collect { .. } | NodeLogic::ChunkBy { .. }
+            NodeLogic::Collect { .. } | NodeLogic::ChunkBy(_)
         );
         if should_propagate {
             for downstream in &self.downstreams {
@@ -177,14 +179,16 @@ impl Stream {
                 let tuple = PyTuple::new(py, items)?;
                 self.propagate(py, tuple.into())?;
             }
-            NodeLogic::ChunkBy { buffer, .. } => {
+            NodeLogic::ChunkBy(boxed) => {
+                let ChunkByState { buffer, .. } = &mut **boxed;
                 if !buffer.is_empty() {
                     let items = std::mem::take(buffer);
                     let tuple = PyTuple::new(py, items)?;
                     self.propagate(py, tuple.into())?;
                 }
             }
-            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+            NodeLogic::ExtractBetween(boxed) => {
+                let ExtractBetweenState { buffer, inside, .. } = &mut **boxed;
                 // Discard the incomplete chunk and return to the outside state
                 buffer.clear();
                 *inside = false;
@@ -220,8 +224,8 @@ impl Stream {
         let source_location = capture_source_location(py);
         Self {
             logic: NodeLogic::Source,
-            downstreams: Vec::new(),
-            parents: std::sync::Mutex::new(Vec::new()),
+            downstreams: crate::Downstreams::new(),
+            parents: std::sync::Mutex::new(crate::Parents::new()),
             name: name.unwrap_or_else(|| "source".to_string()),
             frozen: false,
             needs_lock: false,
@@ -297,7 +301,7 @@ impl Stream {
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
-                prefetcher: Prefetcher::new(wrapped_func, PrefetchKind::Map, size),
+                prefetcher: Box::new(Prefetcher::new(wrapped_func, PrefetchKind::Map, size)),
             };
             this.name = format!("prefetch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
@@ -486,7 +490,7 @@ impl Stream {
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
-                prefetcher: Prefetcher::new(wrapped_func, PrefetchKind::BatchMap, size),
+                prefetcher: Box::new(Prefetcher::new(wrapped_func, PrefetchKind::BatchMap, size)),
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
@@ -555,7 +559,11 @@ impl Stream {
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
-                prefetcher: Prefetcher::new(wrapped_predicate, PrefetchKind::Filter, size),
+                prefetcher: Box::new(Prefetcher::new(
+                    wrapped_predicate,
+                    PrefetchKind::Filter,
+                    size,
+                )),
             };
             this.name = format!("prefetch_filter({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location).into();
@@ -744,12 +752,12 @@ impl Stream {
 
         let node = Self::make_node(
             py,
-            NodeLogic::ChunkBy {
+            NodeLogic::ChunkBy(Box::new(ChunkByState {
                 buffer: Vec::new(),
                 predicate,
                 include_delimiter,
                 pre_buffer_chain: Vec::new(),
-            },
+            })),
             name,
             source_location,
         )?;
@@ -831,13 +839,13 @@ impl Stream {
 
         let node = Self::make_node(
             py,
-            NodeLogic::ExtractBetween {
+            NodeLogic::ExtractBetween(Box::new(ExtractBetweenState {
                 buffer: Vec::new(),
                 open,
                 close,
                 inside: false,
                 close_vectorcall: None,
-            },
+            })),
             name,
             source_location,
         )?;
