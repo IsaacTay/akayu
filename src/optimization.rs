@@ -12,24 +12,6 @@ use crate::node::{ChainNode, ChunkByState, NodeLogic};
 use crate::{Stream, StreamPtr};
 
 impl Stream {
-    /// Optimize the topology on first emit.
-    ///
-    /// This method walks the stream graph and:
-    /// - Fuses consecutive Map operations into a single composed Map
-    pub fn optimize_topology(&mut self, py: Python) {
-        // Phase 1: Fuse consecutive maps and filters
-        // DISABLED: Unsafe for dynamic topologies (where nodes are added after first emit)
-        // Use optimize_topology_full() via compile() if you want fusion enabled.
-        // self.fuse_linear_chains(py);
-
-        // Phase 2: Collect all nodes and check sync status
-        let all_nodes = self.collect_all_nodes(py);
-
-        // Phase 3: Mark prefetch nodes inside par branches as needing locks
-        // These nodes use internal threading which can conflict with par's threading
-        self.mark_par_branch_nodes(py, &all_nodes);
-    }
-
     /// Full optimization pass, safe because graph is being frozen via compile().
     ///
     /// This enables all optimizations including chain compilation, which is only safe
@@ -46,7 +28,6 @@ impl Stream {
 
         Self::warn_useless_par(py, &all_nodes);
         self.mark_par_branch_nodes(py, &all_nodes);
-        self.mark_convergence_nodes(py, &all_nodes);
 
         all_nodes
     }
@@ -86,14 +67,9 @@ impl Stream {
             || matches!(&self.logic, NodeLogic::Chain { .. });
         self.compiled_filter_fast =
             matches!(&self.logic, NodeLogic::Filter { .. }) && self.builtin_op.is_some();
-        self.compiled_downstream_ptrs = self
-            .downstreams
-            .iter()
-            .map(|d| {
-                let mut guard = d.borrow_mut(py);
-                StreamPtr(&mut *guard as *mut Stream)
-            })
-            .collect();
+        for d in &mut self.downstreams {
+            d.ptr = Some(StreamPtr::new(&mut d.node.borrow_mut(py)));
+        }
 
         for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
@@ -110,13 +86,12 @@ impl Stream {
                 drop(node);
                 let ptrs: Vec<StreamPtr> = downstream_refs
                     .iter()
-                    .map(|d| {
-                        let mut guard = d.borrow_mut(py);
-                        StreamPtr(&mut *guard as *mut Stream)
-                    })
+                    .map(|d| StreamPtr::new(&mut d.borrow_mut(py)))
                     .collect();
                 let mut node = node_py.borrow_mut(py);
-                node.compiled_downstream_ptrs = ptrs;
+                for (d, ptr) in node.downstreams.iter_mut().zip(ptrs) {
+                    d.ptr = Some(ptr);
+                }
             }
         }
     }
@@ -221,8 +196,6 @@ impl Stream {
             }
         }
     }
-
-    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: &[Py<Self>]) {}
 
     /// Eliminate source passthrough nodes from the graph.
     /// A Source node with a single downstream that is itself a Source
@@ -331,7 +304,7 @@ impl Stream {
         // Extract logic from each node into ChainNode structs
         let mut steps: Vec<ChainNode> = Vec::new();
 
-        for (i, node_py) in chain_node_refs.iter().enumerate() {
+        for node_py in &chain_node_refs {
             let mut node = node_py.borrow_mut(py);
             let node_id = std::ptr::from_ref(&*node) as usize;
             let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
@@ -368,6 +341,21 @@ impl Stream {
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
         drop(head);
+
+        // The nodes after the chain now hang off the head. Their parent link
+        // to the last member was the only thing keeping the members alive, so
+        // point it at the head: members nobody else holds are then freed.
+        // (Members the user holds keep their downstreams for flush().)
+        let tail_py = chain_node_refs.last().expect("chain has members");
+        for ds in &tail_downstreams {
+            let child = ds.node.borrow(py);
+            let mut parents = child.parents.lock().unwrap();
+            for parent in parents.iter_mut() {
+                if parent.is(tail_py) {
+                    *parent = start_py.clone_ref(py);
+                }
+            }
+        }
 
         // Recurse into tail downstreams and any branches from branching nodes
         for ds in &tail_downstreams {

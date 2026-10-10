@@ -53,6 +53,9 @@ impl Drop for NodeLockGuard<'_> {
 pub(crate) struct Downstream {
     pub(crate) node: Py<Stream>,
     pub(crate) lock: Arc<NodeLock>,
+    /// Set by compile(): a raw pointer to the child, bypassing PyCell's
+    /// borrow check in the propagation hot path (see `StreamPtr`).
+    pub(crate) ptr: Option<crate::StreamPtr>,
 }
 
 impl Downstream {
@@ -60,6 +63,7 @@ impl Downstream {
         Self {
             node: node.clone_ref(py),
             lock: Arc::clone(&node.borrow(py).lock),
+            ptr: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl Downstream {
         Self {
             node: self.node.clone_ref(py),
             lock: Arc::clone(&self.lock),
+            ptr: self.ptr,
         }
     }
 

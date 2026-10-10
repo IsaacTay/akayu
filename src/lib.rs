@@ -8,8 +8,6 @@
 #![allow(clippy::missing_errors_doc)] // Errors documented in Python docstrings
 #![allow(clippy::missing_panics_doc)] // Internal panics on invariant violations
 #![allow(clippy::must_use_candidate)] // PyO3 handles return value usage
-#![allow(dead_code)] // Optimizations temporarily disabled
-#![allow(unused_variables)] // Optimizations temporarily disabled
 
 use pyo3::prelude::*;
 
@@ -48,14 +46,18 @@ pub(crate) type Parents = smallvec::SmallVec<[Py<Stream>; 1]>;
 /// These invariants hold because: the graph is a DAG (no cycles), processing is sequential
 /// (one subtree completes before the next starts), and topology is frozen after compile().
 #[derive(Clone, Copy)]
-pub(crate) struct StreamPtr(*mut Stream);
+pub(crate) struct StreamPtr(std::ptr::NonNull<Stream>);
 unsafe impl Send for StreamPtr {}
 unsafe impl Sync for StreamPtr {}
 
 impl StreamPtr {
+    pub(crate) fn new(stream: &mut Stream) -> Self {
+        Self(std::ptr::NonNull::from(stream))
+    }
+
     #[inline(always)]
     pub(crate) unsafe fn get_mut(self) -> &'static mut Stream {
-        unsafe { &mut *self.0 }
+        unsafe { &mut *self.0.as_ptr() }
     }
 }
 
@@ -83,8 +85,6 @@ pub struct Stream {
     pub(crate) frozen: bool,
     /// True if this node needs thread-safe locking (convergence point from parallel branches)
     pub(crate) needs_lock: bool,
-    /// True if par() downstreams have been marked with needs_lock (lazy, one-time)
-    pub(crate) par_branches_marked: bool,
     /// True if compile() was explicitly called (prevents modifications)
     pub(crate) compiled: bool,
     /// Source location where this node was created (e.g., "pipeline.py:42")
@@ -101,10 +101,6 @@ pub struct Stream {
     /// Set at freeze time. True if this is a Filter whose predicate can skip the
     /// async check (has builtin_op), so update() routes through apply_logic.
     pub(crate) compiled_filter_fast: bool,
-    /// Cached raw pointers to downstream `Stream` objects, set at freeze time.
-    /// Bypasses PyCell's atomic borrow check (~10ns/downstream/item) in propagate().
-    /// Empty before freeze — propagate falls back to normal `borrow_mut()`.
-    pub(crate) compiled_downstream_ptrs: Vec<StreamPtr>,
     /// If this Sink node's function calls .flush() on a Collect node in the same graph,
     /// store a direct reference to skip Python dispatch at runtime.
     /// Detected at compile time via bound method check or lambda bytecode analysis.
@@ -122,8 +118,6 @@ pub struct Stream {
     pub(crate) emitting: std::sync::atomic::AtomicBool,
     /// Serializes emit()/flush() on this node and updates through `needs_lock` edges.
     pub(crate) lock: std::sync::Arc<lock::NodeLock>,
-    /// True if convergence point check has been performed (lazy, one-time).
-    pub(crate) convergence_checked: bool,
 }
 
 const HELPERS: &str = include_str!("akayu.py");

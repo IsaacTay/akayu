@@ -156,7 +156,6 @@ impl Stream {
     fn __clear__(&mut self) {
         // Leave an inert, empty source behind in case anything still holds
         // this node (e.g. a finalizer that resurrected it).
-        self.compiled_downstream_ptrs.clear();
         self.downstreams.clear();
         self.parents
             .get_mut()

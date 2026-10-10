@@ -8,7 +8,8 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 use crate::Stream;
 use crate::helpers::{cached_vectorcall1, vectorcall1, vectorcall2, wrap_error};
 use crate::node::{
-    BinaryOp, BuiltinOp, ChunkByState, CombineLatestState, ExtractBetweenState, NodeLogic,
+    BinaryOp, BuiltinOp, ChainNode, ChunkByState, CombineLatestState, ExtractBetweenState,
+    NodeLogic,
 };
 use crate::pool::{self, Latch};
 use crate::profiling;
@@ -442,6 +443,116 @@ pub(crate) fn apply_logic(
     x: Py<PyAny>,
     profiling: bool,
 ) -> PyResult<StepResult> {
+    // The common steps, unprofiled, stay in this small function; everything
+    // else lives out of line, so the per-step call stays cheap (a fused chain
+    // calls this once per step, per item).
+    if !profiling {
+        match logic {
+            NodeLogic::Map { func } => {
+                let res = match ctx.builtin_op {
+                    Some(op) => apply_builtin(py, op, &x),
+                    None => vcall1(py, func, &x, ctx.cached_vc),
+                };
+                return Ok(StepResult::Value(wrap_error(
+                    py,
+                    res,
+                    ctx.name,
+                    ctx.source_location,
+                )?));
+            }
+            NodeLogic::Filter { predicate } => {
+                let passes = match ctx.builtin_op {
+                    Some(op) => wrap_error(
+                        py,
+                        apply_builtin_as_filter(py, op, &x),
+                        ctx.name,
+                        ctx.source_location,
+                    )?,
+                    None => {
+                        let res = vcall1(py, predicate, &x, ctx.cached_vc);
+                        wrap_error(py, res, ctx.name, ctx.source_location)?.is_truthy(py)?
+                    }
+                };
+                return Ok(if passes {
+                    StepResult::Value(x)
+                } else {
+                    StepResult::Filtered
+                });
+            }
+            NodeLogic::Sink { func }
+                if ctx.flush_target.is_none()
+                    && ctx.emit_target.is_none()
+                    && ctx.builtin_op.is_none() =>
+            {
+                let res = vcall1(py, func, &x, ctx.cached_vc);
+                wrap_error(py, res, ctx.name, ctx.source_location)?;
+                return Ok(StepResult::Terminal);
+            }
+            NodeLogic::Chain { steps } => return apply_chain(py, steps, x, false),
+            _ => {}
+        }
+    }
+    apply_logic_general(py, logic, ctx, x, profiling)
+}
+
+/// Run a fused chain's steps on one item.
+#[inline(never)]
+fn apply_chain(
+    py: Python,
+    steps: &mut [ChainNode],
+    x: Py<PyAny>,
+    profiling: bool,
+) -> PyResult<StepResult> {
+    let mut val = x;
+    for i in 0..steps.len() {
+        let step = &mut steps[i];
+        let step_ctx = NodeCtx {
+            builtin_op: &step.builtin_op,
+            cached_vc: &step.cached_vectorcall,
+            name: &step.name,
+            source_location: &step.source_location,
+            node_id: step.node_id,
+            flush_target: &step.flush_target,
+            emit_target: &step.emit_target,
+        };
+        match apply_logic(py, &mut step.logic, &step_ctx, val, profiling)? {
+            StepResult::Value(v) => val = v,
+            StepResult::Filtered => return Ok(StepResult::Filtered),
+            StepResult::Terminal => return Ok(StepResult::Terminal),
+            StepResult::Batch(items) => {
+                // Flatten mid-chain: switch remaining steps to batch mode
+                let mut batch = items;
+                for s in &mut steps[(i + 1)..] {
+                    let s_ctx = NodeCtx {
+                        builtin_op: &s.builtin_op,
+                        cached_vc: &s.cached_vectorcall,
+                        name: &s.name,
+                        source_location: &s.source_location,
+                        node_id: s.node_id,
+                        flush_target: &s.flush_target,
+                        emit_target: &s.emit_target,
+                    };
+                    match apply_logic_batch(py, &mut s.logic, &s_ctx, batch, profiling)? {
+                        BatchStepResult::Items(out) => batch = out,
+                        BatchStepResult::Terminal => return Ok(StepResult::Terminal),
+                    }
+                }
+                return Ok(StepResult::Batch(batch));
+            }
+        }
+    }
+    Ok(StepResult::Value(val))
+}
+
+/// Every step kind, with profiling: the out-of-line rest of `apply_logic`.
+#[inline(never)]
+fn apply_logic_general(
+    py: Python,
+    logic: &mut NodeLogic,
+    ctx: &NodeCtx,
+    x: Py<PyAny>,
+    profiling: bool,
+) -> PyResult<StepResult> {
     match logic {
         NodeLogic::Map { func } => {
             let t = prof_start(profiling);
@@ -456,7 +567,7 @@ pub(crate) fn apply_logic(
                 Duration::ZERO
             };
             if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, 1, ctx.name, ctx.source_location);
+                profiling::record_node(ctx.node_id, ft, 1, 1);
             }
             Ok(StepResult::Value(result))
         }
@@ -465,14 +576,7 @@ pub(crate) fn apply_logic(
             let t = prof_start(profiling);
             let result = wrap_error(py, star_call(py, func, &x), ctx.name, ctx.source_location)?;
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    1,
-                    1,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), 1, 1);
             }
             Ok(StepResult::Value(result))
         }
@@ -496,14 +600,7 @@ pub(crate) fn apply_logic(
                 Duration::ZERO
             };
             if profiling {
-                profiling::record_node(
-                    ctx.node_id,
-                    ft,
-                    1,
-                    u64::from(passes),
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, ft, 1, u64::from(passes));
             }
             if passes {
                 Ok(StepResult::Value(x))
@@ -516,14 +613,7 @@ pub(crate) fn apply_logic(
             // Fast path: direct Rust flush (no Python dispatch)
             if let Some(target) = ctx.flush_target {
                 if profiling {
-                    profiling::record_node(
-                        ctx.node_id,
-                        Duration::ZERO,
-                        1,
-                        0,
-                        ctx.name,
-                        ctx.source_location,
-                    );
+                    profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0);
                 }
                 let mut t = target.borrow_mut(py);
                 t.flush(py, vec![], None)?;
@@ -532,14 +622,7 @@ pub(crate) fn apply_logic(
             // Fast path: direct Rust emit (no Python dispatch)
             if let Some(target) = ctx.emit_target {
                 if profiling {
-                    profiling::record_node(
-                        ctx.node_id,
-                        Duration::ZERO,
-                        1,
-                        0,
-                        ctx.name,
-                        ctx.source_location,
-                    );
+                    profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0);
                 }
                 let t = target.borrow(py);
                 if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
@@ -567,7 +650,7 @@ pub(crate) fn apply_logic(
                 Duration::ZERO
             };
             if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, 0, ctx.name, ctx.source_location);
+                profiling::record_node(ctx.node_id, ft, 1, 0);
             }
             Ok(StepResult::Terminal)
         }
@@ -594,7 +677,7 @@ pub(crate) fn apply_logic(
                 result
             };
             if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, 1, ctx.name, ctx.source_location);
+                profiling::record_node(ctx.node_id, ft, 1, 1);
             }
             Ok(StepResult::Value(output))
         }
@@ -607,14 +690,7 @@ pub(crate) fn apply_logic(
                 batch.push(item_res?.into());
             }
             if profiling {
-                profiling::record_node(
-                    ctx.node_id,
-                    Duration::ZERO,
-                    1,
-                    batch.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, Duration::ZERO, 1, batch.len() as u64);
             }
             Ok(StepResult::Batch(batch))
         }
@@ -634,78 +710,20 @@ pub(crate) fn apply_logic(
             match iter.next() {
                 Some(item) => {
                     if profiling {
-                        profiling::record_node(
-                            ctx.node_id,
-                            ft,
-                            1,
-                            1,
-                            ctx.name,
-                            ctx.source_location,
-                        );
+                        profiling::record_node(ctx.node_id, ft, 1, 1);
                     }
                     Ok(StepResult::Value(item?.into()))
                 }
                 None => {
                     if profiling {
-                        profiling::record_node(
-                            ctx.node_id,
-                            ft,
-                            1,
-                            0,
-                            ctx.name,
-                            ctx.source_location,
-                        );
+                        profiling::record_node(ctx.node_id, ft, 1, 0);
                     }
                     Ok(StepResult::Filtered)
                 }
             }
         }
 
-        NodeLogic::Chain { steps } => {
-            let mut val = x;
-            let mut i = 0;
-            while i < steps.len() {
-                let step = &mut steps[i];
-                let step_ctx = NodeCtx {
-                    builtin_op: &step.builtin_op,
-                    cached_vc: &step.cached_vectorcall,
-                    name: &step.name,
-                    source_location: &step.source_location,
-                    node_id: step.node_id,
-                    flush_target: &step.flush_target,
-                    emit_target: &step.emit_target,
-                };
-                match apply_logic(py, &mut step.logic, &step_ctx, val, profiling)? {
-                    StepResult::Value(v) => {
-                        val = v;
-                        i += 1;
-                    }
-                    StepResult::Filtered => return Ok(StepResult::Filtered),
-                    StepResult::Terminal => return Ok(StepResult::Terminal),
-                    StepResult::Batch(items) => {
-                        // Flatten mid-chain: switch remaining steps to batch mode
-                        let mut batch = items;
-                        for s in &mut steps[(i + 1)..] {
-                            let s_ctx = NodeCtx {
-                                builtin_op: &s.builtin_op,
-                                cached_vc: &s.cached_vectorcall,
-                                name: &s.name,
-                                source_location: &s.source_location,
-                                node_id: s.node_id,
-                                flush_target: &s.flush_target,
-                                emit_target: &s.emit_target,
-                            };
-                            match apply_logic_batch(py, &mut s.logic, &s_ctx, batch, profiling)? {
-                                BatchStepResult::Items(out) => batch = out,
-                                BatchStepResult::Terminal => return Ok(StepResult::Terminal),
-                            }
-                        }
-                        return Ok(StepResult::Batch(batch));
-                    }
-                }
-            }
-            Ok(StepResult::Value(val))
-        }
+        NodeLogic::Chain { steps } => apply_chain(py, steps, x, profiling),
 
         NodeLogic::ChainMember { .. } => {
             unreachable!("ChainMember should never be executed directly")
@@ -753,14 +771,7 @@ pub(crate) fn apply_logic_batch(
                 }
             }
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -772,14 +783,7 @@ pub(crate) fn apply_logic_batch(
                 *x = wrap_error(py, star_call(py, func, x), ctx.name, ctx.source_location)?;
             }
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -814,14 +818,7 @@ pub(crate) fn apply_logic_batch(
             }
             output.truncate(kept);
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -835,14 +832,7 @@ pub(crate) fn apply_logic_batch(
                 }
             }
             if profiling {
-                profiling::record_node(
-                    ctx.node_id,
-                    Duration::ZERO,
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, Duration::ZERO, items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -863,14 +853,7 @@ pub(crate) fn apply_logic_batch(
                 output.push(item?.into());
             }
             if profiling {
-                profiling::record_node(
-                    ctx.node_id,
-                    ft,
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, ft, items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -895,14 +878,7 @@ pub(crate) fn apply_logic_batch(
                 }
             }
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    items_in,
-                    output.len() as u64,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);
             }
             Ok(BatchStepResult::Items(output))
         }
@@ -911,14 +887,7 @@ pub(crate) fn apply_logic_batch(
             // Fast path: direct Rust flush (no Python dispatch)
             if let Some(target) = ctx.flush_target {
                 if profiling {
-                    profiling::record_node(
-                        ctx.node_id,
-                        Duration::ZERO,
-                        items_in,
-                        0,
-                        ctx.name,
-                        ctx.source_location,
-                    );
+                    profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0);
                 }
                 for _x in items {
                     let mut t = target.borrow_mut(py);
@@ -929,14 +898,7 @@ pub(crate) fn apply_logic_batch(
             // Fast path: direct Rust emit (no Python dispatch)
             if let Some(target) = ctx.emit_target {
                 if profiling {
-                    profiling::record_node(
-                        ctx.node_id,
-                        Duration::ZERO,
-                        items_in,
-                        0,
-                        ctx.name,
-                        ctx.source_location,
-                    );
+                    profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0);
                 }
                 let t = target.borrow(py);
                 if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
@@ -965,14 +927,7 @@ pub(crate) fn apply_logic_batch(
                 }
             }
             if let Some(t) = t {
-                profiling::record_node(
-                    ctx.node_id,
-                    t.elapsed(),
-                    items_in,
-                    0,
-                    ctx.name,
-                    ctx.source_location,
-                );
+                profiling::record_node(ctx.node_id, t.elapsed(), items_in, 0);
             }
             Ok(BatchStepResult::Terminal)
         }
@@ -1022,14 +977,7 @@ impl Stream {
         // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
         if let Some(ref target) = self.flush_target {
             if profiling_active {
-                profiling::record_node(
-                    node_id,
-                    Duration::ZERO,
-                    items.len() as u64,
-                    0,
-                    &self.name,
-                    &self.source_location,
-                );
+                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0);
             }
             // Call flush once per item (matching unfused behavior: filter passes each delimiter individually)
             for _x in items {
@@ -1041,14 +989,7 @@ impl Stream {
         // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
         if let Some(ref target) = self.emit_target {
             if profiling_active {
-                profiling::record_node(
-                    node_id,
-                    Duration::ZERO,
-                    items.len() as u64,
-                    0,
-                    &self.name,
-                    &self.source_location,
-                );
+                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0);
             }
             let t = target.borrow(py);
             if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
@@ -1090,27 +1031,13 @@ impl Stream {
             NodeLogic::Source | NodeLogic::Prefetch { .. } => {
                 output_batch = items;
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        items_in,
-                        items_in,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, items_in, items_in);
                 }
             }
 
             NodeLogic::Collect { buffer } => {
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        items_in,
-                        0,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, items_in, 0);
                 }
                 buffer.extend(items);
                 return Ok(());
@@ -1185,14 +1112,7 @@ impl Stream {
                 if let Some(t) = t
                     && profiling_active
                 {
-                    profiling::record_node(
-                        node_id,
-                        t.elapsed(),
-                        items_in,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, t.elapsed(), items_in, items_out);
                 }
                 if !emitted.is_empty() {
                     return self.propagate_batch(py, emitted);
@@ -1228,14 +1148,7 @@ impl Stream {
                 if let Some(t) = t
                     && profiling_active
                 {
-                    profiling::record_node(
-                        node_id,
-                        t.elapsed(),
-                        items_in,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, t.elapsed(), items_in, items_out);
                 }
                 if !emitted.is_empty() {
                     return self.propagate_batch(py, emitted);
@@ -1247,14 +1160,7 @@ impl Stream {
             NodeLogic::Tag { index } => {
                 let index = *index;
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        items_in,
-                        items_in,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, items_in, items_in);
                 }
                 return self.propagate_batch_tagged(py, index, items);
             }
@@ -1273,8 +1179,6 @@ impl Stream {
                         Duration::ZERO,
                         items_in,
                         output_batch.len() as u64,
-                        &self.name,
-                        &self.source_location,
                     );
                 }
             }
@@ -1289,8 +1193,6 @@ impl Stream {
                         Duration::ZERO,
                         items_in,
                         output_batch.len() as u64,
-                        &self.name,
-                        &self.source_location,
                     );
                 }
             }
@@ -1301,14 +1203,7 @@ impl Stream {
                     self.propagate_parallel(py, x)?;
                 }
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        items_in,
-                        items_in,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, items_in, items_in);
                 }
                 return Ok(());
             }
@@ -1346,14 +1241,7 @@ impl Stream {
         // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
         if let Some(ref target) = self.flush_target {
             if profiling_active {
-                profiling::record_node(
-                    node_id,
-                    Duration::ZERO,
-                    1,
-                    0,
-                    &self.name,
-                    &self.source_location,
-                );
+                profiling::record_node(node_id, Duration::ZERO, 1, 0);
             }
             let mut t = target.borrow_mut(py);
             return t.flush(py, vec![], None);
@@ -1362,14 +1250,7 @@ impl Stream {
         // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
         if let Some(ref target) = self.emit_target {
             if profiling_active {
-                profiling::record_node(
-                    node_id,
-                    Duration::ZERO,
-                    1,
-                    0,
-                    &self.name,
-                    &self.source_location,
-                );
+                profiling::record_node(node_id, Duration::ZERO, 1, 0);
             }
             let t = target.borrow(py);
             if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
@@ -1421,14 +1302,7 @@ impl Stream {
 
             NodeLogic::Collect { buffer } => {
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        1,
-                        0,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, 1, 0);
                 }
                 buffer.push(x);
                 return Ok(());
@@ -1498,20 +1372,13 @@ impl Stream {
                         let items = std::mem::take(buffer);
                         let tuple = PyTuple::new(py, items)?;
                         if profiling_active {
-                            profiling::record_node(
-                                node_id,
-                                ft,
-                                1,
-                                1,
-                                &self.name,
-                                &self.source_location,
-                            );
+                            profiling::record_node(node_id, ft, 1, 1);
                         }
                         return self.propagate(py, tuple.into());
                     }
                 }
                 if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
+                    profiling::record_node(node_id, ft, 1, 0);
                 }
                 return Ok(());
             }
@@ -1539,14 +1406,7 @@ impl Stream {
                 }
                 if profiling_active {
                     let items_out = chunk.is_some() as u64;
-                    profiling::record_node(
-                        node_id,
-                        ft,
-                        1,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, ft, 1, items_out);
                 }
                 return match chunk {
                     Some(chunk) => self.propagate(py, chunk),
@@ -1556,14 +1416,7 @@ impl Stream {
             NodeLogic::Tag { index } => {
                 let index = *index;
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        1,
-                        1,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, 1, 1);
                 }
                 return self.propagate_tagged(py, index, x);
             }
@@ -1581,14 +1434,7 @@ impl Stream {
             }
             NodeLogic::Parallel => {
                 if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        Duration::ZERO,
-                        1,
-                        1,
-                        &self.name,
-                        &self.source_location,
-                    );
+                    profiling::record_node(node_id, Duration::ZERO, 1, 1);
                 }
                 return self.propagate_parallel(py, x);
             }
@@ -1611,14 +1457,7 @@ impl Stream {
         // Record for nodes that fall through (non-early-return, non-terminal)
         if profiling_active {
             let has_output = result.is_some();
-            profiling::record_node(
-                node_id,
-                ft,
-                1,
-                if has_output { 1 } else { 0 },
-                &self.name,
-                &self.source_location,
-            );
+            profiling::record_node(node_id, ft, 1, if has_output { 1 } else { 0 });
         }
 
         if let Some(val) = result {
@@ -1648,8 +1487,8 @@ impl Stream {
         if n == 1 {
             if use_lock {
                 return self.downstreams[0].locked_update_batch(py, output_batch);
-            } else if !self.compiled_downstream_ptrs.is_empty() {
-                let child = unsafe { self.compiled_downstream_ptrs[0].get_mut() };
+            } else if let Some(ptr) = self.downstreams[0].ptr {
+                let child = unsafe { ptr.get_mut() };
                 return child.update_batch(py, output_batch);
             }
             return self.downstreams[0]
@@ -1664,14 +1503,15 @@ impl Stream {
                 }
                 self.downstreams[n - 1].locked_update(py, val)?;
             }
-        } else if !self.compiled_downstream_ptrs.is_empty() {
-            let ptrs = &self.compiled_downstream_ptrs;
+        } else if self.downstreams[0].ptr.is_some() {
+            // Compiled: every edge has its pointer.
+            let ptr = |d: &crate::lock::Downstream| d.ptr.expect("compiled edge");
             for val in output_batch {
-                for ptr in ptrs.iter().take(n - 1) {
-                    let child = unsafe { ptr.get_mut() };
+                for d in self.downstreams.iter().take(n - 1) {
+                    let child = unsafe { ptr(d).get_mut() };
                     child.update(py, val.clone_ref(py))?;
                 }
-                let child = unsafe { ptrs[n - 1].get_mut() };
+                let child = unsafe { ptr(&self.downstreams[n - 1]).get_mut() };
                 child.update(py, val)?;
             }
         } else {
@@ -1699,20 +1539,20 @@ impl Stream {
                 child.locked_update(py, val.clone_ref(py))?;
             }
             self.downstreams[n - 1].locked_update(py, val)?;
-        } else if !self.compiled_downstream_ptrs.is_empty() {
+        } else if let Some(first) = self.downstreams[0].ptr {
             // Compiled fast path: bypass PyCell borrow checks using cached raw pointers.
             // Safe because: DAG (no cycles), sequential processing (no aliasing),
             // frozen topology (pointers remain valid while Py<Stream> refs in downstreams live).
-            let ptrs = &self.compiled_downstream_ptrs;
             if n == 1 {
-                let child = unsafe { ptrs[0].get_mut() };
+                let child = unsafe { first.get_mut() };
                 return child.update(py, val);
             }
-            for ptr in ptrs.iter().take(n - 1) {
-                let child = unsafe { ptr.get_mut() };
+            let ptr = |d: &crate::lock::Downstream| d.ptr.expect("compiled edge");
+            for d in self.downstreams.iter().take(n - 1) {
+                let child = unsafe { ptr(d).get_mut() };
                 child.update(py, val.clone_ref(py))?;
             }
-            let child = unsafe { ptrs[n - 1].get_mut() };
+            let child = unsafe { ptr(&self.downstreams[n - 1]).get_mut() };
             child.update(py, val)?;
         } else {
             // Pre-compile fallback: use PyCell borrow_mut
@@ -1743,7 +1583,7 @@ impl Stream {
             let _guard = child.lock.acquire(py);
             return child.try_borrow_mut(py)?.update_tagged(py, index, val);
         }
-        if let [ptr] = self.compiled_downstream_ptrs.as_slice() {
+        if let Some(ptr) = child.ptr {
             return unsafe { ptr.get_mut() }.update_tagged(py, index, val);
         }
         child.borrow_mut(py).update_tagged(py, index, val)
@@ -1774,7 +1614,7 @@ impl Stream {
                 .try_borrow_mut(py)?
                 .update_batch_tagged(py, index, items);
         }
-        if let [ptr] = self.compiled_downstream_ptrs.as_slice() {
+        if let Some(ptr) = child.ptr {
             return unsafe { ptr.get_mut() }.update_batch_tagged(py, index, items);
         }
         child.borrow_mut(py).update_batch_tagged(py, index, items)
@@ -1795,14 +1635,7 @@ impl Stream {
         if profiling::is_profiling() {
             let node_id = std::ptr::from_ref(&*self) as usize;
             let n_out = u64::from(out.is_some());
-            profiling::record_node(
-                node_id,
-                Duration::ZERO,
-                1,
-                n_out,
-                &self.name,
-                &self.source_location,
-            );
+            profiling::record_node(node_id, Duration::ZERO, 1, n_out);
         }
         match out {
             Some(tuple) => self.propagate(py, tuple),
@@ -1849,14 +1682,7 @@ impl Stream {
         }
         if profiling::is_profiling() {
             let node_id = std::ptr::from_ref(&*self) as usize;
-            profiling::record_node(
-                node_id,
-                Duration::ZERO,
-                items_in,
-                output.len() as u64,
-                &self.name,
-                &self.source_location,
-            );
+            profiling::record_node(node_id, Duration::ZERO, items_in, output.len() as u64);
         }
         self.propagate_batch(py, output)
     }
@@ -1877,34 +1703,9 @@ impl Stream {
             self.propagate(py, result)?;
         }
         if profiling_active {
-            profiling::record_node(
-                node_id,
-                ft,
-                items_in,
-                items_out,
-                &self.name,
-                &self.source_location,
-            );
+            profiling::record_node(node_id, ft, items_in, items_out);
         }
         Ok(())
-    }
-
-    /// Recursively mark all nodes reachable from `node_py` with needs_lock=true.
-    /// This ensures propagate() takes each child's lock (Downstream::locked_update) for
-    /// all downstream access, preventing concurrent borrow_mut on shared PyCells
-    /// when par() branches converge.
-    pub(crate) fn mark_par_reachable(py: Python, node_py: Py<Stream>) {
-        let mut node = node_py.borrow_mut(py);
-        if node.needs_lock {
-            return;
-        }
-        node.needs_lock = true;
-        let downstreams: Vec<Py<Stream>> =
-            node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-        drop(node);
-        for child in downstreams {
-            Self::mark_par_reachable(py, child);
-        }
     }
 
     /// Propagate value to downstreams in parallel using thread pool.

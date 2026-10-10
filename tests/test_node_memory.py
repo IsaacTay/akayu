@@ -40,3 +40,37 @@ def test_memory_per_node():
 
 def test_memory_per_compiled_node():
     assert _rss_per_node(compile_graphs=True) < 450
+
+
+def test_compile_frees_fused_chain_members():
+    """compile() moves a chain's steps into its first node. The other
+    members are only kept by references the user holds; the rest are freed."""
+    import weakref
+
+    s, out = akayu.Stream(), []
+    head = s.map(lambda x: x + 1)
+    middle = head.filter(lambda x: x % 2 == 0)
+    tail = middle.map(lambda x: x * 10)
+    buffered = tail.collect()  # not chainable: the chain ends at `tail`
+    buffered.sink(out.append)
+    member_refs = [weakref.ref(middle), weakref.ref(tail)]
+    del middle, tail
+    s.compile()
+    gc.collect()
+    assert [r() for r in member_refs] == [None, None]
+    for x in range(4):
+        s.emit(x)
+    buffered.flush()
+    assert out == [(20, 40)]
+    assert head is not None
+
+
+def test_a_held_member_still_flushes_after_compile():
+    s, out = akayu.Stream(), []
+    member = s.map(lambda x: x).map(lambda x: x)
+    member.collect().sink(out.append)
+    s.compile()
+    gc.collect()
+    s.emit(1)
+    member.flush()
+    assert out == [(1,)]
