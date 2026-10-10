@@ -3,6 +3,7 @@ import dis
 import os
 import sys
 import threading
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 
 
@@ -525,11 +526,10 @@ _CO_ASYNC_GENERATOR = 0x200
 _CO_VARARGS = 0x04
 _CO_VARKEYWORDS = 0x08
 
-# Cache for _analyze_lambda results. Keyed by id(func) — same function object
-# always produces the same result. Entries persist for the process lifetime;
-# in practice this is bounded by the number of unique lambda functions used in
-# stream graphs (typically a few hundred).
-_analysis_cache = {}
+# Cache for _analyze_lambda results, weakly keyed by the function object so an
+# entry dies with its function. (Keying by id(func) let a new function that
+# landed at a freed function's address pick up the old function's analysis.)
+_analysis_cache = weakref.WeakKeyDictionary()
 
 # Maximum bytecode length for analyzable patterns.
 # The most complex analyzable pattern (compound and/or with chained sub-expressions)
@@ -552,60 +552,59 @@ def _analyze_lambda(func):
       ("and", left_tuple, right_tuple), ("or", left_tuple, right_tuple),
       ("unwrap", resolved_callable)
     """
-    # Fast path: return cached result for previously analyzed functions
-    fid = id(func)
-    cached = _analysis_cache.get(fid)
-    if cached is not None:
-        return cached
-
-    # Early bail-out: must have __code__
+    # Only plain Python functions carry bytecode to analyze
     code = getattr(func, '__code__', None)
     if code is None:
-        _analysis_cache[fid] = None
         return None
+    try:
+        return _analysis_cache[func]
+    except KeyError:
+        pass
+    except TypeError:  # not weak-referenceable or not hashable: skip the cache
+        return _analyze_code(func, code)
+    result = _analyze_code(func, code)
+    try:
+        _analysis_cache[func] = result
+    except TypeError:
+        pass
+    return result
 
+
+def _analyze_code(func, code):
+    """Uncached body of _analyze_lambda."""
     # Must be single-arg, no *args/**kwargs
     if code.co_argcount != 1:
-        _analysis_cache[fid] = None
         return None
     flags = code.co_flags
     if flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
-        _analysis_cache[fid] = None
         return None
 
     # Pre-filter: reject obviously complex bytecodes before expensive disassembly
     if len(code.co_code) > _MAX_BYTECODE_LEN:
-        _analysis_cache[fid] = None
         return None
 
     # Get cleaned instructions
     clean = _clean_instructions(func)
     if clean is None:
-        _analysis_cache[fid] = None
         return None
 
     # Complexity guard
     if len(clean) > 25:
-        _analysis_cache[fid] = None
         return None
 
     # Reject multi-statement functions
     if any(i[0] == 'STORE_FAST' for i in clean):
-        _analysis_cache[fid] = None
         return None
 
     # Reject exception handling
     if any(i[0] in _EXCEPTION_OPCODES for i in clean):
-        _analysis_cache[fid] = None
         return None
 
     # Reject multiple LOAD_FAST (references x more than once in non-compound)
     # For compound expressions, each sub-expression can reference x once
     # We'll let the recursive analyzer handle this naturally
 
-    result = _analyze_expr(clean, func)
-    _analysis_cache[fid] = result
-    return result
+    return _analyze_expr(clean, func)
 
 
 def _get_caller_location():
