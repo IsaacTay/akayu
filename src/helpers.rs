@@ -420,8 +420,9 @@ pub(crate) fn reject_async(py: Python, func: &Py<PyAny>, op: &str) -> PyResult<(
 
 pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let code = CString::new(helpers_code).unwrap();
-    let fname = CString::new("helpers.py").unwrap();
-    let mname = CString::new("helpers").unwrap();
+    // Namespaced: a bare "helpers" entry in sys.modules shadows any user module of that name
+    let fname = CString::new("akayu/_helpers.py").unwrap();
+    let mname = CString::new("akayu._helpers").unwrap();
     let helpers_module = PyModule::from_code(py, &code, &fname, &mname)?;
 
     let build_map_func = helpers_module.getattr("_build_map_func")?;
