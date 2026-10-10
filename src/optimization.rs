@@ -83,8 +83,8 @@ impl Stream {
         self.compiled_chainable = (self.logic.is_chainable()
             && !matches!(&self.logic, NodeLogic::Filter { .. }))
             || matches!(&self.logic, NodeLogic::Chain { .. });
-        self.compiled_filter_fast = matches!(&self.logic, NodeLogic::Filter { .. })
-            && self.builtin_op.is_some();
+        self.compiled_filter_fast =
+            matches!(&self.logic, NodeLogic::Filter { .. }) && self.builtin_op.is_some();
         self.compiled_downstream_ptrs = self
             .downstreams
             .iter()
@@ -102,8 +102,8 @@ impl Stream {
                 node.compiled_chainable = (node.logic.is_chainable()
                     && !matches!(&node.logic, NodeLogic::Filter { .. }))
                     || matches!(&node.logic, NodeLogic::Chain { .. });
-                node.compiled_filter_fast = matches!(&node.logic, NodeLogic::Filter { .. })
-                    && node.builtin_op.is_some();
+                node.compiled_filter_fast =
+                    matches!(&node.logic, NodeLogic::Filter { .. }) && node.builtin_op.is_some();
                 let downstream_refs: Vec<Py<Stream>> =
                     node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
@@ -221,8 +221,7 @@ impl Stream {
         }
     }
 
-    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: &[Py<Self>]) {
-    }
+    fn mark_convergence_nodes(&self, _py: Python, _all_nodes: &[Py<Self>]) {}
 
     /// Eliminate source passthrough nodes from the graph.
     /// A Source node with a single downstream that is itself a Source
@@ -360,7 +359,11 @@ impl Stream {
         // Set head node's logic to Chain, downstreams to tail's downstreams,
         // and name it after its steps.
         let mut head = start_py.borrow_mut(py);
-        head.name = steps.iter().map(|step| step.name.as_str()).collect::<Vec<_>>().join(" -> ");
+        head.name = steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect::<Vec<_>>()
+            .join(" -> ");
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_ref(py)).collect();
         drop(head);
@@ -494,7 +497,8 @@ impl Stream {
                     continue;
                 }
 
-                let is_source_child = filter_single_parent.as_ref()
+                let is_source_child = filter_single_parent
+                    .as_ref()
                     .map(|p| p.as_ptr() as usize == source_ptr)
                     .unwrap_or(false);
                 branch_is_source = is_source_child;
@@ -609,7 +613,10 @@ impl Stream {
             // Extract predicate from Filter
             let predicate = {
                 let mut filter_node = filter_py.borrow_mut(py);
-                let pred = match std::mem::replace(&mut filter_node.logic, NodeLogic::ChainMember { was_sink: false }) {
+                let pred = match std::mem::replace(
+                    &mut filter_node.logic,
+                    NodeLogic::ChainMember { was_sink: false },
+                ) {
                     NodeLogic::Filter { predicate } => predicate,
                     _ => unreachable!(),
                 };
@@ -671,5 +678,4 @@ impl Stream {
             }
         }
     }
-
 }

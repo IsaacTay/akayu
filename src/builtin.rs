@@ -3,6 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyString, PyTuple};
 
+use crate::Stream;
 use crate::helpers::{
     get_analyze_lambda, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
     get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list, get_builtin_print,
@@ -11,7 +12,6 @@ use crate::helpers::{
     get_operator_truth,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, NodeLogic};
-use crate::Stream;
 
 /// Parse a comparison op string from the Python analyzer into a `CompareOp`.
 fn parse_compare_op(s: &str) -> Option<CompareOp> {

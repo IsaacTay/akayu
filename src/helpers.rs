@@ -162,10 +162,14 @@ pub(crate) fn wrap_error<T>(
     source_location: &str,
 ) -> PyResult<T> {
     res.map_err(|e| {
-        let is_akayu_err = e.get_type(py).is_subclass_of::<pyo3::exceptions::PyRuntimeError>().unwrap_or(false)
-            && e.value(py).repr().ok().is_some_and(|r| {
-                r.to_string().contains("Stream operation failed at node")
-            });
+        let is_akayu_err = e
+            .get_type(py)
+            .is_subclass_of::<pyo3::exceptions::PyRuntimeError>()
+            .unwrap_or(false)
+            && e.value(py)
+                .repr()
+                .ok()
+                .is_some_and(|r| r.to_string().contains("Stream operation failed at node"));
         if is_akayu_err {
             return e;
         }

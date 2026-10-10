@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
-use crate::node::NodeLogic;
 use crate::Stream;
+use crate::node::NodeLogic;
 
 // ---------------------------------------------------------------------------
 // Per-node profile data (accumulated in thread-local during execution)
