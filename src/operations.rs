@@ -115,6 +115,158 @@ impl Stream {
             },
         )
     }
+
+    fn flush_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        let mut futures = Vec::new();
+
+        // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
+        let has_buffer = matches!(
+            self.logic,
+            NodeLogic::Collect { .. }
+                | NodeLogic::ChunkBy { .. }
+                | NodeLogic::ExtractBetween { .. }
+                | NodeLogic::PrefetchMap { .. }
+                | NodeLogic::PrefetchFilter { .. }
+                | NodeLogic::PrefetchBatchMap { .. }
+        );
+        let is_sink = matches!(self.logic, NodeLogic::Sink { .. });
+        if !has_buffer && self.downstreams.is_empty() && !is_sink {
+            let msg = format!(
+                "flush() called on '{}' which has no buffer and no downstreams — \
+                 did you mean to call flush() on a collect() node?",
+                self.name
+            );
+            let warn_type = py.get_type::<pyo3::exceptions::PyUserWarning>();
+            let c_msg = std::ffi::CString::new(msg).unwrap();
+            let _ = PyErr::warn(py, warn_type.as_any(), &c_msg, 1);
+        }
+        match &mut self.logic {
+            NodeLogic::Collect { buffer } => {
+                let items = std::mem::take(buffer);
+                let tuple = PyTuple::new(py, items)?;
+                if let Some(f) = self.propagate(py, tuple.into())? {
+                    futures.push(f);
+                }
+            }
+            NodeLogic::ChunkBy { buffer, .. } => {
+                if !buffer.is_empty() {
+                    let items = std::mem::take(buffer);
+                    let tuple = PyTuple::new(py, items)?;
+                    if let Some(f) = self.propagate(py, tuple.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+                // Discard the incomplete chunk and return to the outside state
+                buffer.clear();
+                *inside = false;
+            }
+            NodeLogic::PrefetchMap { state, .. }
+            | NodeLogic::PrefetchFilter { state, .. }
+            | NodeLogic::PrefetchBatchMap { state, .. } => {
+                let results = wrap_error(
+                    py,
+                    state.call_method0(py, "flush"),
+                    &self.name,
+                    &self.source_location,
+                )?;
+                for result in results.bind(py).try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Propagate flush to downstream nodes — but NOT for Collect/ChunkBy.
+        // Collect/ChunkBy emit their buffer via propagate() above; cascading
+        // flush would prematurely drain downstream collects before they've had
+        // a chance to accumulate items from multiple flushes.
+        // Prefetch nodes DO propagate so their drained results flow onward.
+        // ExtractBetween also propagates: it discards rather than emits on
+        // flush, so stopping here would silently swallow the flush.
+        let should_propagate = !matches!(
+            self.logic,
+            NodeLogic::Collect { .. } | NodeLogic::ChunkBy { .. }
+        );
+        if should_propagate {
+            for downstream in &self.downstreams {
+                let mut d = downstream.borrow_mut(py);
+                if let Some(f) = d.flush(py, vec![], None)? {
+                    futures.push(f);
+                }
+            }
+        }
+
+        if !futures.is_empty() {
+            let gather = get_gather()?;
+            let gathered = gather.call1(py, (futures,))?;
+            return Ok(Some(gathered));
+        }
+        Ok(None)
+    }
+
+    fn drain_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+        let mut futures = Vec::new();
+
+        // Flush this node's buffer
+        match &mut self.logic {
+            NodeLogic::Collect { buffer } => {
+                let items = std::mem::take(buffer);
+                let tuple = PyTuple::new(py, items)?;
+                if let Some(f) = self.propagate(py, tuple.into())? {
+                    futures.push(f);
+                }
+            }
+            NodeLogic::ChunkBy { buffer, .. } => {
+                if !buffer.is_empty() {
+                    let items = std::mem::take(buffer);
+                    let tuple = PyTuple::new(py, items)?;
+                    if let Some(f) = self.propagate(py, tuple.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            NodeLogic::ExtractBetween { buffer, inside, .. } => {
+                // Discard the incomplete chunk and return to the outside state
+                buffer.clear();
+                *inside = false;
+            }
+            NodeLogic::PrefetchMap { state, .. }
+            | NodeLogic::PrefetchFilter { state, .. }
+            | NodeLogic::PrefetchBatchMap { state, .. } => {
+                let results = wrap_error(
+                    py,
+                    state.call_method0(py, "flush"),
+                    &self.name,
+                    &self.source_location,
+                )?;
+                for result in results.bind(py).try_iter()? {
+                    if let Some(f) = self.propagate(py, result?.into())? {
+                        futures.push(f);
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        // Always recurse into all downstreams
+        for downstream in &self.downstreams {
+            let mut d = downstream.borrow_mut(py);
+            if let Some(f) = d.drain(py, vec![], None)? {
+                futures.push(f);
+            }
+        }
+
+        if !futures.is_empty() {
+            let gather = get_gather()?;
+            let gathered = gather.call1(py, (futures,))?;
+            return Ok(Some(gathered));
+        }
+        Ok(None)
+    }
 }
 
 #[pymethods]
@@ -837,98 +989,6 @@ impl Stream {
         result
     }
 
-    fn flush_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        let mut futures = Vec::new();
-
-        // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
-        let has_buffer = matches!(
-            self.logic,
-            NodeLogic::Collect { .. }
-                | NodeLogic::ChunkBy { .. }
-                | NodeLogic::ExtractBetween { .. }
-                | NodeLogic::PrefetchMap { .. }
-                | NodeLogic::PrefetchFilter { .. }
-                | NodeLogic::PrefetchBatchMap { .. }
-        );
-        let is_sink = matches!(self.logic, NodeLogic::Sink { .. });
-        if !has_buffer && self.downstreams.is_empty() && !is_sink {
-            let msg = format!(
-                "flush() called on '{}' which has no buffer and no downstreams — \
-                 did you mean to call flush() on a collect() node?",
-                self.name
-            );
-            let warn_type = py.get_type::<pyo3::exceptions::PyUserWarning>();
-            let c_msg = std::ffi::CString::new(msg).unwrap();
-            let _ = PyErr::warn(py, warn_type.as_any(), &c_msg, 1);
-        }
-        match &mut self.logic {
-            NodeLogic::Collect { buffer } => {
-                let items = std::mem::take(buffer);
-                let tuple = PyTuple::new(py, items)?;
-                if let Some(f) = self.propagate(py, tuple.into())? {
-                    futures.push(f);
-                }
-            }
-            NodeLogic::ChunkBy { buffer, .. } => {
-                if !buffer.is_empty() {
-                    let items = std::mem::take(buffer);
-                    let tuple = PyTuple::new(py, items)?;
-                    if let Some(f) = self.propagate(py, tuple.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            NodeLogic::ExtractBetween { buffer, inside, .. } => {
-                // Discard the incomplete chunk and return to the outside state
-                buffer.clear();
-                *inside = false;
-            }
-            NodeLogic::PrefetchMap { state, .. }
-            | NodeLogic::PrefetchFilter { state, .. }
-            | NodeLogic::PrefetchBatchMap { state, .. } => {
-                let results = wrap_error(
-                    py,
-                    state.call_method0(py, "flush"),
-                    &self.name,
-                    &self.source_location,
-                )?;
-                for result in results.bind(py).try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Propagate flush to downstream nodes — but NOT for Collect/ChunkBy.
-        // Collect/ChunkBy emit their buffer via propagate() above; cascading
-        // flush would prematurely drain downstream collects before they've had
-        // a chance to accumulate items from multiple flushes.
-        // Prefetch nodes DO propagate so their drained results flow onward.
-        // ExtractBetween also propagates: it discards rather than emits on
-        // flush, so stopping here would silently swallow the flush.
-        let should_propagate = !matches!(
-            self.logic,
-            NodeLogic::Collect { .. } | NodeLogic::ChunkBy { .. }
-        );
-        if should_propagate {
-            for downstream in &self.downstreams {
-                let mut d = downstream.borrow_mut(py);
-                if let Some(f) = d.flush(py, vec![], None)? {
-                    futures.push(f);
-                }
-            }
-        }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
-    }
-
     /// Recursively flush this node and all downstream nodes.
     ///
     /// Unlike `flush()`, which only flushes this node's buffer,
@@ -977,66 +1037,6 @@ impl Stream {
         let result = self.drain_inner(py);
         self.flushing = false;
         result
-    }
-
-    fn drain_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        let mut futures = Vec::new();
-
-        // Flush this node's buffer
-        match &mut self.logic {
-            NodeLogic::Collect { buffer } => {
-                let items = std::mem::take(buffer);
-                let tuple = PyTuple::new(py, items)?;
-                if let Some(f) = self.propagate(py, tuple.into())? {
-                    futures.push(f);
-                }
-            }
-            NodeLogic::ChunkBy { buffer, .. } => {
-                if !buffer.is_empty() {
-                    let items = std::mem::take(buffer);
-                    let tuple = PyTuple::new(py, items)?;
-                    if let Some(f) = self.propagate(py, tuple.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            NodeLogic::ExtractBetween { buffer, inside, .. } => {
-                // Discard the incomplete chunk and return to the outside state
-                buffer.clear();
-                *inside = false;
-            }
-            NodeLogic::PrefetchMap { state, .. }
-            | NodeLogic::PrefetchFilter { state, .. }
-            | NodeLogic::PrefetchBatchMap { state, .. } => {
-                let results = wrap_error(
-                    py,
-                    state.call_method0(py, "flush"),
-                    &self.name,
-                    &self.source_location,
-                )?;
-                for result in results.bind(py).try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Always recurse into all downstreams
-        for downstream in &self.downstreams {
-            let mut d = downstream.borrow_mut(py);
-            if let Some(f) = d.drain(py, vec![], None)? {
-                futures.push(f);
-            }
-        }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
     }
 
     /// Apply a function to each element for side effects.
