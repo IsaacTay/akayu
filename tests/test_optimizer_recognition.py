@@ -10,7 +10,6 @@ import operator
 import sys
 
 import pytest
-
 from akayu._helpers import _analyze_lambda
 
 threshold = 10

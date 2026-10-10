@@ -12,8 +12,9 @@ their waiting time, significantly improving throughput.
 """
 
 import time
+
 import akayu
-from akayu import Stream, union
+from akayu import union
 
 
 def main():
@@ -104,9 +105,9 @@ def main():
 
     source.emit_batch([1, 2, 3])
 
-    print(f"Input: [1, 2, 3]")
-    print(f"Branch 1 (*2): [2, 4, 6]")
-    print(f"Branch 2 (+100): [101, 102, 103]")
+    print("Input: [1, 2, 3]")
+    print("Branch 1 (*2): [2, 4, 6]")
+    print("Branch 2 (+100): [101, 102, 103]")
     print(f"Merged output (order may vary): {sorted(merged_results)}")
 
     # ---------------------------------------------------------
@@ -132,8 +133,8 @@ def main():
 
     source.emit(5)
 
-    print(f"Input: 5")
-    print(f"Branch A: 10, Branch B: 15")
+    print("Input: 5")
+    print("Branch A: 10, Branch B: 15")
     print(f"Merged and sequentialized: {seq_results}")
 
     # ---------------------------------------------------------
@@ -158,7 +159,7 @@ def main():
 
     source.emit_batch([10, 20, 30])
 
-    print(f"Input: [10, 20, 30]")
+    print("Input: [10, 20, 30]")
     print(f"Doubled: {transformed_data['doubled']}")
     print(f"Tripled: {transformed_data['tripled']}")
     print(f"Negative: {transformed_data['negative']}")

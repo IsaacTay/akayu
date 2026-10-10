@@ -11,10 +11,10 @@ This example simulates processing sensor data or log entries
 with validation, transformation, and multiple output destinations.
 """
 
-import time
 import random
+import time
+
 import akayu
-from akayu import Stream, union
 
 
 def main():
@@ -45,7 +45,6 @@ def main():
 
     valid_readings = []
     alerts = []
-    processed_count = {"valid": 0, "invalid": 0}
 
     source = akayu.Stream()
 
@@ -237,7 +236,7 @@ def main():
         source.emit(tx)
 
     print(f"Converted amounts (USD): {converted_amounts}")
-    print(f"Transaction summary:")
+    print("Transaction summary:")
     for s in transaction_summary:
         print(f"  {s}")
 

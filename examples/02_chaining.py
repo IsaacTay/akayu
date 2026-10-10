@@ -31,8 +31,8 @@ def main():
 
     source.emit_batch([1, 2, 3, 4, 5])
 
-    print(f"Input: [1, 2, 3, 4, 5]")
-    print(f"Operations: *2, +1, filter(>5)")
+    print("Input: [1, 2, 3, 4, 5]")
+    print("Operations: *2, +1, filter(>5)")
     print(f"Output: {result}")
 
     # ---------------------------------------------------------
@@ -53,7 +53,7 @@ def main():
 
     source.emit_batch([1, 2, 3])
 
-    print(f"Input: [1, 2, 3]")
+    print("Input: [1, 2, 3]")
     print(f"Branch A (*2): {branch_a}")
     print(f"Branch B (+100): {branch_b}")
 
@@ -111,7 +111,7 @@ def main():
     source.emit_batch(numbers)
 
     print(f"Input: {numbers}")
-    print(f"Operations: *3, keep even, format")
+    print("Operations: *3, keep even, format")
     print(f"Output: {final_result}")
 
     # ---------------------------------------------------------
@@ -144,7 +144,7 @@ def main():
 
     source.emit_batch([10, 5, 3, 7, 2])
 
-    print(f"Input: [10, 5, 3, 7, 2]")
+    print("Input: [10, 5, 3, 7, 2]")
     print(f"Running sum: {running_sum}")
 
     print("\n" + "=" * 60)

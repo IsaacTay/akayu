@@ -8,7 +8,9 @@ class TestLambdaCacheCorrectness:
 
     def test_same_lambda_two_pipelines(self):
         """Same lambda function reused across two compiled pipelines."""
-        f = lambda x: x + 1
+
+        def f(x):
+            return x + 1
 
         # Pipeline 1
         s1 = akayu.Stream()
@@ -28,7 +30,9 @@ class TestLambdaCacheCorrectness:
 
     def test_same_filter_two_pipelines(self):
         """Same filter lambda reused across two compiled pipelines."""
-        pred = lambda x: x > 5
+
+        def pred(x):
+            return x > 5
 
         s1 = akayu.Stream()
         r1 = []
@@ -59,7 +63,9 @@ class TestLambdaCacheCorrectness:
     def test_closure_lambda_cached(self):
         """Lambda with closure variable — cache works (same function, same closure)."""
         threshold = 10
-        f = lambda x: x > threshold
+
+        def f(x):
+            return x > threshold
 
         s = akayu.Stream()
         r = []
@@ -80,7 +86,9 @@ class TestLambdaCacheCorrectness:
 
     def test_chained_lambda_cached(self):
         """Chained lambda (x.attr > val) is cached and works on reuse."""
-        f = lambda x: x.value > 0
+
+        def f(x):
+            return x.value > 0
 
         for _ in range(3):
             s = akayu.Stream()
@@ -93,7 +101,9 @@ class TestLambdaCacheCorrectness:
 
     def test_isinstance_filter_cached(self):
         """isinstance filter lambda is cached and reused correctly."""
-        f = lambda x: isinstance(x, int)
+
+        def f(x):
+            return isinstance(x, int)
 
         for _ in range(3):
             s = akayu.Stream()
@@ -154,7 +164,9 @@ class TestBytecodeLengthFilter:
 
     def test_lambda_with_list_comp_still_works(self):
         """List comprehension lambda exceeds length but still works."""
-        f = lambda x: [i for i in range(x)]
+
+        def f(x):
+            return list(range(x))
 
         s = akayu.Stream()
         r = []
@@ -165,9 +177,11 @@ class TestBytecodeLengthFilter:
 
     def test_boundary_pattern_still_analyzed(self):
         """Patterns near the bytecode length boundary are still analyzed."""
+
         # Compound expression: x > 0 and isinstance(x, int)
         # This is ~78 bytes — right at the boundary
-        f = lambda x: x > 0 and isinstance(x, int)
+        def f(x):
+            return x > 0 and isinstance(x, int)
 
         s = akayu.Stream()
         r = []
@@ -184,7 +198,9 @@ class TestCacheDoesNotCorruptAcrossTypes:
 
     def test_map_vs_filter_same_body(self):
         """Same lambda body used as map and filter — cache handles both."""
-        f = lambda x: x > 0
+
+        def f(x):
+            return x > 0
 
         # As filter
         s1 = akayu.Stream()

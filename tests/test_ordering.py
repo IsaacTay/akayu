@@ -2,7 +2,7 @@ import akayu
 
 
 def test_ordering_split_union_scalar_vs_batch():
-    """
+    r"""
     Verifies that s.emit_batch() produces the same downstream event order
     as sequential s.emit() calls in a split-merge topology.
 

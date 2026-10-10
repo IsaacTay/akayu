@@ -1,14 +1,15 @@
+import builtins as _builtins
+import contextlib
 import contextvars
 import dis
+import functools
 import inspect
 import os
 import sys
 import threading
+import types as _types
 import weakref
 from concurrent.futures import ThreadPoolExecutor
-
-
-import builtins as _builtins
 
 _NOISE_OPCODES = frozenset(
     {
@@ -607,10 +608,8 @@ def _analyze_lambda(func):
     except TypeError:  # not weak-referenceable or not hashable: skip the cache
         return _analyze_code(func, code)
     result = _analyze_code(func, code)
-    try:
+    with contextlib.suppress(TypeError):
         _analysis_cache[func] = result
-    except TypeError:
-        pass
     return result
 
 
@@ -736,7 +735,6 @@ def _build_starmap_func(func, args, kwargs):
         return wrapper
 
 
-_thread_pool = None
 # Per-node locks that serialize concurrent _update calls at par()/prefetch()
 # convergence points. Weakly keyed so a lock dies with its node; keying by
 # id(node) leaked one lock per node and handed dead nodes' locks to new ones.
@@ -744,6 +742,7 @@ _node_locks = weakref.WeakKeyDictionary()
 _node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
 
 
+@functools.cache
 def _get_global_pool():
     """Get or create the shared global thread pool for par() and prefetch().
 
@@ -751,10 +750,7 @@ def _get_global_pool():
     for each prefetch() call, making par() + prefetch() combinations efficient.
     The pool size defaults to the number of CPUs available.
     """
-    global _thread_pool
-    if _thread_pool is None:
-        _thread_pool = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
-    return _thread_pool
+    return ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
 
 def _get_node_lock(node):
@@ -782,9 +778,7 @@ def _parallel_execute(val, downstreams):
 
         return update_in_context
 
-    futures = []
-    for d in downstreams:
-        futures.append(pool.submit(make_update_fn(d, val)))
+    futures = [pool.submit(make_update_fn(d, val)) for d in downstreams]
 
     results = []
     errors = []
@@ -817,8 +811,6 @@ def _strip_internal_frames(exc):
         tb = tb.tb_next
     if not frames:
         return
-    import types as _types
-
     new_tb = None
     for frame, lasti, lineno in reversed(frames):
         new_tb = _types.TracebackType(new_tb, frame, lasti, lineno)
@@ -871,8 +863,6 @@ class _PrefetchState:
     """
 
     def __init__(self, func, size):
-        import threading
-
         self.func = func
         self.size = size
         self.executor = _get_global_pool()  # Use shared pool
@@ -939,8 +929,6 @@ class _PrefetchFilterState:
     """
 
     def __init__(self, wrapped_predicate, size):
-        import threading
-
         self.wrapped_predicate = wrapped_predicate
         self.size = size
         self.executor = _get_global_pool()  # Use shared pool
@@ -1003,8 +991,6 @@ class _PrefetchBatchMapState:
     """
 
     def __init__(self, func, size):
-        import threading
-
         self.func = func
         self.size = size
         self.executor = _get_global_pool()

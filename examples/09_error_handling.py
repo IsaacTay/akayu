@@ -12,9 +12,7 @@ Understanding how akayu handles errors is important for building
 robust pipelines that can recover from failures.
 """
 
-import traceback
 import akayu
-from akayu import Stream
 
 
 def main():
@@ -29,13 +27,13 @@ def main():
     print("\n--- Basic error propagation ---")
 
     source = akayu.Stream()
-    source.map(lambda x: x / 0).sink(lambda x: None)  # Division by zero
+    source.map(lambda x: x / 0).sink(lambda _: None)  # Division by zero
 
     try:
         source.emit(10)
     except Exception as e:
         print(f"Caught error: {type(e).__name__}: {e}")
-        print(f"\nError location points to the failing operation")
+        print("\nError location points to the failing operation")
 
     # ---------------------------------------------------------
     # SECTION: Named Streams for Debugging
@@ -46,7 +44,7 @@ def main():
     source = akayu.Stream(name="input_source")
     mapped = source.map(lambda x: x * 2, stream_name="double_operation")
     filtered = mapped.filter(lambda x: x > 5, stream_name="filter_greater_than_5")
-    filtered.sink(lambda x: None, stream_name="final_sink")
+    filtered.sink(lambda _: None, stream_name="final_sink")
 
     # The error message will include the stream name
     try:
@@ -63,13 +61,13 @@ def main():
     source = akayu.Stream()
 
     # This will fail
-    source.map(lambda x: int("not_a_number")).sink(lambda x: None)
+    source.map(lambda _: int("not_a_number")).sink(lambda _: None)
 
     try:
         source.emit("hello")
     except Exception as e:
         print(f"Error type: {type(e).__name__}")
-        print(f"Error message includes node name and location")
+        print("Error message includes node name and location")
 
     # ---------------------------------------------------------
     # SECTION: Filter Errors
@@ -84,7 +82,7 @@ def main():
             raise ValueError("Cannot filter zero")
         return x > 5
 
-    source.filter(may_fail).sink(lambda x: None)
+    source.filter(may_fail).sink(lambda _: None)
 
     # akayu wraps errors from your functions in a RuntimeError that names the
     # failing node; the original exception is available as __cause__.
@@ -101,7 +99,6 @@ def main():
 
     processed_items = []
     failed_items = []
-    error_count = {"count": 0}
 
     source = akayu.Stream()
 
@@ -125,10 +122,7 @@ def main():
     source.map(safe_operation).filter(lambda x: x is not None).sink(processed_items.append)
 
     for i in range(5):
-        try:
-            source.emit(i)
-        except Exception:
-            pass  # Already handled in safe_operation
+        source.emit(i)  # errors are handled inside safe_operation
 
     print(f"Processed items: {processed_items}")
     print(f"Failed items: {failed_items}")
@@ -153,11 +147,7 @@ def main():
             raise ValueError("Too large!")
         return x * 10
 
-    try:
-        p.map(risky).sink(lambda x: branch_results["risky"].append(x))
-    except Exception:
-        # Can't add error handling at pipeline build time
-        pass
+    p.map(risky).sink(lambda x: branch_results["risky"].append(x))
 
     # Process and catch errors per emit
     for i in [1, 3, 6, 8]:
@@ -184,8 +174,8 @@ def main():
     try:
         stage3.emit("hello")  # Will fail at parse_int
     except Exception as e:
-        print(f"Error in multi-stage pipeline:")
-        print(f"  Stage that failed: parse_int")
+        print("Error in multi-stage pipeline:")
+        print("  Stage that failed: parse_int")
         print(f"  Error: {type(e).__name__}")
 
     # ---------------------------------------------------------
@@ -193,9 +183,6 @@ def main():
     # ---------------------------------------------------------
     # accumulate can track errors as part of processing state
     print("\n--- Error tracking with accumulate ---")
-
-    results = []
-    errors = []
 
     def process_with_tracking(state, item):
         errors_so_far, processed = state
@@ -209,7 +196,7 @@ def main():
             return (errors_so_far, processed)
 
     source = akayu.Stream()
-    source.accumulate(process_with_tracking, start=([], [])).sink(lambda state: None)
+    source.accumulate(process_with_tracking, start=([], [])).sink(lambda _: None)
 
     source.emit(1)
     source.emit(2)

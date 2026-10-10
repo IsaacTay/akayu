@@ -45,7 +45,7 @@ class TestLogProcessing:
             ["req /c 200", "req /d 500", "req /e 200"],
             ["req /f 200"],
         ]
-        for src, logs in zip(sources, server_logs):
+        for src, logs in zip(sources, server_logs, strict=True):
             for line in logs:
                 src.emit(line)
 
@@ -72,7 +72,7 @@ class TestLogProcessing:
             ["req 200", "req 200"],
             ["req 500", "req 500", "req 200", "req 500"],
         ]
-        for src, logs in zip(sources, server_logs):
+        for src, logs in zip(sources, server_logs, strict=True):
             for line in logs:
                 src.emit(line)
 
@@ -176,7 +176,7 @@ class TestSensorDataFusion:
         alarms = ms.filter(lambda v: v > 100).to_list()
 
         readings = [50, 150, 80, 200]
-        for src, val in zip(sensors, readings):
+        for src, val in zip(sensors, readings, strict=True):
             src.emit(val)
 
         assert list(alarms[0]) == []
@@ -269,7 +269,7 @@ class TestTextProcessing:
             "jumped over the lazy".split(),
             "dog the quick".split(),
         ]
-        for src, words in zip(sources, docs):
+        for src, words in zip(sources, docs, strict=True):
             src.emit(words)
 
         assert "the" in word_sets[0]
@@ -321,7 +321,7 @@ class TestMultiStreamChainedCombinators:
         merged = a.union(b, c)
         results = merged.to_list()
 
-        for i, (sa, sb, sc) in enumerate(zip(a_srcs, b_srcs, c_srcs)):
+        for i, (sa, sb, sc) in enumerate(zip(a_srcs, b_srcs, c_srcs, strict=True)):
             sa.emit(i)
             sb.emit(i + 10)
             sc.emit(i + 20)

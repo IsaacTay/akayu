@@ -1,12 +1,9 @@
 """High-performance reactive streams for Python."""
 
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import AbstractContextManager
 from typing import (
     Any,
-    Callable,
-    ContextManager,
-    Iterable,
-    Iterator,
-    Sequence,
     Self,
     TypeVar,
     Union,
@@ -422,7 +419,7 @@ class Stream:
         """
         ...
 
-    def profile(self) -> ContextManager[Any]:
+    def profile(self) -> AbstractContextManager[Any]:
         """Return a Profiler context manager for this source.
 
         Usage:
@@ -813,7 +810,7 @@ class MultiStream:
         """Apply prefetch(n) to each stream in the batch."""
         ...
 
-    def profile(self) -> list[ContextManager[Any]] | dict[str, ContextManager[Any]]:
+    def profile(self) -> list[AbstractContextManager[Any]] | dict[str, AbstractContextManager[Any]]:
         """Return a profiler for each stream.
 
         In list mode: returns a list of profilers.

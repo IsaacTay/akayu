@@ -1,6 +1,5 @@
 import random
-import pytest
-import akayu
+
 from akayu import Stream, union
 
 
@@ -117,7 +116,7 @@ class TestCompileFuzz:
 
     def test_random_collect_flush_compiles(self):
         for seed in range(20):
-            rng = random.Random(seed)
+            random.Random(seed)
             s = Stream()
             c = s.map(_id).collect()
             c.sink(lambda x: None)
@@ -220,7 +219,7 @@ class TestCompileFuzz:
                     next_layer.append(node.filter(_true))
             if len(next_layer) >= 2 and rng.random() < 0.4:
                 u = union(*next_layer[:2])
-                next_layer = next_layer[2:] + [u.map(_id)]
+                next_layer = [*next_layer[2:], u.map(_id)]
             layer = next_layer if next_layer else layer
 
         for node in layer:
@@ -296,7 +295,7 @@ class TestCompileFuzz:
         sources[0].compile()
 
         for src in sources:
-            src.emit_batch(list(range(10)) + [-1] + list(range(5)))
+            src.emit_batch([*list(range(10)), -1, *list(range(5))])
             src.flush()
 
     def test_mega_dag_100_seeds(self):
@@ -305,7 +304,7 @@ class TestCompileFuzz:
             n_sources = rng.randint(2, 6)
             sources = [Stream() for _ in range(n_sources)]
 
-            def rchain(node, depth):
+            def rchain(node, depth, rng=rng):
                 cur = node
                 for _ in range(depth):
                     op = rng.choice(["map", "filter", "flatten", "accumulate", "collect", "chunk_by"])
@@ -418,7 +417,7 @@ class TestCompileFuzz:
         sources[0].compile()
 
         for src in sources:
-            src.emit_batch(list(range(20)) + [-1])
+            src.emit_batch([*list(range(20)), -1])
             src.flush()
 
     def test_kaiju_dag_compiles(self):
