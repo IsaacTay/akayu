@@ -2,7 +2,7 @@
 
 ## System Requirements
 
-- Python 3.8+
+- Python 3.13+
 - No Rust toolchain required — pre-built wheels are distributed via pip
 
 ## Installation

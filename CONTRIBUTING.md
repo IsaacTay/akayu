@@ -33,7 +33,7 @@ If you prefer not to use Nix, you can set up the development environment manuall
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
     ```
 
-2.  **Install Python 3.8+** (e.g., via [pyenv](https://github.com/pyenv/pyenv) or your system package manager).
+2.  **Install Python 3.13+** (e.g., via [pyenv](https://github.com/pyenv/pyenv) or your system package manager).
 
 3.  **Install uv**:
     ```bash
