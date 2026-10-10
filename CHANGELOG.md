@@ -41,6 +41,9 @@ independent of machine load:
   Python helper per item: `union()` costs 87-92% less per item.
 - `zip()` / `combine_latest()` no longer pack and unpack an `(index, value)` tuple per item:
   78% / 71% less per item, 65% less in batches.
+- `map`/`filter`/`sink`/`batch_map(func, *args, **kwargs)` bind the extra arguments natively instead
+  of calling a Python wrapper per item: 81% less per item with keyword arguments, 40% with
+  positional ones. `starmap(func)` star-calls natively: 13-17% less.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
 - 41% less memory per node (565 -> 332 bytes), and `emit_batch()` map/filter/accumulate stages

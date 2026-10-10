@@ -269,41 +269,19 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Bu
 
 /// Detect builtin fast-path for a Filter predicate.
 ///
-/// Handles wrapped predicates by checking `_akayu_inner` / `_akayu_args` attributes
-/// set by `_build_map_func` when extra args were provided (e.g., `filter(isinstance, int)`).
+/// `filter(isinstance, int)` binds `int` after the item (`crate::call::bind`);
+/// a bound call with exactly one extra positional argument is checked against
+/// isinstance / operator.is_ / operator.is_not.
 fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp> {
-    // Try to recover the original function and args from the wrapper
-    let pred = predicate.bind(py);
-    let (func, args) = if let Ok(Some(inner)) = pred.getattr_opt(pyo3::intern!(py, "_akayu_inner"))
-    {
-        let args = pred
-            .getattr_opt(pyo3::intern!(py, "_akayu_args"))
-            .ok()
-            .flatten()
-            .map(Bound::unbind);
-        (inner.unbind(), args)
-    } else {
-        // No wrapper — predicate is the original function (no extra args)
-        // Fall through to lambda bytecode analysis
+    let Some(bound) = crate::call::bound_parts(py, predicate) else {
+        // No extra arguments: analyse the predicate's own bytecode
         return analyze_lambda_fallback(py, predicate);
     };
-
-    // Filter builtins require exactly one extra arg
-    let arg = if let Some(ref args_obj) = args {
-        let args_bound = args_obj.bind(py);
-        if let Ok(tuple) = args_bound.cast::<PyTuple>() {
-            if tuple.len() == 1 {
-                Some(tuple.get_item(0).ok()?.unbind())
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    } else {
-        None
+    let call = bound.get();
+    let ([arg], false) = (call.args(), call.has_kwargs()) else {
+        return None;
     };
-    let arg = arg?;
+    let (func, arg) = (&call.func, arg.clone_ref(py));
 
     if get_builtin_isinstance().is_ok_and(|b| func.is(b)) {
         return Some(BuiltinOp::IsInstance(arg));
