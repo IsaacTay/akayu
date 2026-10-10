@@ -56,6 +56,7 @@ cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "sr
 [dependency-groups]
 dev = [
     "hypothesis>=6.113.0",
+    "mypy>=1.18",  # tests/test_stubs.py: mypy + stubtest check the type stub
     # numpy/scipy are only needed by the pipeline/ test fixture
     "numpy>=1.24.4",
     "pytest-codeblocks>=0.17.0",

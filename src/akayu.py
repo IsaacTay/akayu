@@ -722,7 +722,7 @@ def _parallel_execute(val, downstreams):
         def update_in_context():
             lock = _get_node_lock(d)
             with lock:
-                return ctx.run(d.update, v)
+                return ctx.run(d._update, v)
         return update_in_context
 
     futures = []
@@ -767,12 +767,12 @@ def _strip_internal_frames(exc):
 def _safe_update(node, val):
     lock = _get_node_lock(node)
     with lock:
-        return node.update(val)
+        return node._update(val)
 
 def _safe_update_batch(node, items):
     lock = _get_node_lock(node)
     with lock:
-        return node.update_batch(items)
+        return node._update_batch(items)
 
 class _Profiler:
     """Context manager for profiling a pipeline.
@@ -803,7 +803,7 @@ class _PrefetchState:
     Uses a shared global thread pool to process items ahead while emitting results
     in sequence order. The shared pool minimizes overhead when combining with par().
 
-    Returns results to Rust for propagation instead of calling d.update() directly,
+    Returns results to Rust for propagation instead of calling d._update() directly,
     to avoid thread-safety issues with PyO3 borrows.
     """
 
@@ -869,7 +869,7 @@ class _PrefetchFilterState:
     Like _PrefetchState but for filter predicates. The wrapped predicate
     returns (keep, value) tuples, and we only emit values where keep is True.
 
-    Returns results to Rust for propagation instead of calling d.update() directly,
+    Returns results to Rust for propagation instead of calling d._update() directly,
     to avoid thread-safety issues with PyO3 borrows.
     """
 

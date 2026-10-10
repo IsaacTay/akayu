@@ -1,8 +1,9 @@
 import builtins as _builtins
+import threading as _threading
+import time as _time
 
 from akayu.akayu import (
     ProfileReport,
-    from_text_file,
     to_text_file,
 )
 from akayu.akayu import Stream as _Stream
@@ -254,8 +255,8 @@ class MultiStream:
     def map(self, func, *args, **kwargs):
         return self._apply("map", func, *args, **kwargs)
 
-    def filter(self, func, *args, **kwargs):
-        return self._apply("filter", func, *args, **kwargs)
+    def filter(self, predicate, *args, **kwargs):
+        return self._apply("filter", predicate, *args, **kwargs)
 
     def sink(self, func, *args, **kwargs):
         return self._apply("sink", func, *args, **kwargs)
@@ -263,9 +264,11 @@ class MultiStream:
     def starmap(self, func, *args, **kwargs):
         return self._apply("starmap", func, *args, **kwargs)
 
-    def accumulate(self, func, start, **kwargs):
+    def accumulate(self, func, start, *, returns_state=False, stream_name=None):
         ms = MultiStream.__new__(MultiStream)
-        ms._streams = [s.accumulate(func, start, **kwargs) for s in self._streams]
+        ms._streams = [
+            s.accumulate(func, start, returns_state=returns_state, stream_name=stream_name) for s in self._streams
+        ]
         ms._keys = self._keys
         return ms
 
@@ -542,10 +545,78 @@ def zip(*args):
     return MultiStream(results)
 
 
+class TextFileSource(Stream):
+    """A source Stream that emits the lines of a text file.
+
+    Created by `from_text_file()`. Build the pipeline first, then call
+    `start()`: lines are read in a background thread and emitted in order,
+    without their line endings. `join()` waits for the last line and
+    re-raises any error from reading the file or from the pipeline.
+    """
+
+    def __new__(cls, path, interval=None):
+        return super().__new__(cls, name="from_text_file")
+
+    def __init__(self, path, interval=None):
+        self.path = path
+        self.interval = interval
+        self._thread = None
+        self._error = None
+
+    def start(self):
+        """Start reading the file in a background thread. Returns self."""
+        if self._thread is not None:
+            raise RuntimeError(f"from_text_file({self.path!r}) was already started")
+        self._thread = _threading.Thread(target=self._read, name=f"akayu-from_text_file({self.path})", daemon=True)
+        self._thread.start()
+        return self
+
+    def join(self, timeout=None):
+        """Wait until every line has been emitted, re-raising any error."""
+        if self._thread is None:
+            raise RuntimeError(f"from_text_file({self.path!r}) was never started; call start() first")
+        self._thread.join(timeout)
+        if self._thread.is_alive():
+            raise TimeoutError(f"still reading {self.path!r} after {timeout}s")
+        if self._error is not None:
+            raise self._error
+
+    def _read(self):
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                for line in f:
+                    self.emit(line.rstrip("\r\n"))
+                    if self.interval:
+                        _time.sleep(self.interval)
+        except BaseException as e:  # surfaced by join()
+            self._error = e
+
+
+def from_text_file(path, interval=None):
+    """Create a source Stream that emits the lines of a text file.
+
+    Nothing is read until `start()` is called, so build the pipeline first::
+
+        source = akayu.from_text_file("data.txt")
+        source.map(str.upper).sink(print)
+        source.start().join()
+
+    Args:
+        path: The file to read (UTF-8).
+        interval: Optional delay in seconds between emitting lines. The file
+            is read once; lines appended later are not picked up.
+
+    Returns:
+        A `TextFileSource`.
+    """
+    return TextFileSource(path, interval)
+
+
 __all__ = [
     "MultiStream",
     "ProfileReport",
     "Stream",
+    "TextFileSource",
     "combine_latest",
     "from_text_file",
     "to_text_file",

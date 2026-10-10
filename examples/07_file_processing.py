@@ -3,17 +3,18 @@ Example 07: File Processing
 
 This example demonstrates:
 - from_text_file() to create a stream from a text file
-- to_text_file() to write stream output to a file
-- Processing lines through a pipeline
+- start() and join() to read the file once the pipeline is built
+- to_text_file() as a sink that appends each item to a file
 
-akayu provides file I/O helpers for reading lines from files
-and writing data to files as part of your stream pipeline.
+from_text_file() reads nothing until start() is called, so build the whole
+pipeline first. Lines are read in a background thread; join() waits for the
+last one and re-raises any error from reading or from the pipeline.
 """
 
-import os
 import tempfile
+from pathlib import Path
+
 import akayu
-from akayu import Stream
 
 
 def main():
@@ -21,198 +22,104 @@ def main():
     print("AKAYU EXAMPLE 07: File Processing")
     print("=" * 60)
 
-    # ---------------------------------------------------------
-    # SECTION: Create a Test File
-    # ---------------------------------------------------------
-    # First, let's create a sample file to work with
-    print("\n--- Creating test data file ---")
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
 
-    test_content = """Line 1: Hello World
-Line 2: The quick brown fox
-Line 3: Jumps over the lazy dog
-Line 4: Python is awesome
-Line 5: akayu streams are fast
-Line 6: Rust powers the backend
-Line 7: Data flows through pipelines
-Line 8: End of file
-"""
+        # ---------------------------------------------------------
+        # SECTION: Reading Lines with from_text_file()
+        # ---------------------------------------------------------
+        print("\n--- Reading file with from_text_file() ---")
 
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-        f.write(test_content)
-        test_file = f.name
+        test_file = tmp / "lines.txt"
+        test_file.write_text(
+            "Line 1: Hello World\n"
+            "Line 2: The quick brown fox\n"
+            "a line without the keyword\n"
+            "Line 4: akayu streams are fast\n"
+        )
 
-    print(f"Created test file: {test_file}")
-    print(f"Content preview (first 3 lines):")
-    for i, line in enumerate(test_content.split('\n')[:3]):
-        print(f"  {line}")
+        lines_read = []
+        source = akayu.from_text_file(str(test_file))
+        source.map(str.upper).filter(lambda line: line.startswith("LINE")).sink(lines_read.append)
+        source.start().join()
 
-    # ---------------------------------------------------------
-    # SECTION: Reading Lines with from_text_file()
-    # ---------------------------------------------------------
-    # from_text_file() creates a stream that emits lines from a file
-    print("\n--- Reading file with from_text_file() ---")
+        print(f"Lines starting with 'LINE': {lines_read}")
+        assert lines_read == ["LINE 1: HELLO WORLD", "LINE 2: THE QUICK BROWN FOX", "LINE 4: AKAYU STREAMS ARE FAST"]
 
-    # Create a stream that reads from the file
-    file_stream = akayu.from_text_file(test_file)
+        # ---------------------------------------------------------
+        # SECTION: Writing to File with to_text_file()
+        # ---------------------------------------------------------
+        # to_text_file(data, path) appends str(data) and a newline: use it as a sink
+        print("\n--- Writing to file with to_text_file() ---")
 
-    lines_read = []
+        output_file = tmp / "processed.txt"
+        source = akayu.Stream()
+        source.map(lambda x: f"Processed: {x}").sink(akayu.to_text_file, path=str(output_file))
+        source.emit_batch(["apple", "banana", "cherry"])
 
-    # Process each line through the stream
-    file_stream.map(lambda line: line.upper()).filter(lambda line: "LINE" in line).sink(lines_read.append)
+        written = output_file.read_text()
+        print(f"Written to {output_file.name}:\n{written}")
+        assert written == "Processed: apple\nProcessed: banana\nProcessed: cherry\n"
 
-    # Emit None to trigger the file reading (or let it run in background thread)
-    # Note: from_text_file reads in a background thread
-    import time
-    time.sleep(0.1)  # Give time for background thread to read
+        # ---------------------------------------------------------
+        # SECTION: Complete File Processing Pipeline
+        # ---------------------------------------------------------
+        # Read, transform, filter, and write, all in one pipeline
+        print("\n--- Complete file processing pipeline ---")
 
-    print(f"Lines containing 'LINE': {lines_read}")
+        input_file = tmp / "scores.csv"
+        input_file.write_text("name,score\nAlice,85\nBob,92\nCharlie,78\nDiana,95\nEve,88\n")
+        passing_file = tmp / "passing.txt"
 
-    # ---------------------------------------------------------
-    # SECTION: Writing to File with to_text_file()
-    # ---------------------------------------------------------
-    # to_text_file() writes each emitted item as a line in a file
-    print("\n--- Writing to file with to_text_file() ---")
+        def passing(line):
+            name, score = line.split(",")
+            return f"{name}: {score} (PASSED)" if score.isdigit() and int(score) >= 85 else None
 
-    output_file = test_file + ".out"
+        passing_lines = []
+        source = akayu.from_text_file(str(input_file))
+        passed = source.map(passing).filter(lambda x: x is not None)
+        passed.sink(passing_lines.append)
+        passed.sink(akayu.to_text_file, path=str(passing_file))
+        source.start().join()
 
-    source = Stream()
-    akayu.to_text_file(source, output_file)
+        print("Students with score >= 85:")
+        for line in passing_lines:
+            print(f"  {line}")
+        assert passing_lines == ["Alice: 85 (PASSED)", "Bob: 92 (PASSED)", "Diana: 95 (PASSED)", "Eve: 88 (PASSED)"]
+        assert passing_file.read_text().splitlines() == passing_lines
 
-    source.map(lambda x: f"Processed: {x}").sink(lambda x: None)
+        # ---------------------------------------------------------
+        # SECTION: Line-by-line Processing Pattern
+        # ---------------------------------------------------------
+        # Common pattern: read a log, categorize each line, aggregate counts
+        print("\n--- Processing log file example ---")
 
-    source.emit_batch(["apple", "banana", "cherry", "date"])
+        log_file = tmp / "server.log"
+        log_file.write_text(
+            "INFO: Server started on port 8080\n"
+            "WARN: High memory usage detected\n"
+            "ERROR: Connection timeout\n"
+            "INFO: Retry successful\n"
+            "ERROR: Authentication failed\n"
+        )
 
-    # Read back what was written
-    time.sleep(0.1)
-    with open(output_file) as f:
-        written_content = f.read()
+        def categorize(line):
+            return line.split(":", 1)[0].lower()
 
-    print(f"Written to {output_file}:")
-    print(written_content)
+        categories = []
+        source = akayu.from_text_file(str(log_file))
+        source.map(categorize).sink(categories.append)
+        source.start().join()
 
-    # ---------------------------------------------------------
-    # SECTION: Complete File Processing Pipeline
-    # ---------------------------------------------------------
-    # A more complete example: read, transform, filter, write
-    print("\n--- Complete file processing pipeline ---")
-
-    # Create input file with some data
-    input_data = """name,score
-Alice,85
-Bob,92
-Charlie,78
-Diana,95
-Eve,88
-"""
-
-    input_file = test_file + ".in"
-    with open(input_file, 'w') as f:
-        f.write(input_data)
-
-    # Create output file for passing students
-    output_file = test_file + ".passing"
-
-    source = akayu.from_text_file(input_file)
-
-    passing_lines = []
-
-    def process_line(line):
-        if ',' in line and line != "name,score":
-            name, score_str = line.strip().split(',')
-            try:
-                score = int(score_str)
-                return f"{name}: {score} (PASSED)" if score >= 85 else None
-            except ValueError:
-                return None
-        return None
-
-    source.map(process_line).filter(lambda x: x is not None).sink(passing_lines.append)
-
-    # Also write to output file
-    writer_stream = Stream()
-    akayu.to_text_file(writer_stream, output_file)
-    source.sink(lambda x: writer_stream.emit(x))
-
-    # Wait for background processing
-    time.sleep(0.2)
-
-    print(f"Input file: {input_file}")
-    print(f"Students with score >= 85:")
-    for line in passing_lines:
-        print(f"  {line}")
-
-    print(f"\nAlso written to: {output_file}")
-
-    # ---------------------------------------------------------
-    # SECTION: Line-by-line Processing Pattern
-    # ---------------------------------------------------------
-    # Common pattern: read file, process each line, aggregate results
-    print("\n--- Processing log file example ---")
-
-    # Create a sample log file
-    log_content = """INFO: Server started on port 8080
-DEBUG: Loading configuration
-INFO: Database connected
-WARN: High memory usage detected
-ERROR: Connection timeout
-INFO: Retry successful
-DEBUG: Cache invalidated
-WARN: Slow query detected
-ERROR: Authentication failed
-INFO: User logged in
-"""
-
-    log_file = test_file + ".log"
-    with open(log_file, 'w') as f:
-        f.write(log_content)
-
-    # Process log file
-    log_stream = akayu.from_text_file(log_file)
-
-    error_count = 0
-    warn_count = 0
-    errors = []
-
-    def categorize(line):
-        if line.startswith("ERROR"):
-            return "error"
-        elif line.startswith("WARN"):
-            return "warn"
-        return "info"
-
-    log_stream.map(categorize).sink(lambda cat: None)  # Process for side effects
-
-    # Alternative: aggregate counts
-    source = akayu.from_text_file(log_file)
-
-    categories = []
-    source.map(categorize).sink(categories.append)
-
-    time.sleep(0.2)
-
-    error_count = categories.count("error")
-    warn_count = categories.count("warn")
-
-    print(f"Log file: {log_file}")
-    print(f"Lines processed: {len(categories)}")
-    print(f"ERROR count: {error_count}")
-    print(f"WARN count: {warn_count}")
-    print(f"INFO count: {categories.count('info')}")
-
-    # ---------------------------------------------------------
-    # SECTION: Cleanup
-    # ---------------------------------------------------------
-    print("\n--- Cleanup ---")
-
-    # Clean up temporary files
-    for f in [test_file, output_file, input_file, log_file]:
-        if os.path.exists(f):
-            os.remove(f)
-
-    print("Temporary files removed")
+        counts = {c: categories.count(c) for c in ("error", "warn", "info")}
+        print(f"Lines processed: {len(categories)}, counts: {counts}")
+        assert counts == {"error": 2, "warn": 1, "info": 2}
 
     print("\n" + "=" * 60)
-    print("EXAMPLE 07 COMPLETE")
+    print("KEY TAKEAWAYS:")
+    print("1. from_text_file() reads nothing until start(): build the pipeline first")
+    print("2. join() waits for the last line and re-raises any error")
+    print("3. to_text_file(data, path) is a sink: .sink(akayu.to_text_file, path=...)")
     print("=" * 60)
 
 
