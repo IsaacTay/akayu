@@ -86,10 +86,12 @@ def main():
 
     source.filter(may_fail).sink(lambda x: None)
 
+    # akayu wraps errors from your functions in a RuntimeError that names the
+    # failing node; the original exception is available as __cause__.
     try:
         source.emit(0)
-    except ValueError as e:
-        print(f"Filter error: {e}")
+    except RuntimeError as e:
+        print(f"Filter error: {type(e.__cause__).__name__}: {e.__cause__}")
 
     # ---------------------------------------------------------
     # SECTION: Recovery Patterns
@@ -161,8 +163,8 @@ def main():
     for i in [1, 3, 6, 8]:
         try:
             source.emit(i)
-        except ValueError as e:
-            print(f"Error on emit({i}): {e}")
+        except RuntimeError as e:
+            print(f"Error on emit({i}): {e.__cause__}")
 
     print(f"Safe branch results: {branch_results['safe']}")
     print(f"Risky branch results: {branch_results['risky']}")
