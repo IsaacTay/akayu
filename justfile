@@ -46,6 +46,11 @@ bench: build-release
     uv run python -m pytest tests/test_benchmark.py tests/test_benchmark_split.py tests/test_compile_benchmark.py \
         tests/test_lambda_benchmark.py tests/test_vectorcall_benchmark.py -v
 
+# CPU (instructions per item, load-independent) and memory per workload.
+# Pass args through, e.g. `just bench-cost --save before.json` / `--compare before.json`
+bench-cost *args: build-release
+    uv run python scripts/bench_cost.py {{args}}
+
 # Run clippy lints (warnings are errors)
 clippy:
     cargo clippy -- -D warnings
