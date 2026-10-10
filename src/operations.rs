@@ -6,7 +6,7 @@ use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 use crate::error::StreamError;
 use crate::helpers::{
     capture_source_location, check_not_compiled, reject_async, resolve_stream_name,
-    get_build_map_func, get_build_starmap_func, get_func_name, get_gather,
+    get_build_map_func, get_build_starmap_func, get_func_name,
     get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
     get_profiler_class, wrap_error,
 };
@@ -82,7 +82,6 @@ impl Stream {
         logic: NodeLogic,
         name: String,
         source_location: String,
-        func_is_sync: bool,
     ) -> PyResult<Py<Self>> {
         let compiled_chainable = (logic.is_chainable()
             && !matches!(&logic, NodeLogic::Filter { .. }))
@@ -95,7 +94,6 @@ impl Stream {
                 downstreams: Vec::new(),
                 parents: std::sync::Mutex::new(Vec::new()),
                 name,
-                func_is_sync,
                 frozen: false,
                 needs_lock: false,
                 par_branches_marked: false,
@@ -116,8 +114,7 @@ impl Stream {
         )
     }
 
-    fn flush_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        let mut futures = Vec::new();
+    fn flush_inner(&mut self, py: Python) -> PyResult<()> {
 
         // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
         let has_buffer = matches!(
@@ -144,17 +141,13 @@ impl Stream {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
                 let tuple = PyTuple::new(py, items)?;
-                if let Some(f) = self.propagate(py, tuple.into())? {
-                    futures.push(f);
-                }
+                self.propagate(py, tuple.into())?;
             }
             NodeLogic::ChunkBy { buffer, .. } => {
                 if !buffer.is_empty() {
                     let items = std::mem::take(buffer);
                     let tuple = PyTuple::new(py, items)?;
-                    if let Some(f) = self.propagate(py, tuple.into())? {
-                        futures.push(f);
-                    }
+                    self.propagate(py, tuple.into())?;
                 }
             }
             NodeLogic::ExtractBetween { buffer, inside, .. } => {
@@ -172,9 +165,7 @@ impl Stream {
                     &self.source_location,
                 )?;
                 for result in results.bind(py).try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
+                    self.propagate(py, result?.into())?;
                 }
             }
             _ => {}
@@ -194,39 +185,26 @@ impl Stream {
         if should_propagate {
             for downstream in &self.downstreams {
                 let mut d = downstream.borrow_mut(py);
-                if let Some(f) = d.flush(py, vec![], None)? {
-                    futures.push(f);
-                }
+                d.flush(py, vec![], None)?;
             }
         }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
+        Ok(())
     }
 
-    fn drain_inner(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
-        let mut futures = Vec::new();
+    fn drain_inner(&mut self, py: Python) -> PyResult<()> {
 
         // Flush this node's buffer
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
                 let tuple = PyTuple::new(py, items)?;
-                if let Some(f) = self.propagate(py, tuple.into())? {
-                    futures.push(f);
-                }
+                self.propagate(py, tuple.into())?;
             }
             NodeLogic::ChunkBy { buffer, .. } => {
                 if !buffer.is_empty() {
                     let items = std::mem::take(buffer);
                     let tuple = PyTuple::new(py, items)?;
-                    if let Some(f) = self.propagate(py, tuple.into())? {
-                        futures.push(f);
-                    }
+                    self.propagate(py, tuple.into())?;
                 }
             }
             NodeLogic::ExtractBetween { buffer, inside, .. } => {
@@ -244,9 +222,7 @@ impl Stream {
                     &self.source_location,
                 )?;
                 for result in results.bind(py).try_iter()? {
-                    if let Some(f) = self.propagate(py, result?.into())? {
-                        futures.push(f);
-                    }
+                    self.propagate(py, result?.into())?;
                 }
             }
             _ => {}
@@ -255,17 +231,9 @@ impl Stream {
         // Always recurse into all downstreams
         for downstream in &self.downstreams {
             let mut d = downstream.borrow_mut(py);
-            if let Some(f) = d.drain(py, vec![], None)? {
-                futures.push(f);
-            }
+            d.drain(py, vec![], None)?;
         }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
+        Ok(())
     }
 }
 
@@ -284,7 +252,6 @@ impl Stream {
             downstreams: Vec::new(),
             parents: std::sync::Mutex::new(Vec::new()),
             name: name.unwrap_or_else(|| "source".to_string()),
-            func_is_sync: true, // Source has no function, treat as sync
             frozen: false,
             needs_lock: false,
             par_branches_marked: false,
@@ -355,7 +322,6 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "map", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
@@ -367,7 +333,6 @@ impl Stream {
             };
             this.name = format!("prefetch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
-            this.func_is_sync = func_is_sync;
             return Ok(slf.clone().unbind());
         }
 
@@ -376,7 +341,6 @@ impl Stream {
             NodeLogic::Map { func: wrapped_func },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -438,7 +402,6 @@ impl Stream {
             NodeLogic::Prefetch { size: n },
             name,
             source_location,
-            true,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -493,7 +456,6 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "starmap", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_starmap_func()?)?;
 
         let node = Self::make_node(
@@ -501,7 +463,6 @@ impl Stream {
             NodeLogic::Map { func: wrapped_func },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -558,7 +519,6 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "batch_map", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
@@ -570,7 +530,6 @@ impl Stream {
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
-            this.func_is_sync = func_is_sync;
             return Ok(slf.clone().unbind());
         }
 
@@ -579,7 +538,6 @@ impl Stream {
             NodeLogic::BatchMap { func: wrapped_func },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -633,7 +591,6 @@ impl Stream {
         let func_name = get_func_name(py, &predicate);
         let name = resolve_stream_name(stream_name, "filter", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
         let wrapped_predicate = wrap_func(py, predicate, args, kwargs, get_build_map_func()?)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
@@ -651,7 +608,6 @@ impl Stream {
             };
             this.name = format!("prefetch_filter({size})+{name}");
             this.source_location = format!("{}, {}", this.source_location, source_location);
-            this.func_is_sync = func_is_sync;
             return Ok(slf.clone().unbind());
         }
 
@@ -662,7 +618,6 @@ impl Stream {
             },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -710,7 +665,6 @@ impl Stream {
             NodeLogic::Flatten,
             name,
             source_location,
-            true,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -763,7 +717,6 @@ impl Stream {
             NodeLogic::Collect { buffer: Vec::new() },
             name,
             source_location,
-            true,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -840,7 +793,6 @@ impl Stream {
         reject_async(py, &predicate, "chunk_by")?;
         let func_name = get_func_name(py, &predicate);
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
 
         let name = resolve_stream_name(stream_name, "chunk_by", func_name.as_deref());
 
@@ -854,7 +806,6 @@ impl Stream {
             },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -921,7 +872,6 @@ impl Stream {
         let open_name = get_func_name(py, &open);
         let close_name = get_func_name(py, &close);
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
 
         let name = resolve_stream_name(
             stream_name,
@@ -940,7 +890,6 @@ impl Stream {
             },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -984,7 +933,7 @@ impl Stream {
         py: Python,
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    ) -> PyResult<()> {
         let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.clone()).into());
@@ -1030,7 +979,7 @@ impl Stream {
         py: Python,
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    ) -> PyResult<()> {
         // Re-entrancy guard: detect cycles in the flush graph
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.clone()).into());
@@ -1085,7 +1034,6 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "sink", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
         let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
 
         let node = Self::make_node(
@@ -1093,7 +1041,6 @@ impl Stream {
             NodeLogic::Sink { func: wrapped_func },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -1172,7 +1119,6 @@ impl Stream {
         reject_async(py, &func, "accumulate")?;
         let func_name = get_func_name(py, &func);
         let source_location = capture_source_location(py);
-        let func_is_sync = true;
 
         let name = resolve_stream_name(stream_name, "accumulate", func_name.as_deref());
 
@@ -1185,7 +1131,6 @@ impl Stream {
             },
             name,
             source_location,
-            func_is_sync,
         )?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
@@ -1219,7 +1164,7 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
-    pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
@@ -1268,7 +1213,7 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
-    pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());

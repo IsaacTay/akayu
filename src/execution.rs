@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::helpers::{
-    cached_vectorcall1, get_gather, get_parallel_execute,
+    cached_vectorcall1, get_parallel_execute,
     get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
 };
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
@@ -904,7 +904,7 @@ impl Stream {
         &mut self,
         py: Python,
         items: Vec<Py<PyAny>>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    ) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
             std::ptr::from_ref(&*self) as usize
@@ -925,12 +925,10 @@ impl Stream {
                 );
             }
             // Call flush once per item (matching unfused behavior: filter passes each delimiter individually)
-            let mut last_result = None;
             for _x in items {
-                let mut t = target.borrow_mut(py);
-                last_result = t.flush(py, vec![], None)?;
+                target.borrow_mut(py).flush(py, vec![], None)?;
             }
-            return Ok(last_result);
+            return Ok(());
         }
 
         // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
@@ -951,11 +949,10 @@ impl Stream {
                 drop(t);
                 return Err(crate::error::StreamError::ReentrantEmit(name).into());
             }
-            let mut last_result = None;
             for x in items {
-                last_result = t.propagate(py, x)?;
+                t.propagate(py, x)?;
             }
-            return Ok(last_result);
+            return Ok(());
         }
 
         // Chainable variants: delegate to apply_logic_batch
@@ -973,7 +970,7 @@ impl Stream {
             };
             match apply_logic_batch(py, &mut self.logic, &ctx, items, profiling_active)? {
                 BatchStepResult::Items(output) => return self.propagate_batch(py, output),
-                BatchStepResult::Terminal => return Ok(None),
+                BatchStepResult::Terminal => return Ok(()),
             }
         }
 
@@ -1009,7 +1006,7 @@ impl Stream {
                     );
                 }
                 buffer.extend(items);
-                return Ok(None);
+                return Ok(());
             }
 
             NodeLogic::ChunkBy {
@@ -1092,7 +1089,7 @@ impl Stream {
                 if !emitted.is_empty() {
                     return self.propagate_batch(py, emitted);
                 }
-                return Ok(None);
+                return Ok(());
             }
 
             NodeLogic::ExtractBetween {
@@ -1134,7 +1131,7 @@ impl Stream {
                 if !emitted.is_empty() {
                     return self.propagate_batch(py, emitted);
                 }
-                return Ok(None);
+                return Ok(());
             }
 
             // -- Multi-stream --
@@ -1219,11 +1216,8 @@ impl Stream {
 
             // -- Concurrent (self-propagating) --
             NodeLogic::Parallel => {
-                let mut futures = Vec::new();
                 for x in items {
-                    if let Some(f) = self.propagate_parallel(py, x)? {
-                        futures.push(f);
-                    }
+                    self.propagate_parallel(py, x)?;
                 }
                 if profiling_active {
                     profiling::record_node(
@@ -1235,12 +1229,7 @@ impl Stream {
                         &self.source_location,
                     );
                 }
-                if !futures.is_empty() {
-                    let gather = get_gather()?;
-                    let gathered = gather.call1(py, (futures,))?;
-                    return Ok(Some(gathered));
-                }
-                return Ok(None);
+                return Ok(());
             }
             NodeLogic::PrefetchMap { state, .. } | NodeLogic::PrefetchFilter { state, .. } => {
                 let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
@@ -1267,7 +1256,7 @@ impl Stream {
                 for val in to_propagate {
                     self.propagate(py, val)?;
                 }
-                return Ok(None);
+                return Ok(());
             }
             NodeLogic::PrefetchBatchMap { state, .. } => {
                 let py_list = PyList::new(py, &items)?;
@@ -1298,7 +1287,7 @@ impl Stream {
                 for val in to_propagate {
                     self.propagate(py, val)?;
                 }
-                return Ok(None);
+                return Ok(());
             }
 
             // Chainable variants handled above
@@ -1308,7 +1297,7 @@ impl Stream {
         self.propagate_batch(py, output_batch)
     }
 
-    pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
             std::ptr::from_ref(&*self) as usize
@@ -1368,8 +1357,8 @@ impl Stream {
             };
             match apply_logic(py, &mut self.logic, &ctx, x, profiling_active)? {
                 StepResult::Value(v) => return self.propagate(py, v),
-                StepResult::Filtered => return Ok(None),
-                StepResult::Terminal => return Ok(None),
+                StepResult::Filtered => return Ok(()),
+                StepResult::Terminal => return Ok(()),
                 StepResult::Batch(items) => return self.propagate_batch(py, items),
             }
         }
@@ -1408,7 +1397,7 @@ impl Stream {
                     );
                 }
                 buffer.push(x);
-                return Ok(None);
+                return Ok(());
             }
             NodeLogic::ChunkBy {
                 buffer,
@@ -1489,7 +1478,7 @@ impl Stream {
                 if profiling_active {
                     profiling::record_node(node_id, ft, 1, 0, &self.name, &self.source_location);
                 }
-                return Ok(None);
+                return Ok(());
             }
             NodeLogic::ExtractBetween {
                 buffer,
@@ -1525,7 +1514,7 @@ impl Stream {
                 }
                 return match chunk {
                     Some(chunk) => self.propagate(py, chunk),
-                    None => Ok(None),
+                    None => Ok(()),
                 };
             }
             NodeLogic::Tag { index } => {
@@ -1599,7 +1588,7 @@ impl Stream {
                 }
                 let results = wrap_error(py, results, &self.name, &self.source_location)?;
                 self.dispatch_state_results(py, results, profiling_active, node_id, ft, 1)?;
-                return Ok(None);
+                return Ok(());
             }
 
             // Chainable variants handled above
@@ -1622,24 +1611,20 @@ impl Stream {
         if let Some(val) = result {
             return self.propagate(py, val);
         }
-        Ok(None)
+        Ok(())
     }
 }
 
 // Propagation methods (non-pymethods)
 impl Stream {
-    pub fn propagate_batch(
-        &self,
-        py: Python,
-        output_batch: Vec<Py<PyAny>>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    pub fn propagate_batch(&self, py: Python, output_batch: Vec<Py<PyAny>>) -> PyResult<()> {
         if output_batch.is_empty() {
-            return Ok(None);
+            return Ok(());
         }
 
-let n = self.downstreams.len();
+        let n = self.downstreams.len();
         if n == 0 {
-            return Ok(None);
+            return Ok(());
         }
 
         // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
@@ -1649,108 +1634,58 @@ let n = self.downstreams.len();
         if n == 1 {
             if use_lock {
                 let batch_list = PyList::new(py, &output_batch)?;
-                let safe_update_batch = get_safe_update_batch()?;
-                let result = safe_update_batch.call1(py, (&self.downstreams[0], batch_list))?;
-                if result.is_none(py) {
-                    return Ok(None);
-                }
-                return Ok(Some(result));
+                get_safe_update_batch()?.call1(py, (&self.downstreams[0], batch_list))?;
+                return Ok(());
             } else if !self.compiled_downstream_ptrs.is_empty() {
                 let child = unsafe { self.compiled_downstream_ptrs[0].get_mut() };
-                let result = child.update_batch(py, output_batch)?;
-                return Ok(result);
-            } else {
-                let mut child = self.downstreams[0].borrow_mut(py);
-                let result = child.update_batch(py, output_batch)?;
-                drop(child);
-                return Ok(result);
+                return child.update_batch(py, output_batch);
             }
+            return self.downstreams[0].borrow_mut(py).update_batch(py, output_batch);
         }
 
-        let mut futures = Vec::new();
         if use_lock {
             let safe_update = get_safe_update()?;
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    let result = safe_update.call1(py, (child, val.clone_ref(py)))?;
-                    if !result.is_none(py) {
-                        futures.push(result);
-                    }
+                    safe_update.call1(py, (child, val.clone_ref(py)))?;
                 }
-                let result = safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
-                if !result.is_none(py) {
-                    futures.push(result);
-                }
+                safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
             }
         } else if !self.compiled_downstream_ptrs.is_empty() {
             let ptrs = &self.compiled_downstream_ptrs;
             for val in output_batch {
                 for ptr in ptrs.iter().take(n - 1) {
                     let child = unsafe { ptr.get_mut() };
-                    if let Some(result) = child.update(py, val.clone_ref(py))? {
-                        futures.push(result);
-                    }
+                    child.update(py, val.clone_ref(py))?;
                 }
                 let child = unsafe { ptrs[n - 1].get_mut() };
-                if let Some(result) = child.update(py, val)? {
-                    futures.push(result);
-                }
+                child.update(py, val)?;
             }
         } else {
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    let mut child_ref = child.borrow_mut(py);
-                    if let Some(result) = child_ref.update(py, val.clone_ref(py))? {
-                        futures.push(result);
-                    }
-                    drop(child_ref);
+                    child.borrow_mut(py).update(py, val.clone_ref(py))?;
                 }
-                let mut child_ref = self.downstreams[n - 1].borrow_mut(py);
-                if let Some(result) = child_ref.update(py, val)? {
-                    futures.push(result);
-                }
-                drop(child_ref);
+                self.downstreams[n - 1].borrow_mut(py).update(py, val)?;
             }
         }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
+        Ok(())
     }
 
-    pub fn propagate(&self, py: Python, val: Py<PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    pub fn propagate(&self, py: Python, val: Py<PyAny>) -> PyResult<()> {
         let n = self.downstreams.len();
         if n == 0 {
-            return Ok(None);
+            return Ok(());
         }
 
         // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
         // for all downstream calls to prevent borrow conflicts at convergence points.
-        let use_lock = self.needs_lock;
-        let mut futures = Vec::new();
-
-        if use_lock {
+        if self.needs_lock {
             let safe_update = get_safe_update()?;
-            if n == 1 {
-                let result = safe_update.call1(py, (&self.downstreams[0], &val))?;
-                if !result.is_none(py) {
-                    futures.push(result);
-                }
-            } else {
-                for child in self.downstreams.iter().take(n - 1) {
-                    let result = safe_update.call1(py, (child, val.clone_ref(py)))?;
-                    if !result.is_none(py) {
-                        futures.push(result);
-                    }
-                }
-                let result = safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
-                if !result.is_none(py) {
-                    futures.push(result);
-                }
+            for child in self.downstreams.iter().take(n - 1) {
+                safe_update.call1(py, (child, val.clone_ref(py)))?;
             }
+            safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
         } else if !self.compiled_downstream_ptrs.is_empty() {
             // Compiled fast path: bypass PyCell borrow checks using cached raw pointers.
             // Safe because: DAG (no cycles), sequential processing (no aliasing),
@@ -1758,55 +1693,25 @@ let n = self.downstreams.len();
             let ptrs = &self.compiled_downstream_ptrs;
             if n == 1 {
                 let child = unsafe { ptrs[0].get_mut() };
-                let result = child.update(py, val)?;
-                if let Some(r) = result {
-                    return Ok(Some(r));
-                }
-                return Ok(None);
-            } else {
-                for ptr in ptrs.iter().take(n - 1) {
-                    let child = unsafe { ptr.get_mut() };
-                    if let Some(result) = child.update(py, val.clone_ref(py))? {
-                        futures.push(result);
-                    }
-                }
-                let child = unsafe { ptrs[n - 1].get_mut() };
-                if let Some(result) = child.update(py, val)? {
-                    futures.push(result);
-                }
+                return child.update(py, val);
             }
+            for ptr in ptrs.iter().take(n - 1) {
+                let child = unsafe { ptr.get_mut() };
+                child.update(py, val.clone_ref(py))?;
+            }
+            let child = unsafe { ptrs[n - 1].get_mut() };
+            child.update(py, val)?;
         } else {
             // Pre-compile fallback: use PyCell borrow_mut
             if n == 1 {
-                let mut child = self.downstreams[0].borrow_mut(py);
-                let result = child.update(py, val)?;
-                drop(child);
-                if let Some(r) = result {
-                    return Ok(Some(r));
-                }
-                return Ok(None);
-            } else {
-                for child in self.downstreams.iter().take(n - 1) {
-                    let mut child_ref = child.borrow_mut(py);
-                    if let Some(result) = child_ref.update(py, val.clone_ref(py))? {
-                        futures.push(result);
-                    }
-                    drop(child_ref);
-                }
-                let mut child_ref = self.downstreams[n - 1].borrow_mut(py);
-                if let Some(result) = child_ref.update(py, val)? {
-                    futures.push(result);
-                }
-                drop(child_ref);
+                return self.downstreams[0].borrow_mut(py).update(py, val);
             }
+            for child in self.downstreams.iter().take(n - 1) {
+                child.borrow_mut(py).update(py, val.clone_ref(py))?;
+            }
+            self.downstreams[n - 1].borrow_mut(py).update(py, val)?;
         }
-
-        if !futures.is_empty() {
-            let gather = get_gather()?;
-            let gathered = gather.call1(py, (futures,))?;
-            return Ok(Some(gathered));
-        }
-        Ok(None)
+        Ok(())
     }
 
     /// Iterate results from a stateful node (Prefetch*), propagate each,
@@ -1856,34 +1761,22 @@ let n = self.downstreams.len();
     }
 
     /// Propagate value to downstreams in parallel using thread pool.
-    pub(crate) fn propagate_parallel(
-        &self,
-        py: Python,
-        val: Py<PyAny>,
-    ) -> PyResult<Option<Py<PyAny>>> {
+    pub(crate) fn propagate_parallel(&self, py: Python, val: Py<PyAny>) -> PyResult<()> {
         let n = self.downstreams.len();
         if n == 0 {
-            return Ok(None);
+            return Ok(());
         }
 
         // For single downstream, no parallelism needed - just use normal propagation
         if n == 1 {
-            let mut child_ref = self.downstreams[0].borrow_mut(py);
-            return child_ref.update(py, val);
+            return self.downstreams[0].borrow_mut(py).update(py, val);
         }
 
         // Multiple downstreams: use thread pool for parallel execution
-        let parallel_execute = get_parallel_execute()?;
         let downstreams_list: Vec<Py<Self>> =
             self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
         let dl = PyList::new(py, downstreams_list)?;
-        let result = parallel_execute.call1(py, (val, dl))?;
-
-        // _parallel_execute returns None or an asyncio.gather coroutine
-        if result.is_none(py) {
-            Ok(None)
-        } else {
-            Ok(Some(result))
-        }
+        get_parallel_execute()?.call1(py, (val, dl))?;
+        Ok(())
     }
 }

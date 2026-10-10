@@ -733,9 +733,6 @@ def _parallel_execute(val, downstreams):
 
     return None
 
-def _gather(futures):
-    pass
-
 _INTERNAL_NAMES = frozenset(('_safe_update', '_safe_update_batch', '_strip_internal_frames'))
 
 def _strip_internal_frames(exc):

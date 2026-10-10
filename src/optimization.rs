@@ -15,8 +15,6 @@ impl Stream {
     ///
     /// This method walks the stream graph and:
     /// - Fuses consecutive Map operations into a single composed Map
-    /// - If all nodes have sync-only functions (`func_is_sync` = true), enables
-    ///   `skip_async_check` for all nodes to avoid per-emit `is_awaitable` checks
     pub fn optimize_topology(&mut self, py: Python) {
         // Phase 1: Fuse consecutive maps and filters
         // DISABLED: Unsafe for dynamic topologies (where nodes are added after first emit)
@@ -332,7 +330,6 @@ impl Stream {
 
         // Extract logic from each node into ChainNode structs
         let mut steps: Vec<ChainNode> = Vec::new();
-        let mut combined_func_is_sync = true;
 
         for (i, node_py) in chain_node_refs.iter().enumerate() {
             let mut node = node_py.borrow_mut(py);
@@ -344,7 +341,6 @@ impl Stream {
             let cached_vectorcall = node.cached_vectorcall.take();
             let flush_target = node.flush_target.take();
             let emit_target = node.emit_target.take();
-            combined_func_is_sync = combined_func_is_sync && node.func_is_sync;
             node.downstreams.clear();
             steps.push(ChainNode {
                 logic,
@@ -362,7 +358,6 @@ impl Stream {
         let mut head = start_py.borrow_mut(py);
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_ref(py)).collect();
-        head.func_is_sync = combined_func_is_sync;
         drop(head);
 
         // Recurse into tail downstreams and any branches from branching nodes
