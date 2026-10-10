@@ -92,12 +92,15 @@ akayu uses thread-based concurrency via `par()` and `prefetch()` for parallel ex
 
 ## Is it thread-safe?
 
-**Yes**, with caveats:
+**Yes**:
 
-- A single source can be emitted from multiple threads
-- Each `Stream()` source is independent
-- After `compile()`, the graph is locked (no thread safety issues)
-- For true parallelism, use `par()` which manages its own thread pool
+- A source can be emitted from multiple threads: each `emit()` holds the source's lock.
+- Streams merged with `union`, `zip` or `combine_latest` can be emitted from different threads:
+  the merged node and everything after it are locked per item.
+- `compile()` replaces those per-item locks with one lock for the whole connected graph (unless it
+  contains `par()`), so a compiled graph is entered by one thread at a time.
+- A thread waiting for a lock releases the GIL, so other Python threads keep running.
+- For parallel I/O, use `par()` or `prefetch()`, which run work on akayu's thread pool.
 
 ```python
 from concurrent.futures import ThreadPoolExecutor

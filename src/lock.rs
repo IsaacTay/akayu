@@ -27,11 +27,18 @@ impl NodeLock {
     /// Lock for the current thread. Uncontended this is one atomic operation.
     /// When another thread holds the lock, wait with the GIL released so the
     /// holder can run Python code and finish.
+    #[inline]
     pub(crate) fn acquire(&self, py: Python) -> NodeLockGuard<'_> {
         if !self.0.try_lock() {
-            py.detach(|| self.0.lock());
+            self.wait(py);
         }
         NodeLockGuard(self, std::marker::PhantomData)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wait(&self, py: Python) {
+        py.detach(|| self.0.lock());
     }
 }
 

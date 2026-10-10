@@ -141,13 +141,18 @@ impl Stream {
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
         let node = Self::make_node(py, NodeLogic::Source, "union".to_string(), source_location)?;
+        // Like akayu.union(): the inputs may be emitted from different
+        // threads into the shared node (compile() can remove these locks).
+        node.borrow_mut(py).needs_lock = true;
 
         this.downstreams.push(Downstream::new(py, &node));
+        this.needs_lock = true;
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
 
         for other in others {
             if let Ok(mut other_ref) = other.try_borrow_mut(py) {
+                other_ref.needs_lock = true;
                 other_ref.downstreams.push(Downstream::new(py, &node));
                 node.borrow(py)
                     .parents
@@ -389,10 +394,13 @@ impl Stream {
             format!("tag({})", index),
             std::sync::Arc::clone(source_location),
         )?;
-        tag_node
-            .borrow_mut(py)
-            .downstreams
-            .push(Downstream::new(py, target));
+        {
+            let mut tag = tag_node.borrow_mut(py);
+            tag.downstreams.push(Downstream::new(py, target));
+            // The combinator is shared by every input, which may be emitted
+            // from different threads (compile() can remove this lock).
+            tag.needs_lock = true;
+        }
         target
             .borrow(py)
             .parents

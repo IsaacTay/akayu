@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::builtin::{
     cache_secondary_vectorcalls, detect_builtin_for_logic, detect_emit_target_from_func,
@@ -17,6 +18,8 @@ impl Stream {
     /// This enables all optimizations including chain compilation, which is only safe
     /// when the topology is guaranteed not to change after optimization.
     pub fn optimize_topology_full(&mut self, py: Python, source_py_ptr: usize) -> Vec<Py<Self>> {
+        // Before fusion, so the nodes it absorbs get the shared lock too.
+        self.share_graph_lock(py, source_py_ptr);
         self.eliminate_source_passthroughs(py);
 
         let all_nodes = self.collect_all_nodes(py);
@@ -30,6 +33,61 @@ impl Stream {
         self.mark_par_branch_nodes(py, &all_nodes);
 
         all_nodes
+    }
+
+    /// Give every node of this connected graph one lock, when that is
+    /// provably safe, and drop the per-edge locks it makes redundant.
+    ///
+    /// Every way into the graph (emit/emit_batch on any source, flush on any
+    /// node) takes the lock of the node it starts at. Once all nodes share one
+    /// lock, two threads can't be in the graph at once, so the `needs_lock`
+    /// edges that guard merges of several sources (union, zip, combine_latest)
+    /// lock nothing new: they are cleared, and the compiled raw-pointer path
+    /// applies to them. Skipped when the graph has a par() node (its workers
+    /// update branches while the emitting thread holds the lock), when any
+    /// node is already frozen (another thread may be inside it through raw
+    /// pointers), or when any node is borrowed right now (in use). The GIL is
+    /// held throughout and no Python code runs, so nothing starts meanwhile.
+    fn share_graph_lock(&mut self, py: Python, source_py_ptr: usize) {
+        if matches!(self.logic, NodeLogic::Parallel) || self.frozen {
+            return;
+        }
+        let mut seen = HashSet::from([source_py_ptr]);
+        let mut nodes: Vec<Py<Self>> = Vec::new();
+        let mut stack: Vec<Py<Self>> = self
+            .downstreams
+            .iter()
+            .map(|d| d.node.clone_ref(py))
+            .collect();
+        stack.extend(self.parents.lock().unwrap().iter().map(|p| p.clone_ref(py)));
+        while let Some(node_py) = stack.pop() {
+            if !seen.insert(node_py.as_ptr() as usize) {
+                continue;
+            }
+            let Ok(node) = node_py.try_borrow_mut(py) else {
+                return; // in use by another thread (or re-entrantly)
+            };
+            if node.frozen || matches!(node.logic, NodeLogic::Parallel) {
+                return;
+            }
+            stack.extend(node.downstreams.iter().map(|d| d.node.clone_ref(py)));
+            stack.extend(node.parents.lock().unwrap().iter().map(|p| p.clone_ref(py)));
+            drop(node);
+            nodes.push(node_py);
+        }
+        let lock = Arc::clone(&self.lock);
+        self.needs_lock = false;
+        for d in &mut self.downstreams {
+            d.lock = Arc::clone(&lock);
+        }
+        for node_py in nodes {
+            let mut node = node_py.borrow_mut(py);
+            node.lock = Arc::clone(&lock);
+            node.needs_lock = false;
+            for d in &mut node.downstreams {
+                d.lock = Arc::clone(&lock);
+            }
+        }
     }
 
     /// Collect all nodes reachable from this node's downstreams.

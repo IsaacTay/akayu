@@ -159,6 +159,26 @@ fn combine_latest_push(
     Ok(Some(PyTuple::new(py, values)?.into_any().unbind()))
 }
 
+/// A sink's `target.emit(x)` shortcut: take the target's lock, as
+/// `target.emit()` does, then propagate. Out of line: it is rare, and inline
+/// it made the hot `update()` path measurably slower.
+#[inline(never)]
+fn emit_into_target(
+    py: Python,
+    target: &Py<crate::Stream>,
+    items: impl IntoIterator<Item = Py<PyAny>>,
+) -> PyResult<()> {
+    let t = target.borrow(py);
+    let _guard = t.lock.acquire(py);
+    if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
+        return Err(crate::error::StreamError::ReentrantEmit(t.name.to_string()).into());
+    }
+    for x in items {
+        t.propagate(py, x)?;
+    }
+    Ok(())
+}
+
 /// `func(*x)`. A tuple is passed through as the argument tuple; anything else
 /// is converted to one first (raising like `*x` for non-iterables).
 fn star_call(py: Python, func: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -659,13 +679,7 @@ fn apply_logic_general(
                 if profiling {
                     profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0);
                 }
-                let t = target.borrow(py);
-                if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                    let name = t.name.to_string();
-                    drop(t);
-                    return Err(crate::error::StreamError::ReentrantEmit(name).into());
-                }
-                t.propagate(py, x)?;
+                emit_into_target(py, target, [x])?;
                 return Ok(StepResult::Terminal);
             }
             let t = prof_start(profiling);
@@ -943,15 +957,7 @@ pub(crate) fn apply_logic_batch(
                 if profiling {
                     profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0);
                 }
-                let t = target.borrow(py);
-                if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                    let name = t.name.to_string();
-                    drop(t);
-                    return Err(crate::error::StreamError::ReentrantEmit(name).into());
-                }
-                for x in items {
-                    t.propagate(py, x)?;
-                }
+                emit_into_target(py, target, items)?;
                 return Ok(BatchStepResult::Terminal);
             }
             let t = prof_start(profiling);
@@ -1034,15 +1040,7 @@ impl Stream {
             if profiling_active {
                 profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0);
             }
-            let t = target.borrow(py);
-            if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                let name = t.name.to_string();
-                drop(t);
-                return Err(crate::error::StreamError::ReentrantEmit(name).into());
-            }
-            for x in items {
-                t.propagate(py, x)?;
-            }
+            emit_into_target(py, target, items)?;
             return Ok(());
         }
 
@@ -1295,13 +1293,7 @@ impl Stream {
             if profiling_active {
                 profiling::record_node(node_id, Duration::ZERO, 1, 0);
             }
-            let t = target.borrow(py);
-            if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-                let name = t.name.to_string();
-                drop(t);
-                return Err(crate::error::StreamError::ReentrantEmit(name).into());
-            }
-            return t.propagate(py, x);
+            return emit_into_target(py, target, [x]);
         }
 
         // Chainable variants: delegate to apply_logic

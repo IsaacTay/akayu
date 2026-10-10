@@ -286,6 +286,11 @@ The locking is optimized:
 - Individual branch nodes don't need locks since they're not shared
 - Detected automatically during `compile()`
 
+Merges of separate sources (`union`, `zip`, `combine_latest`) lock their shared node in the same way,
+so the sources can be emitted from different threads. In a graph without `par()`, `compile()` gives
+every node one shared lock instead: each `emit()` already takes it, so the per-item locks on merges
+are dropped.
+
 ### Performance Characteristics
 
 | Configuration           | Behavior                                        |
