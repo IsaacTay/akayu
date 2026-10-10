@@ -15,10 +15,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = [
-    "numpy",
-    "scipy",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -52,25 +49,17 @@ module-name = "akayu.akayu"
 [tool.uv]
 # Track Rust source files so uv rebuilds when they change
 # See: https://github.com/PyO3/maturin/issues/2314
-cache-keys = [{ file = "Cargo.toml" }, { file = "src/**/*.rs" }]
+# pyproject.toml must be listed too: setting cache-keys replaces uv's default,
+# so without it dependency changes leave stale metadata in the venv.
+cache-keys = [{ file = "pyproject.toml" }, { file = "Cargo.toml" }, { file = "src/**/*.rs" }]
 
 [dependency-groups]
 dev = [
-    "blosc2>=2.5.1",
     "hypothesis>=6.113.0",
-    "matplotlib>=3.7.5",
+    # numpy/scipy are only needed by the pipeline/ test fixture
     "numpy>=1.24.4",
-    "opencv-python-headless>=4.13.0.92",
-    "polars>=1.8.2",
-    "pystackreg>=0.2.8",
     "pytest-codeblocks>=0.17.0",
-    "pyyaml>=6.0.3",
-    "rerun-sdk>=0.22.1",
-    "rich>=14.3.4",
     "scipy>=1.10.1",
-    "typst>=0.14.8",
-    "zstandard>=0.23.0",
-    "zstd>=1.5.7.3",
 ]
 docs = [
     "mkdocs-shadcn>=0.9.8",
