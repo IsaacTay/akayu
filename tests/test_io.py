@@ -1,3 +1,4 @@
+import threading
 import time
 from pathlib import Path
 
@@ -31,6 +32,26 @@ def test_write_file_sink_append(tmp_path):
     assert Path(path).read_text() == "Line 1\nLine 2\n"
     s.emit(3)  # non-strings are written via str()
     assert Path(path).read_text() == "Line 1\nLine 2\n3\n"
+
+
+def test_concurrent_appends_keep_lines_whole(tmp_path):
+    """to_text_file releases the GIL for its file I/O, so threads write
+    concurrently; each line is one append, so lines never interleave."""
+    path = str(tmp_path / "out.txt")
+    lines = {f"thread{t}-" + "x" * 300 + f"-{i}" for t in range(8) for i in range(200)}
+
+    def write(t):
+        for i in range(200):
+            to_text_file(f"thread{t}-" + "x" * 300 + f"-{i}", path)
+
+    threads = [threading.Thread(target=write, args=(t,)) for t in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    written = Path(path).read_text().split("\n")
+    assert written[-1] == ""
+    assert sorted(written[:-1]) == sorted(lines)
 
 
 def test_source_from_file(tmp_path):

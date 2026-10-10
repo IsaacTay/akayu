@@ -374,17 +374,18 @@ pub(crate) fn check_not_compiled(compiled: bool, name: &str) -> PyResult<()> {
 /// # World
 /// ```
 pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-
-    let s = data.bind(py).str()?;
-    let output = s.to_string();
-
-    writeln!(file, "{output}")?;
+    let mut line = data.bind(py).str()?.to_string();
+    line.push('\n');
+    // File I/O runs with the GIL released. The line goes out as one append
+    // (writeln! wrote the text and the newline separately), so concurrent
+    // writers, threads or processes, never interleave within a line.
+    py.detach(|| {
+        let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+        file.write_all(line.as_bytes())
+    })?;
     Ok(())
 }
 
-/// Initialize Python helper functions from embedded Python code.
-/// Raise TypeError if `func` is an async function: akayu never awaits coroutines.
 /// Raise TypeError for async callables: akayu never awaits coroutines.
 pub(crate) fn reject_async(py: Python, func: &Py<PyAny>, op: &str) -> PyResult<()> {
     if certainly_sync(py, func.bind(py))? {
@@ -423,6 +424,7 @@ fn certainly_sync(py: Python, func: &Bound<'_, PyAny>) -> PyResult<bool> {
         .is_none())
 }
 
+/// Initialize Python helper functions from embedded Python code.
 pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let code = CString::new(helpers_code).unwrap();
     // Namespaced: a bare "helpers" entry in sys.modules shadows any user module of that name
