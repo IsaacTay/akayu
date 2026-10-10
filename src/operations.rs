@@ -423,14 +423,15 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "starmap", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_starmap_func()?)?;
-
-        let node = Self::make_node(
-            py,
-            NodeLogic::Map { func: wrapped_func },
-            name,
-            source_location,
-        )?;
+        // Without extra arguments, star-call natively; otherwise wrap in Python.
+        let logic =
+            if args.bind(py).is_empty() && kwargs.as_ref().is_none_or(|k| k.bind(py).is_empty()) {
+                NodeLogic::StarMap { func }
+            } else {
+                let wrapped_func = wrap_func(py, func, args, kwargs, get_build_starmap_func()?)?;
+                NodeLogic::Map { func: wrapped_func }
+            };
+        let node = Self::make_node(py, logic, name, source_location)?;
         this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);

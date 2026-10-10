@@ -14,6 +14,10 @@ pub enum NodeLogic {
     Filter {
         predicate: Py<PyAny>,
     },
+    /// starmap(func) without extra arguments: func(*item), with no wrapper.
+    StarMap {
+        func: Py<PyAny>,
+    },
     Flatten,
     Collect {
         buffer: Vec<Py<PyAny>>,
@@ -228,6 +232,7 @@ impl NodeLogic {
         matches!(
             self,
             NodeLogic::Map { .. }
+                | NodeLogic::StarMap { .. }
                 | NodeLogic::Filter { .. }
                 | NodeLogic::Flatten
                 | NodeLogic::Accumulate { .. }

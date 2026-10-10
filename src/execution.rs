@@ -158,6 +158,27 @@ fn combine_latest_push(
     Ok(Some(PyTuple::new(py, values)?.into_any().unbind()))
 }
 
+/// `func(*x)`. A tuple is passed through as the argument tuple; anything else
+/// is converted to one first (raising like `*x` for non-iterables).
+fn star_call(py: Python, func: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let args = x.bind(py);
+    let args = match args.cast::<PyTuple>() {
+        Ok(tuple) => tuple.clone(),
+        Err(_) => args
+            .try_iter()?
+            .collect::<PyResult<Vec<_>>>()
+            .and_then(|v| PyTuple::new(py, v))?,
+    };
+    // SAFETY: GIL held; func and args are live; returns a new reference or NULL.
+    unsafe {
+        Bound::from_owned_ptr_or_err(
+            py,
+            pyo3::ffi::PyObject_Call(func.as_ptr(), args.as_ptr(), std::ptr::null_mut()),
+        )
+    }
+    .map(Bound::unbind)
+}
+
 /// Apply a `BuiltinOp` to a single value, returning the result.
 ///
 /// This is the recursive workhorse for Chain, And, Or, Negate.
@@ -440,6 +461,22 @@ pub(crate) fn apply_logic(
             Ok(StepResult::Value(result))
         }
 
+        NodeLogic::StarMap { func } => {
+            let t = prof_start(profiling);
+            let result = wrap_error(py, star_call(py, func, &x), ctx.name, ctx.source_location)?;
+            if let Some(t) = t {
+                profiling::record_node(
+                    ctx.node_id,
+                    t.elapsed(),
+                    1,
+                    1,
+                    ctx.name,
+                    ctx.source_location,
+                );
+            }
+            Ok(StepResult::Value(result))
+        }
+
         NodeLogic::Filter { predicate } => {
             let t = prof_start(profiling);
             let passes = match ctx.builtin_op {
@@ -714,6 +751,25 @@ pub(crate) fn apply_logic_batch(
                         *x = wrap_error(py, res, ctx.name, ctx.source_location)?;
                     }
                 }
+            }
+            if let Some(t) = t {
+                profiling::record_node(
+                    ctx.node_id,
+                    t.elapsed(),
+                    items_in,
+                    output.len() as u64,
+                    ctx.name,
+                    ctx.source_location,
+                );
+            }
+            Ok(BatchStepResult::Items(output))
+        }
+
+        NodeLogic::StarMap { func } => {
+            let t = prof_start(profiling);
+            let mut output = items;
+            for x in &mut output {
+                *x = wrap_error(py, star_call(py, func, x), ctx.name, ctx.source_location)?;
             }
             if let Some(t) = t {
                 profiling::record_node(
