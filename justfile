@@ -7,7 +7,7 @@ default:
 
 # Sync dependencies
 sync:
-    uv sync --extra dev
+    uv sync
 
 # Build the Rust extension in development mode
 build: sync
@@ -36,7 +36,7 @@ test-py314:
     libcxx=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#stdenv.cc.cc.lib)/lib
     env -u PYTHONPATH PYO3_PYTHON="$py" CARGO_TARGET_DIR=target/py314 \
         uv run --no-sync maturin build --release -i "$py" --out "$work"
-    uv export --frozen --no-hashes --no-emit-project --all-extras > "$work/requirements.txt"
+    uv export --frozen --no-hashes --no-emit-project > "$work/requirements.txt"
     env -u PYTHONPATH uv venv -q -p "$py" "$work/venv"
     env -u PYTHONPATH uv pip install -q --python "$work/venv/bin/python" -r "$work/requirements.txt" "$work"/*.whl
     env -u PYTHONPATH LD_LIBRARY_PATH="$libcxx" "$work/venv/bin/python" -m pytest tests/ -q {{quick_ignores}}
@@ -152,7 +152,7 @@ publish:
 
 # Sync docs dependencies and build module for mkdocstrings
 sync-docs:
-    uv sync --extra dev --group docs
+    uv sync --group docs
     uv run maturin develop --uv
 
 # Serve documentation locally with live-reloading
