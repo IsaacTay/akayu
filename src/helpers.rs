@@ -33,7 +33,6 @@ define_py_helper!(BUILTIN_FLOAT, get_builtin_float);
 define_py_helper!(BUILTIN_BOOL, get_builtin_bool);
 define_py_helper!(BUILTIN_PRINT, get_builtin_print);
 define_py_helper!(BUILTIN_TYPE, get_builtin_type);
-define_py_helper!(BUILTIN_HASATTR, get_builtin_hasattr);
 define_py_helper!(BUILTIN_TUPLE, get_builtin_tuple);
 define_py_helper!(BUILTIN_LIST, get_builtin_list);
 define_py_helper!(BUILTIN_SET, get_builtin_set);
@@ -454,7 +453,6 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILTIN_BOOL.set(builtins.getattr("bool")?.unbind());
     let _ = BUILTIN_PRINT.set(builtins.getattr("print")?.unbind());
     let _ = BUILTIN_TYPE.set(builtins.getattr("type")?.unbind());
-    let _ = BUILTIN_HASATTR.set(builtins.getattr("hasattr")?.unbind());
     let _ = BUILTIN_TUPLE.set(builtins.getattr("tuple")?.unbind());
     let _ = BUILTIN_LIST.set(builtins.getattr("list")?.unbind());
     let _ = BUILTIN_SET.set(builtins.getattr("set")?.unbind());

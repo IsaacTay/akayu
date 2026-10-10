@@ -24,8 +24,6 @@ pub struct NodeProfile {
     pub func_time: Duration,
     pub items_in: u64,
     pub items_out: u64,
-    pub node_name: String,
-    pub source_location: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,21 +135,10 @@ pub fn stop_session() -> (HashMap<usize, NodeProfile>, Duration, u64) {
 
 /// Record func_time + items for a node in a single thread-local access.
 #[inline]
-pub fn record_node(
-    node_id: usize,
-    func_time: Duration,
-    items_in: u64,
-    items_out: u64,
-    name: &str,
-    loc: &str,
-) {
+pub fn record_node(node_id: usize, func_time: Duration, items_in: u64, items_out: u64) {
     PROFILE.with(|p| {
         let mut state = p.borrow_mut();
-        let entry = state.nodes.entry(node_id).or_insert_with(|| NodeProfile {
-            node_name: name.to_string(),
-            source_location: loc.to_string(),
-            ..Default::default()
-        });
+        let entry = state.nodes.entry(node_id).or_default();
         entry.func_time += func_time;
         entry.items_in += items_in;
         entry.items_out += items_out;
