@@ -81,17 +81,8 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
         NodeLogic::Filter { predicate } => visit.call(predicate),
         // `state` is replaced on every item, so it is not visited.
         NodeLogic::Accumulate { func, .. } => visit.call(func),
-        NodeLogic::PrefetchMap { func, state, .. }
-        | NodeLogic::PrefetchBatchMap { func, state, .. } => {
-            visit.call(func)?;
-            visit.call(state)
-        }
-        NodeLogic::PrefetchFilter {
-            predicate, state, ..
-        } => {
-            visit.call(predicate)?;
-            visit.call(state)
-        }
+        // Items in flight change on every update, so they are not visited.
+        NodeLogic::Prefetched { prefetcher } => visit.call(&prefetcher.func),
         NodeLogic::Chain { steps } => steps
             .iter()
             .try_for_each(|step| visit_chain_node(step, visit)),

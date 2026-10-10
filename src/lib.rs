@@ -24,6 +24,8 @@ mod lock;
 mod node;
 mod operations;
 mod optimization;
+mod pool;
+mod prefetch;
 mod profiling;
 
 // Re-exports
@@ -131,6 +133,21 @@ fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Initialize Python helpers
     helpers::init_helpers(py, HELPERS)?;
+
+    // At exit, let running pool tasks finish (ThreadPoolExecutor did).
+    let threading = py.import("threading")?;
+    if let Some(register) = threading.getattr_opt("_register_atexit")? {
+        register.call1((wrap_pyfunction!(pool::_shutdown_pool, m)?,))?;
+    }
+
+    // A forked child has none of the parent's pool threads: start a new pool.
+    let os = py.import("os")?;
+    if let Some(register) = os.getattr_opt("register_at_fork")? {
+        let reset = wrap_pyfunction!(pool::_reset_pool_after_fork, m)?;
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("after_in_child", reset)?;
+        register.call((), Some(&kwargs))?;
+    }
 
     Ok(())
 }

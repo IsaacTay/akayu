@@ -6,12 +6,11 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::Stream;
-use crate::helpers::{
-    cached_vectorcall1, get_parallel_execute, vectorcall1, vectorcall2, wrap_error,
-};
-use crate::lock::BranchUpdate;
+use crate::helpers::{cached_vectorcall1, vectorcall1, vectorcall2, wrap_error};
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
+use crate::pool::{self, Latch};
 use crate::profiling;
+use std::sync::Arc;
 
 /// Check for pending signals (e.g. KeyboardInterrupt).
 /// Cost: ~7ns when no signal pending (atomic flag read).
@@ -1246,63 +1245,19 @@ impl Stream {
                 }
                 return Ok(());
             }
-            NodeLogic::PrefetchMap { state, .. } | NodeLogic::PrefetchFilter { state, .. } => {
-                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
+            NodeLogic::Prefetched { prefetcher } => {
                 let t = prof_start(profiling_active);
-                for x in items {
-                    let results = state.call_method1(py, "update", (x,));
-                    let results = wrap_error(py, results, &self.name, &self.source_location)?;
-                    let results_list = results.bind(py);
-                    for result in results_list.try_iter()? {
-                        to_propagate.push(result?.into());
-                    }
-                }
-                let items_out = to_propagate.len() as u64;
-                if let Some(t) = t {
-                    profiling::record_node(
-                        node_id,
-                        t.elapsed(),
-                        items_in,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
-                }
-                for val in to_propagate {
-                    self.propagate(py, val)?;
-                }
-                return Ok(());
-            }
-            NodeLogic::PrefetchBatchMap { state, .. } => {
-                let py_list = PyList::new(py, &items)?;
-                let t = prof_start(profiling_active);
-                let results = state.call_method1(py, "update_batch", (py_list,));
-                let ft = if let Some(t) = t {
-                    t.elapsed()
-                } else {
-                    Duration::ZERO
-                };
+                let results = prefetcher.update_batch(py, items);
+                let ft = t.map_or(Duration::ZERO, |t| t.elapsed());
                 let results = wrap_error(py, results, &self.name, &self.source_location)?;
-                let results_list = results.bind(py);
-                let mut to_propagate: Vec<Py<PyAny>> = Vec::new();
-                for result in results_list.try_iter()? {
-                    to_propagate.push(result?.into());
-                }
-                let items_out = to_propagate.len() as u64;
-                if profiling_active {
-                    profiling::record_node(
-                        node_id,
-                        ft,
-                        items_in,
-                        items_out,
-                        &self.name,
-                        &self.source_location,
-                    );
-                }
-                for val in to_propagate {
-                    self.propagate(py, val)?;
-                }
-                return Ok(());
+                return self.dispatch_state_results(
+                    py,
+                    results,
+                    profiling_active,
+                    node_id,
+                    ft,
+                    items_in,
+                );
             }
 
             // Chainable variants handled above
@@ -1568,11 +1523,9 @@ impl Stream {
                 return self.propagate_parallel(py, x);
             }
             NodeLogic::Prefetch { .. } => Some(x),
-            NodeLogic::PrefetchMap { state, .. }
-            | NodeLogic::PrefetchFilter { state, .. }
-            | NodeLogic::PrefetchBatchMap { state, .. } => {
+            NodeLogic::Prefetched { prefetcher } => {
                 let t = prof_start(profiling_active);
-                let results = state.call_method1(py, "update", (x,));
+                let results = prefetcher.update(py, x);
                 if let Some(t) = t {
                     ft = t.elapsed();
                 }
@@ -1843,16 +1796,15 @@ impl Stream {
     fn dispatch_state_results(
         &self,
         py: Python,
-        results: Py<PyAny>,
+        results: Vec<Py<PyAny>>,
         profiling_active: bool,
         node_id: usize,
         ft: Duration,
         items_in: u64,
     ) -> PyResult<()> {
-        let mut items_out: u64 = 0;
-        for result in results.bind(py).try_iter()? {
-            self.propagate(py, result?.into())?;
-            items_out += 1;
+        let items_out = results.len() as u64;
+        for result in results {
+            self.propagate(py, result)?;
         }
         if profiling_active {
             profiling::record_node(
@@ -1897,13 +1849,32 @@ impl Stream {
             return self.downstreams[0].borrow_mut(py).update(py, val);
         }
 
-        // Multiple downstreams: use thread pool for parallel execution
-        let branches = self
-            .downstreams
-            .iter()
-            .map(|d| Py::new(py, BranchUpdate::new(d.clone_edge(py))))
-            .collect::<PyResult<Vec<_>>>()?;
-        get_parallel_execute()?.call1(py, (val, PyList::new(py, branches)?))?;
-        Ok(())
+        // Every branch but the last goes to the pool; the last runs here.
+        // Each runs in its own copy of this thread's context.
+        let (last, others) = self.downstreams.split_last().expect("n > 1");
+        let latch = Latch::new(others.len());
+        let mut tasks = Vec::with_capacity(others.len());
+        for (index, edge) in others.iter().enumerate() {
+            let (edge, val, ctx) = (
+                edge.clone_edge(py),
+                val.clone_ref(py),
+                pool::copy_context(py)?,
+            );
+            let latch = Arc::clone(&latch);
+            tasks.push(pool::submit(Box::new(move |py| {
+                let result = pool::catch_panic(|| {
+                    pool::run_in_context(py, &ctx, || edge.locked_update(py, val))
+                });
+                latch.count_down(index, result);
+            })));
+        }
+        let ctx = pool::copy_context(py)?;
+        let last_result = pool::run_in_context(py, &ctx, || last.locked_update(py, val));
+        pool::wait_for(py, latch.as_ref(), &tasks)?;
+        // Like before: every branch has finished; raise the first branch's error.
+        match latch.take_error() {
+            Some(e) => Err(e),
+            None => last_result,
+        }
     }
 }
