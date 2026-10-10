@@ -1,100 +1,72 @@
 # Benchmarks
 
-Benchmarks comparing `akayu` performance against the original `streamz` library and pure Python implementations.
+`akayu` against the original `streamz` library and hand-written Python, on the topologies
+described under [Benchmark Details](#benchmark-details).
 
-**Environment:**
-
-- Python 3.13.11
-- Linux (x86_64)
-- pytest-benchmark 5.2.3
+**Environment:** Python 3.13.11, Linux x86_64 (AMD Ryzen 7 PRO 4750G, shared machine),
+500,000 items per run, mean of 5 runs after a warm-up, `tests/bench_complex.py`.
 
 ## Summary
 
-Performance improvements are consistent across various topology types, with `akayu` providing significant speedups over `streamz` due to its Rust-based execution engine.
-
-| Topology Type | Scenario                              | Typical Speedup  |
-| ------------- | ------------------------------------- | ---------------- |
-| Deep Chains   | Long chains of operations (10+ nodes) | **~3.2x**        |
-| Branching     | Fan-out, diamond patterns             | **~2.5x - 3.7x** |
-| Merging       | Union, Zip, CombineLatest             | **~2.5x - 3.6x** |
-| Complex DAG   | Split, flatten, union mixed           | **~3.9x**        |
-
-**Key Takeaway:** `akayu` consistently outperforms `streamz` by optimizing graph traversal and operation execution in Rust, even for complex topologies with multiple branches and merges.
+| Topology Type | Scenario                    | Speedup over streamz |
+| ------------- | --------------------------- | -------------------- |
+| Deep Chains   | 10 chained maps             | **~51x**             |
+| Branching     | Fan-out, diamond            | **~24x - 44x**       |
+| Merging       | Union, zip, combine_latest  | **~30x - 60x**       |
+| Complex DAG   | Split, flatten, union mixed | **~30x**             |
 
 ## Complex Flow Topologies (500k items)
 
-Benchmarks for complex stream patterns with multiple branches, joins, and deep pipelines.
+Every akayu graph is compiled with `compile()`. "Pure Python" is a hand-written loop with the
+operations inlined: no functions are called, so it is a floor rather than an equivalent
+program.
 
-| Topology                                        | akayu<br/>(ms) | streamz<br/>(ms) | Speedup         |
-| ----------------------------------------------- | -------------- | ---------------- | --------------- |
-| [Multi-union (4 sources)](#multi-union)         | 2,126.10       | 7,595.01         | **3.6x faster** |
-| [Combine latest (3 sources)](#combine-latest)   | 1,671.63       | 4,297.74         | **2.6x faster** |
-| [Diamond (split → union)](#diamond)             | 2,597.40       | 9,731.22         | **3.7x faster** |
-| [Accumulate (3 branches)](#accumulate-branches) | 2,553.14       | 8,948.80         | **3.5x faster** |
-| [Zip (3 sources)](#zip)                         | 3,829.93       | 9,433.68         | **2.5x faster** |
-| [Deep pipeline (10 maps)](#deep-pipeline)       | 5,845.66       | 18,724.42        | **3.2x faster** |
-| [Complex DAG](#complex-dag)                     | 4,550.05       | 17,749.49        | **3.9x faster** |
-| [Fan-out (5 branches)](#fan-out)                | 6,953.44       | 17,372.14        | **2.5x faster** |
+| Topology                                        | akayu (ms) | akayu `emit_batch` (ms) | streamz (ms) | Pure Python (ms) | vs streamz     |
+| ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | -------------- |
+| [Deep pipeline (10 maps)](#deep-pipeline)       |        373 |                     264 |       19,066 |              240 | **51x faster** |
+| [Diamond (split → union)](#diamond)             |        226 |                     215 |        9,888 |               80 | **44x faster** |
+| [Fan-out (5 branches)](#fan-out)                |        763 |                     753 |       18,224 |              268 | **24x faster** |
+| [Complex DAG](#complex-dag)                     |        481 |                     428 |       14,254 |              106 | **30x faster** |
+| [Multi-union (4 sources)](#multi-union)         |        129 |                       - |        7,653 |               44 | **60x faster** |
+| [Accumulate (3 branches)](#accumulate-branches) |        422 |                       - |        9,124 |              119 | **22x faster** |
+| [Zip (3 sources)](#zip)                         |        208 |                       - |        9,390 |               51 | **45x faster** |
+| [Combine latest (3 sources)](#combine-latest)   |        142 |                       - |        4,290 |               51 | **30x faster** |
 
-## Throughput Comparison (500k items)
+**Observations:**
 
-Comparison of raw throughput (items/sec). **`akayu` is the baseline (1x)**.
-
-- **Pure Python** is faster (shown as multiplier, e.g., `37x`).
-- **streamz** is slower (shown as fraction, e.g., `1/2.9x`).
-
-| Topology            | akayu<br/>(items/sec) | Pure Python<br/>(items/sec) | streamz<br/>(items/sec) |
-| ------------------- | --------------------: | --------------------------: | ----------------------: |
-| **Simple Pipeline** |         247k (**1x**) |            9.05M (**~37x**) |        86k (**1/2.9x**) |
-| **Diamond**         |         188k (**1x**) |            7.20M (**~38x**) |        51k (**1/3.7x**) |
-| **Complex DAG**     |         110k (**1x**) |            2.30M (**~21x**) |        28k (**1/3.9x**) |
-| **Fan-out**         |          72k (**1x**) |            1.95M (**~27x**) |        29k (**1/2.5x**) |
-| **Deep Pipeline**   |          85k (**1x**) |            1.91M (**~22x**) |        26k (**1/3.3x**) |
-
-**Observation:** `akayu` sits in the middle ground—significantly faster than `streamz` (typically 2.5x - 4x) while abstracting away the complexity that makes `Pure Python` faster but harder to maintain for complex flows.
-
-**Observation:** The relative overhead **decreases** (improves) for heavier workloads. As the complexity of the Python work increases (e.g., Deep Pipeline, Complex DAG), `akayu`'s fixed per-item overhead becomes a smaller percentage of the total execution time compared to simpler topologies.
-
-The overhead is primarily due to:
-
-1. Stream graph traversal
-1. Python function call overhead per operation
-1. Dynamic dispatch for node types
-
-For batch operations, `akayu` approaches pure Python generator performance while providing the reactive programming model.
+- akayu is 22x - 60x faster than streamz on every topology.
+- Most of akayu's remaining time is CPython running the pipeline's own functions: measured in
+  instructions, akayu's own code is about 17% of a plain pipeline. The gap to hand-written Python
+  is mostly the function calls a hand-written loop doesn't make.
+- `emit_batch()` helps most on long linear chains (deep pipeline: 373 -> 264 ms). Below a
+  fan-out, items still go through the branches one at a time, so batching gains little there.
 
 ## Running Benchmarks
 
-/// tab | Nix (Recommended)
+Wall-clock comparisons with streamz and plain Python (the tables above):
 
 ```bash
-nix develop --command just bench
+just build-release
+uv run python tests/bench_complex.py
 ```
 
-///
-
-/// tab | Just
+Instructions per item for every workload and mode, plus memory per node. Instruction counts don't
+change with machine load, so they can be compared between runs on a busy machine:
 
 ```bash
-just bench
+just bench-cost --save before.json   # ...change something...
+just bench-cost --compare before.json
 ```
 
-///
-
-/// tab | Manual
-
-```bash
-maturin develop --release
-pytest tests/test_benchmark.py tests/test_complex_benchmark.py tests/test_compile_benchmark.py -v --benchmark-only
-```
-
-///
+The pytest-benchmark suite: `just bench`.
 
 ## Benchmark Details
 
-### Basic Pipeline
+Each topology processes 500,000 items. Timing includes building and compiling the graph.
 
-All benchmarks process 500,000 items through a pipeline of:
+### Basic pipeline (`just bench`)
+
+The pytest-benchmark suite's main pipeline:
 
 - `map(lambda x: x + 1)`
 - `filter(lambda x: x % 2 == 0)`
@@ -106,8 +78,6 @@ flowchart LR
     M --> F["filter(x % 2 == 0)"]
     F --> K["sink(append)"]
 ```
-
-Timing includes pipeline setup and all item processing.
 
 ### Multi-union
 

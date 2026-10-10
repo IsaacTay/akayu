@@ -1,5 +1,12 @@
 # Optimization Suggestions
 
+> **Measured first (`just bench-cost`, `perf record -e instructions:u`).** After the 2.0.0
+> performance work, akayu's own code (`apply_logic`, `propagate`, `update`, `emit`) is about 17% of
+> the instructions per item in a plain pipeline. The rest is CPython calling the user's functions
+> and allocating their results. A dispatch table can only win part of that 17%. Generating Python
+> code for fused chains was also tried: 0% on a 3-step chain, 18% on 10 chained plain functions,
+> and 13% in batches, so it was not adopted.
+
 ## Pre-Computed Dispatch Tables
 
 ### Problem

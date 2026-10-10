@@ -36,7 +36,7 @@ independent of machine load:
   emit, more than the rest of a short pipeline. A Rust lock replaces it: a map-filter-sink
   pipeline costs 55% less per item.
 - `par()` and `prefetch()` use a Rust thread pool instead of `ThreadPoolExecutor`: ~95% fewer
-  instructions per item (`par()`: 199,000 -> 7,000).
+  instructions per item (compiled `par()`: 199,000 -> 6,100).
 - Module-level `union()` and `par()` convergence points lock in Rust instead of through a
   Python helper per item: `union()` costs 87-92% less per item.
 - `zip()` / `combine_latest()` no longer pack and unpack an `(index, value)` tuple per item:
@@ -46,8 +46,13 @@ independent of machine load:
   positional ones. `starmap(func)` star-calls natively: 13-17% less.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
-- 41% less memory per node (565 -> 332 bytes), and `emit_batch()` map/filter/accumulate stages
-  reuse one buffer instead of allocating one per stage.
+- 45% less memory per node (565 -> 313 bytes); `compile()` frees the nodes it fuses into chains
+  unless you hold them; `emit_batch()` map/filter/accumulate stages reuse one buffer instead of
+  allocating one per stage.
+- Wall clock, `tests/bench_complex.py` on the same machine: compiled pipelines are 2.3x - 15.9x
+  faster per item than before this work, and 22x - 60x faster than streamz.
+- `to_text_file()` writes each line as one append with the GIL released, so other threads keep
+  running during the file I/O and concurrent writers never interleave within a line.
 
 ### Fixed
 

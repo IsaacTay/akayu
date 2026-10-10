@@ -38,14 +38,14 @@ print(results)  # [6, 8, 10, 12, 14, 16, 18]
 
 ## Performance
 
-akayu consistently has lower overhead when benchmarked against streamz:
+Compiled pipelines against streamz, 500,000 items:
 
-| Topology Type | Scenario                              | Typical Speedup  |
-| ------------- | ------------------------------------- | ---------------- |
-| Deep Chains   | Long chains of operations (10+ nodes) | **~3.2x**        |
-| Branching     | Fan-out, diamond patterns             | **~2.5x - 3.7x** |
-| Merging       | Union, Zip, CombineLatest             | **~2.5x - 3.6x** |
-| Complex DAG   | Split, flatten, union mixed           | **~3.9x**        |
+| Topology Type | Scenario                    | Speedup over streamz |
+| ------------- | --------------------------- | -------------------- |
+| Deep Chains   | 10 chained maps             | **~51x**             |
+| Branching     | Fan-out, diamond            | **~24x - 44x**       |
+| Merging       | Union, zip, combine_latest  | **~30x - 60x**       |
+| Complex DAG   | Split, flatten, union mixed | **~30x**             |
 
 See the [Benchmarks](https://isaactay.github.io/akayu/benchmarks/) page for detailed performance comparisons.
 

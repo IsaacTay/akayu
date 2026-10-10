@@ -119,12 +119,12 @@ assert sorted(results) == [x * x for x in range(100)]
 
 ## How does it compare to streamz/RxPY/aiostream?
 
-| Library       | Performance           | Async                                 | Rust Backend | Learning Curve |
-| ------------- | --------------------- | ------------------------------------- | ------------ | -------------- |
-| **akayu**     | High (~3x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
-| **streamz**   | Medium                | ✅                                    | ❌           | Low            |
-| **RxPY**      | Medium                | ❌                                    | ❌           | Medium         |
-| **aiostream** | Medium                | ✅                                    | ❌           | Low            |
+| Library       | Performance               | Async                                 | Rust Backend | Learning Curve |
+| ------------- | ------------------------- | ------------------------------------- | ------------ | -------------- |
+| **akayu**     | High (~20-60x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
+| **streamz**   | Medium                    | ✅                                    | ❌           | Low            |
+| **RxPY**      | Medium                    | ❌                                    | ❌           | Medium         |
+| **aiostream** | Medium                    | ✅                                    | ❌           | Low            |
 
 **akayu** keeps streamz's simple API with a Rust core; see [Benchmarks](benchmarks.md) for measured speedups.
 
