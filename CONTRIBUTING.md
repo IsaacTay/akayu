@@ -13,16 +13,16 @@ This project uses **Nix** to manage the development environment and dependencies
 
 1.  **Clone the repository**:
     ```bash
-    git clone https://github.com/akayu-io/akayu.git
+    git clone https://github.com/IsaacTay/akayu.git
     cd akayu
     ```
 
 2.  **Enter the development shell**:
     The `flake.nix` file defines the environment with Rust, Python, `uv`, and `maturin`.
     ```bash
-    direnv allow /mnt/ssd1/vibes/akayu
+    nix develop     # or, with direnv: echo "use flake" > .envrc && direnv allow
     ```
-    This evaluates the `.envrc` (which runs `use flake`) and activates the development environment with all necessary tools. It will also automatically create and activate a Python virtual environment (`.venv`) if one doesn't exist.
+    The shell provides Rust, Python 3.13, `uv`, `maturin`, `just` and `mermaid-cli`, and runs `uv sync` to create `.venv` with the development dependencies.
 
 ### Without Nix
 
@@ -40,19 +40,19 @@ If you prefer not to use Nix, you can set up the development environment manuall
     pip install uv
     ```
 
-4.  **Install development dependencies**:
+4.  **Install the development dependencies** (the `dev` dependency group in `pyproject.toml`):
     ```bash
-    pip install maturin pytest pytest-benchmark
+    uv sync
     ```
 
 5.  **Build and install the package**:
     ```bash
-    maturin develop
+    uv run maturin develop --uv
     ```
 
-6.  **Run tests** (excluding benchmarks):
+6.  **Run the quick tests** (skips benchmarks):
     ```bash
-    pytest tests/ -k "not benchmark"
+    just test-quick
     ```
 
 ## Quick Start with Just
@@ -63,7 +63,7 @@ The project includes a `justfile` for common development tasks. Run `just` to se
 just              # List all commands
 just build        # Build dev extension
 just test-quick   # Build + run tests (skipping benchmarks)
-just test         # Build + run all tests
+just check        # Everything: lint, formatting, clippy, quick tests, docs
 ```
 
 ## Building the Project
@@ -90,7 +90,7 @@ If you encounter unexpected behavior after changing Rust code, you may have a st
 
 **Symptoms of stale builds:**
 - Tests fail with errors referencing code you've already changed
-- Changes to `src/lib.rs` don't seem to take effect
+- Changes to the Rust code in `src/` don't seem to take effect
 - Error messages reference functions that no longer exist
 
 **Solutions:**
@@ -111,7 +111,7 @@ If you encounter unexpected behavior after changing Rust code, you may have a st
    uv pip install -e . --reinstall-package akayu
    ```
 
-The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to track Rust source files, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.
+The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebuild when `pyproject.toml`, `Cargo.toml` or `src/**/*.rs` change, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.
 
 ## Running Tests
 
@@ -119,9 +119,11 @@ The project includes a comprehensive test suite using `pytest`.
 
 | Command | Description |
 |---------|-------------|
-| `just test-quick` | Build + run tests (skipping benchmarks) |
-| `just test` | Build + run all tests |
+| `just test-quick` | Build + run tests (skipping benchmarks), about 2 minutes |
+| `just test` | Build + run all tests, including benchmarks |
+| `just test-py314` | Build a cp314 wheel and run the quick tests on Python 3.14 |
 | `just bench` | Build release + run benchmarks only |
+| `just docs-check` | Run the documentation examples and validate the diagrams |
 
 Or manually:
 
@@ -133,48 +135,36 @@ uv run python -m pytest tests/test_benchmark.py -v  # Run benchmarks
 
 ## Code Style
 
-We enforce code formatting for both Rust and Python.
+We enforce formatting and linting for both Rust and Python. `just check` runs all of it
+together with the quick tests and the documentation checks; run it before submitting.
 
 | Command | Description |
 |---------|-------------|
-| `just fmt` | Format Rust code |
-| `just clippy` | Lint Rust code |
-| `just lint` | Lint Python tests with ruff |
+| `just fmt` | Format Rust (`cargo fmt`) and Python (`ruff format`) |
+| `just fmt-check` | Check formatting without changing files |
+| `just clippy` | Lint Rust, treating warnings as errors |
+| `just lint` | Lint all Python with ruff |
+| `just check` | All of the above, plus `just test-quick` and `just docs-check` |
 | `just clean` | Clean build artifacts |
-
-Or manually:
-
-```bash
-cargo fmt              # Format Rust
-cargo clippy           # Lint Rust
-uv run ruff format tests  # Format Python
-uv run ruff check tests   # Lint Python
-```
 
 ## Project Structure
 
-- `src/lib.rs`: The core Rust implementation using PyO3.
-- `python/akayu/`: The Python package containing the Rust extension.
-- `tests/`: Python test suite.
-    - `test_ops.py`: Unit tests for standard operations (map, filter, union, etc.).
-    - `test_comparison.py`: Validation and benchmarking against the original `streamz`.
-    - `test_memory_comparison.py`: Memory usage verification.
-    - `test_args_kwargs.py`: Tests for args/kwargs binding in operations.
-    - `test_errors.py`: Error propagation and handling tests.
-    - `test_io.py`: File I/O operations (to_text_file, from_text_file).
-    - `test_starmap.py`: Starmap operation tests.
-    - `test_ordering.py`: Event ordering in split/union topologies.
-    - `test_branch_concurrency.py`: Concurrent branch execution tests.
-    - `test_memory_leak.py`: Memory leak detection tests.
-    - `test_benchmark.py`: General throughput benchmarking.
-    - `test_ops_benchmark.py`: Individual operation benchmarks.
-    - `test_benchmark_split.py`: Split expansion efficiency tests.
-    - `test_parallel.py`: Parallel branch execution tests (`par()`, `seq()`).
-    - `test_compile_safety.py`: Verification that graph modification is blocked after compile.
-    - `test_compile_benchmark.py`: Performance comparison of compiled vs uncompiled pipelines.
-- `Cargo.toml`: Rust dependencies and configuration.
-- `pyproject.toml`: Python package configuration.
-- `flake.nix`: Nix environment configuration.
+- `src/`: the Rust extension, built with PyO3.
+    - `lib.rs`: the `Stream` type and module setup.
+    - `operations.rs`, `combinators.rs`: the Python-facing operations (`map`, `filter`, `union`, ...).
+    - `execution.rs`: propagating values through the graph.
+    - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas.
+    - `node.rs`: the node and builtin-operation types.
+    - `gc.rs`: garbage-collection support, so stream graphs are freed.
+    - `profiling.rs`, `error.rs`, `helpers.rs`: profiling, errors and shared helpers.
+    - `akayu.py`: Python helpers embedded in the extension (thread pool, lambda analysis); importable as `akayu._helpers`.
+- `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`.
+- `tests/`: the `pytest` suite. Benchmarks (`test_*benchmark*.py`) and `test_memory_leak.py` are skipped by `just test-quick`.
+- `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
+- `docs/`: the documentation site (`mkdocs.yml`); `just docs-check` runs its code blocks.
+- `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
+- `scripts/`: development scripts (Mermaid validation, aarch64 cross-build).
+- `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
 
 ### Python Package Structure (maturin convention)
 
@@ -186,7 +176,7 @@ python-source = "python"
 module-name = "akayu.akayu"
 ```
 
-This means the Rust extension (the `.so` file built by maturin) is placed inside `python/akayu/akayu.so`, and Python imports it as `akayu.akayu`. This follows the maturin convention where `module-name` is `akayu.akayu` because `python-source = "python"` means "the Python package is in the `python/` directory" and the extension module name is `akayu`. If this seems confusing, that's normal—it trips up many contributors. The key takeaway is that `import akayu` Just Works, and the extension binary lives nested inside the Python package directory.
+This means the Rust extension (the `.so` file built by maturin) is placed inside `python/akayu/` (as `akayu.cpython-*.so`), and Python imports it as `akayu.akayu`. This follows the maturin convention where `module-name` is `akayu.akayu` because `python-source = "python"` means "the Python package is in the `python/` directory" and the extension module name is `akayu`. If this seems confusing, that's normal—it trips up many contributors. The key takeaway is that `import akayu` Just Works, and the extension binary lives nested inside the Python package directory.
 
 ## Testing Your Changes
 
@@ -222,12 +212,12 @@ Welcome! Here are some areas where contributions are especially appreciated:
 
 ## Development Workflow
 
-1.  Make your changes in `src/lib.rs`.
+1.  Make your changes in `src/` (Rust) or `python/akayu/` (Python).
 2.  Run `just build` (or `just build-release` for optimized builds) to rebuild.
 3.  Add or update tests in `tests/`.
 4.  Use `.compile()` in your benchmarks to test the performance impact of fusion and other optimizations.
 5.  Run `just test-quick` to verify your changes.
 6.  If tests behave unexpectedly, try `just rebuild` to bypass any cached builds.
-7.  Format your code with `just fmt` before submitting a PR.
+7.  Format with `just fmt`, then run `just check` before submitting a PR.
 
 Happy Coding!

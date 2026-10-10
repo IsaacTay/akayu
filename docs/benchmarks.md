@@ -68,7 +68,7 @@ For batch operations, `akayu` approaches pure Python generator performance while
 /// tab | Nix (Recommended)
 
 ```bash
-direnv exec /mnt/ssd1/vibes/akayu just bench
+nix develop --command just bench
 ```
 
 ///
