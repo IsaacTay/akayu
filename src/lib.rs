@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 
 // Module declarations
 mod builtin;
+mod call;
 mod combinators;
 mod error;
 mod execution;

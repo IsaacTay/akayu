@@ -700,37 +700,6 @@ def _reject_async(func, op):
         )
 
 
-def _build_map_func(func, args, kwargs):
-    # args is a tuple or None, kwargs is a dict or None
-    if not args and not kwargs:
-        return func
-
-    if kwargs:
-        if args:
-
-            def wrapper(x):
-                return func(x, *args, **kwargs)
-
-            wrapper._akayu_inner = func
-            wrapper._akayu_args = args
-            return wrapper
-        else:
-
-            def wrapper(x):
-                return func(x, **kwargs)
-
-            wrapper._akayu_inner = func
-            return wrapper
-    else:
-        # only args
-        def wrapper(x):
-            return func(x, *args)
-
-        wrapper._akayu_inner = func
-        wrapper._akayu_args = args
-        return wrapper
-
-
 def _build_starmap_func(func, args, kwargs):
     # args is tuple or None, kwargs is dict or None
     if not args and not kwargs:

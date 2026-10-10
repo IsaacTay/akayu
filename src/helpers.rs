@@ -23,7 +23,6 @@ macro_rules! define_py_helper {
 }
 
 // Python function references initialized at module load
-define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
 define_py_helper!(REJECT_ASYNC, get_reject_async);
 define_py_helper!(BUILTIN_ISINSTANCE, get_builtin_isinstance);
@@ -432,10 +431,8 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let mname = CString::new("akayu._helpers").unwrap();
     let helpers_module = PyModule::from_code(py, &code, &fname, &mname)?;
 
-    let build_map_func = helpers_module.getattr("_build_map_func")?;
     let build_starmap_func = helpers_module.getattr("_build_starmap_func")?;
 
-    let _ = BUILD_MAP_FUNC.set(build_map_func.unbind());
     let _ = BUILD_STARMAP_FUNC.set(build_starmap_func.unbind());
 
     let profiler_class = helpers_module.getattr("_Profiler")?;

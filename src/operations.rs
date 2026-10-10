@@ -6,31 +6,30 @@ use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{
-    capture_source_location, check_not_compiled, get_build_map_func, get_build_starmap_func,
-    get_func_name, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
+    capture_source_location, check_not_compiled, get_build_starmap_func, get_func_name,
+    get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
 use crate::lock::{Downstream, NodeLock};
 use crate::node::{ChunkByState, ExtractBetweenState, NodeLogic};
 use crate::prefetch::{PrefetchKind, Prefetcher};
 
 /// Wrap a function with additional args/kwargs using the build_map_func helper.
+/// Bind extra `args`/`kwargs` after the item (see `crate::call`), or return
+/// `func` itself when there are none.
 fn wrap_func(
     py: Python,
     func: Py<PyAny>,
     args: Py<PyTuple>,
     kwargs: Option<Py<PyDict>>,
-    builder: &Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
-    let no_args = args.bind(py).is_empty();
-    // _build_map_func returns func itself when there's nothing to bind: skip the call.
-    if no_args
-        && kwargs.as_ref().is_none_or(|k| k.bind(py).is_empty())
-        && builder.is(get_build_map_func()?)
-    {
+    let kwargs = kwargs
+        .as_ref()
+        .map(|k| k.bind(py))
+        .filter(|k| !k.is_empty());
+    if args.bind(py).is_empty() && kwargs.is_none() {
         return Ok(func);
     }
-    let args_opt = if no_args { None } else { Some(args) };
-    builder.call1(py, (func, args_opt, kwargs))
+    crate::call::bind(py, func, args.bind(py), kwargs)
 }
 
 impl Stream {
@@ -297,7 +296,7 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "map", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
@@ -423,14 +422,22 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "starmap", func_name.as_deref());
         let source_location = capture_source_location(py);
-        // Without extra arguments, star-call natively; otherwise wrap in Python.
-        let logic =
-            if args.bind(py).is_empty() && kwargs.as_ref().is_none_or(|k| k.bind(py).is_empty()) {
-                NodeLogic::StarMap { func }
-            } else {
-                let wrapped_func = wrap_func(py, func, args, kwargs, get_build_starmap_func()?)?;
-                NodeLogic::Map { func: wrapped_func }
+        // Without positional extras, star-call natively (keyword arguments
+        // bound with functools.partial); otherwise wrap in Python.
+        let logic = if args.bind(py).is_empty() {
+            let func = match kwargs.as_ref().filter(|k| !k.bind(py).is_empty()) {
+                None => func,
+                Some(k) => py
+                    .import(pyo3::intern!(py, "functools"))?
+                    .getattr(pyo3::intern!(py, "partial"))?
+                    .call((func,), Some(k.bind(py)))?
+                    .unbind(),
             };
+            NodeLogic::StarMap { func }
+        } else {
+            let wrapped_func = get_build_starmap_func()?.call1(py, (func, args, kwargs))?;
+            NodeLogic::Map { func: wrapped_func }
+        };
         let node = Self::make_node(py, logic, name, source_location)?;
         this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
@@ -487,7 +494,7 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "batch_map", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
@@ -556,7 +563,7 @@ impl Stream {
         let func_name = get_func_name(py, &predicate);
         let name = resolve_stream_name(stream_name, "filter", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let wrapped_predicate = wrap_func(py, predicate, args, kwargs, get_build_map_func()?)?;
+        let wrapped_predicate = wrap_func(py, predicate, args, kwargs)?;
 
         if let NodeLogic::Prefetch { size } = this.logic {
             this.logic = NodeLogic::Prefetched {
@@ -986,7 +993,7 @@ impl Stream {
         let func_name = get_func_name(py, &func);
         let name = resolve_stream_name(stream_name, "sink", func_name.as_deref());
         let source_location = capture_source_location(py);
-        let wrapped_func = wrap_func(py, func, args, kwargs, get_build_map_func()?)?;
+        let wrapped_func = wrap_func(py, func, args, kwargs)?;
 
         let node = Self::make_node(
             py,
