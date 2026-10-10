@@ -5,12 +5,12 @@ rust + streamz = akayu (red hot springs)
 A rust powered python library for stream data processing. Takes heavy inspiration from the [streamz](https://github.com/python-streamz/streamz) library.
 
 > [!warning]
-> This project was partially vibed for internal use, use at own risk. Async functionality is currently undertested
+> This project was partially vibed for internal use, use at own risk.
 
 ## Features
 
 - High Performance: Rust-powered core with automatic optimizations
-- Compile-time Optimizations: Chain fusion, async check elimination, and more
+- Compile-time Optimizations: Chain fusion, builtin fast paths for simple lambdas, and more
 - Concurrent Processing: `par()` for parallel branches, `prefetch()` for ordered concurrency
 - Batch Operations: Efficient vectorized processing with `batch_map()` and `emit_batch()`
 

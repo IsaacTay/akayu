@@ -29,7 +29,7 @@ macro_rules! define_py_helper {
 define_py_helper!(GATHER, get_gather);
 define_py_helper!(BUILD_MAP_FUNC, get_build_map_func);
 define_py_helper!(BUILD_STARMAP_FUNC, get_build_starmap_func);
-define_py_helper!(IS_SYNC_CALLABLE, get_is_sync_callable);
+define_py_helper!(REJECT_ASYNC, get_reject_async);
 define_py_helper!(PARALLEL_EXECUTE, get_parallel_execute);
 define_py_helper!(PREFETCH_STATE_CLASS, get_prefetch_state_class);
 define_py_helper!(PREFETCH_FILTER_STATE_CLASS, get_prefetch_filter_state_class);
@@ -414,6 +414,12 @@ pub fn from_text_file(py: Python, path: String, interval: Option<f64>) -> PyResu
 }
 
 /// Initialize Python helper functions from embedded Python code.
+/// Raise TypeError if `func` is an async function: akayu never awaits coroutines.
+pub(crate) fn reject_async(py: Python, func: &Py<PyAny>, op: &str) -> PyResult<()> {
+    get_reject_async()?.call1(py, (func, op))?;
+    Ok(())
+}
+
 pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let code = CString::new(helpers_code).unwrap();
     let fname = CString::new("helpers.py").unwrap();
@@ -447,6 +453,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let profiler_class = helpers_module.getattr("_Profiler")?;
     let _ = PROFILER_CLASS.set(profiler_class.unbind());
+
+    let reject_async = helpers_module.getattr("_reject_async")?;
+    let _ = REJECT_ASYNC.set(reject_async.unbind());
 
     let analyze_lambda = helpers_module.getattr("_analyze_lambda")?;
     let _ = ANALYZE_LAMBDA.set(analyze_lambda.unbind());

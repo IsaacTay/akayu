@@ -1,6 +1,6 @@
 # Contributing to akayu
 
-Thank you for your interest in contributing to `akayu`! This project aims to provide a high-performance, memory-safe, and async-capable implementation of the `streamz` library using Rust.
+Thank you for your interest in contributing to `akayu`! This project aims to provide a high-performance, memory-safe implementation of the `streamz` library using Rust.
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ If you prefer not to use Nix, you can set up the development environment manuall
 
 4.  **Install development dependencies**:
     ```bash
-    pip install maturin pytest pytest-asyncio pytest-benchmark
+    pip install maturin pytest pytest-benchmark
     ```
 
 5.  **Build and install the package**:
@@ -157,7 +157,6 @@ uv run ruff check tests   # Lint Python
 - `python/akayu/`: The Python package containing the Rust extension.
 - `tests/`: Python test suite.
     - `test_ops.py`: Unit tests for standard operations (map, filter, union, etc.).
-    - `test_async.py`: Tests for async support.
     - `test_comparison.py`: Validation and benchmarking against the original `streamz`.
     - `test_memory_comparison.py`: Memory usage verification.
     - `test_args_kwargs.py`: Tests for args/kwargs binding in operations.
@@ -170,7 +169,6 @@ uv run ruff check tests   # Lint Python
     - `test_benchmark.py`: General throughput benchmarking.
     - `test_ops_benchmark.py`: Individual operation benchmarks.
     - `test_benchmark_split.py`: Split expansion efficiency tests.
-    - `test_concurrency_benchmark.py`: Async concurrency performance tests.
     - `test_parallel.py`: Parallel branch execution tests (`par()`, `seq()`).
     - `test_compile_safety.py`: Verification that graph modification is blocked after compile.
     - `test_compile_benchmark.py`: Performance comparison of compiled vs uncompiled pipelines.
@@ -207,7 +205,7 @@ source.emit_batch([1, 2, 3])
 assert result == [2, 4, 6]
 ```
 
-For more complex testing patterns, see the test suite in `tests/` for examples of filtering, unions, async operations, and error handling.
+For more complex testing patterns, see the test suite in `tests/` for examples of filtering, unions, and error handling.
 
 ## License
 

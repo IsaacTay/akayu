@@ -4,7 +4,6 @@ from typing import (
     Any,
     Callable,
     ContextManager,
-    Coroutine,
     Iterable,
     Iterator,
     Sequence,
@@ -83,15 +82,11 @@ class Stream:
         ```
     """
 
-    def __init__(
-        self, name: str | None = None, asynchronous: bool | None = None
-    ) -> None:
+    def __init__(self, name: str | None = None) -> None:
         """Create a new source Stream.
 
         Args:
             name: Optional name for the stream (defaults to "source").
-            asynchronous: If False, skip async checking for better performance.
-                If None or True, async coroutines are automatically awaited.
         """
         ...
 
@@ -258,7 +253,7 @@ class Stream:
         """
         ...
 
-    def drain(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
+    def drain(self, *args: Any, **kwargs: Any) -> None:
         """Recursively flush this node and all downstream nodes.
 
         Unlike `flush()`, which only flushes this node's buffer,
@@ -269,24 +264,21 @@ class Stream:
         Args:
             *args: Ignored (for compatibility with streamz).
             **kwargs: Ignored (for compatibility with streamz).
-
-        Returns:
-            A coroutine if async processing is triggered, otherwise None.
         """
         ...
 
-    def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
-        """Flush collected elements downstream.
+    def flush(self, *args: Any, **kwargs: Any) -> None:
+        """Flush buffered elements downstream.
 
-        For `collect()` nodes, emits all buffered elements as a tuple
-        and clears the buffer. Has no effect on other node types.
+        `collect()` and `chunk_by()` nodes emit their buffer as a tuple and
+        stop there; `chunks_between()` discards an incomplete chunk; prefetch
+        nodes wait for items still in flight. Other nodes pass the flush on,
+        so `source.flush()` reaches the first buffering node on every path.
+        Use `drain()` to flush every node in the graph.
 
         Args:
             *args: Ignored (for compatibility with streamz).
             **kwargs: Ignored (for compatibility with streamz).
-
-        Returns:
-            A coroutine if async processing is triggered, otherwise None.
         """
         ...
 
@@ -383,7 +375,7 @@ class Stream:
         """
         ...
 
-    def emit(self, x: Any) -> Coroutine[Any, Any, Any] | None:
+    def emit(self, x: Any) -> None:
         """Emit a single value into the stream.
 
         This is the primary way to push data into a source stream.
@@ -391,13 +383,10 @@ class Stream:
 
         Args:
             x: The value to emit.
-
-        Returns:
-            A coroutine if async processing is triggered, otherwise None.
         """
         ...
 
-    def emit_batch(self, items: list[Any]) -> Coroutine[Any, Any, Any] | None:
+    def emit_batch(self, items: list[Any]) -> None:
         """Emit multiple values into the stream as a batch.
 
         More efficient than calling `emit()` multiple times when processing
@@ -405,9 +394,6 @@ class Stream:
 
         Args:
             items: List of values to emit.
-
-        Returns:
-            A coroutine if async processing is triggered, otherwise None.
         """
         ...
 
@@ -790,11 +776,11 @@ class MultiStream:
         """
         ...
 
-    def flush(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
+    def flush(self, *args: Any, **kwargs: Any) -> None:
         """Flush all streams in the batch."""
         ...
 
-    def drain(self, *args: Any, **kwargs: Any) -> Coroutine[Any, Any, Any] | None:
+    def drain(self, *args: Any, **kwargs: Any) -> None:
         """Drain all streams in the batch."""
         ...
 

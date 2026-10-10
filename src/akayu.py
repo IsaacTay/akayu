@@ -1,5 +1,6 @@
 import contextvars
 import dis
+import inspect
 import os
 import sys
 import threading
@@ -619,6 +620,16 @@ def _get_caller_location():
         return f"{frame.f_code.co_filename}:{frame.f_lineno}"
     except ValueError:
         return "<unknown>"
+
+def _reject_async(func, op):
+    """Raise TypeError for async callables: akayu never awaits coroutines."""
+    if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
+        name = getattr(func, '__qualname__', None) or repr(func)
+        raise TypeError(
+            f"{op}() got async function {name!r}, but akayu does not run coroutines. "
+            "Pass a regular function; use prefetch() or par() for concurrent I/O."
+        )
+
 
 def _build_map_func(func, args, kwargs):
     # args is a tuple or None, kwargs is a dict or None
