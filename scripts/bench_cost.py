@@ -259,8 +259,11 @@ def _perf():
     return os.environ.get("PERF") or shutil.which("perf")
 
 
-def measure(workload, mode, kind):
-    """Instructions (or ns) per source item; None where it doesn't apply."""
+EVENT = "instructions:u"
+
+
+def measure(workload, mode, kind, event=EVENT):
+    """`event` counts (or ns) per source item; None where it doesn't apply."""
     if workload == "build":
         if mode not in ("eager", "compiled"):
             return None
@@ -277,7 +280,7 @@ def measure(workload, mode, kind):
         os.mkfifo(ctl)
         os.mkfifo(ack)
         env = dict(os.environ, BENCH_CTL=ctl, BENCH_ACK=ack)
-        pcmd = [perf, "stat", "-x,", "-e", "instructions:u", "--delay=-1"]
+        pcmd = [perf, "stat", "-x,", "-e", event, "--delay=-1"]
         r = subprocess.run(
             [*pcmd, "--control", f"fifo:{ctl},{ack}", "--", *cmd],
             capture_output=True,
@@ -287,7 +290,7 @@ def measure(workload, mode, kind):
         )
     if r.returncode:
         raise RuntimeError(f"{workload}/{mode}/{kind} failed:\n{r.stderr}")
-    line = next(ln for ln in r.stderr.splitlines() if "instructions" in ln)
+    line = next(ln for ln in r.stderr.splitlines() if event in ln)
     return int(line.split(",")[0]) / n
 
 
@@ -353,6 +356,12 @@ def main():
     ap.add_argument("-m", "--mode", action="append", choices=MODES)
     ap.add_argument("-k", "--kind", action="append", choices=KINDS)
     ap.add_argument("--no-memory", action="store_true")
+    ap.add_argument(
+        "--event",
+        default=EVENT,
+        help="perf event to count (default instructions:u; cycles:u also sees atomics, "
+        "cache misses and stalls, but varies with machine load)",
+    )
     ap.add_argument("--save", help="write results to this JSON file")
     ap.add_argument("--compare", help="show %% change against this JSON file")
     a = ap.parse_args()
@@ -361,7 +370,7 @@ def main():
         run_one(w, mode, kind, int(n))
         return
 
-    unit = "instructions" if _perf() else "ns (wall clock: idle machine only)"
+    unit = a.event if _perf() else "ns (wall clock: idle machine only)"
     old = json.loads(Path(a.compare).read_text()) if a.compare else {}
     res = {"unit": unit, "cpu": {}, "memory": {}}
 
@@ -380,7 +389,7 @@ def main():
             cells = []
             for mode in modes:
                 key = f"{w}/{mode}/{kind}"
-                res["cpu"][key] = v = measure(w, mode, kind)
+                res["cpu"][key] = v = measure(w, mode, kind, a.event)
                 cells.append(f"{show(key, v, '9.0f'):>22}")
             print(f"{w:12}" + "".join(cells), flush=True)
     if not a.no_memory:
