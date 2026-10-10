@@ -3,15 +3,14 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PySet, PyTuple};
 
+use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{
-    capture_source_location, check_not_compiled, reject_async, resolve_stream_name,
-    get_build_map_func, get_build_starmap_func, get_func_name,
-    get_prefetch_batch_map_state_class, get_prefetch_filter_state_class, get_prefetch_state_class,
-    get_profiler_class, wrap_error,
+    capture_source_location, check_not_compiled, get_build_map_func, get_build_starmap_func,
+    get_func_name, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
+    get_prefetch_state_class, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
 use crate::node::NodeLogic;
-use crate::Stream;
 
 struct PyLockGuard {
     lock: Py<PyAny>,
@@ -143,7 +142,10 @@ impl Stream {
             NodeLogic::Sink { .. } => true,
             // A fused chain ending in a sink is a sink
             NodeLogic::Chain { steps } => {
-                matches!(steps.last().map(|step| &step.logic), Some(NodeLogic::Sink { .. }))
+                matches!(
+                    steps.last().map(|step| &step.logic),
+                    Some(NodeLogic::Sink { .. })
+                )
             }
             NodeLogic::ChainMember { was_sink } => *was_sink,
             _ => false,
@@ -213,7 +215,6 @@ impl Stream {
     }
 
     fn drain_inner(&mut self, py: Python) -> PyResult<()> {
-
         // Flush this node's buffer
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
@@ -418,12 +419,7 @@ impl Stream {
         }
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, &format!("prefetch({})", n), None);
-        let node = Self::make_node(
-            py,
-            NodeLogic::Prefetch { size: n },
-            name,
-            source_location,
-        )?;
+        let node = Self::make_node(py, NodeLogic::Prefetch { size: n }, name, source_location)?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
         drop(this);
@@ -681,12 +677,7 @@ impl Stream {
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "flatten", None);
-        let node = Self::make_node(
-            py,
-            NodeLogic::Flatten,
-            name,
-            source_location,
-        )?;
+        let node = Self::make_node(py, NodeLogic::Flatten, name, source_location)?;
         this.downstreams.push(node.clone_ref(py));
         let self_py = slf.clone().unbind();
         drop(this);
@@ -897,7 +888,11 @@ impl Stream {
         let name = resolve_stream_name(
             stream_name,
             "chunks_between",
-            Some(&format!("{}, {}", open_name.as_deref().unwrap_or("?"), close_name.as_deref().unwrap_or("?"))),
+            Some(&format!(
+                "{}, {}",
+                open_name.as_deref().unwrap_or("?"),
+                close_name.as_deref().unwrap_or("?")
+            )),
         );
 
         let node = Self::make_node(
@@ -1186,7 +1181,8 @@ impl Stream {
         if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(StreamError::ReentrantEmit(self.name.clone()).into());
         }
-        self.emitting.store(true, std::sync::atomic::Ordering::Release);
+        self.emitting
+            .store(true, std::sync::atomic::Ordering::Release);
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1198,7 +1194,8 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting.store(false, std::sync::atomic::Ordering::Release);
+        self.emitting
+            .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
@@ -1235,7 +1232,8 @@ impl Stream {
         if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
             return Err(StreamError::ReentrantEmit(self.name.clone()).into());
         }
-        self.emitting.store(true, std::sync::atomic::Ordering::Release);
+        self.emitting
+            .store(true, std::sync::atomic::Ordering::Release);
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1247,7 +1245,8 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting.store(false, std::sync::atomic::Ordering::Release);
+        self.emitting
+            .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
@@ -1513,5 +1512,4 @@ impl Stream {
         Stream::sink(&self_py.into_bound(py), py, add, args, None, None)?;
         Ok(set.unbind())
     }
-
 }

@@ -5,13 +5,13 @@ use std::time::{Duration, Instant};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
+use crate::Stream;
 use crate::helpers::{
-    cached_vectorcall1, get_parallel_execute,
-    get_safe_update, get_safe_update_batch, vectorcall1, wrap_error,
+    cached_vectorcall1, get_parallel_execute, get_safe_update, get_safe_update_batch, vectorcall1,
+    wrap_error,
 };
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
 use crate::profiling;
-use crate::Stream;
 
 /// Check for pending signals (e.g. KeyboardInterrupt).
 /// Cost: ~7ns when no signal pending (atomic flag read).
@@ -98,7 +98,11 @@ fn extract_between_step(
     name: &str,
     source_location: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let (pred, vc) = if *inside { (close, close_vc) } else { (open, open_vc) };
+    let (pred, vc) = if *inside {
+        (close, close_vc)
+    } else {
+        (open, open_vc)
+    };
     let res = wrap_error(py, vcall1(py, pred, x, vc), name, source_location)?;
     if !res.is_truthy(py)? {
         if *inside {
@@ -626,7 +630,9 @@ pub(crate) fn apply_logic(
             Ok(StepResult::Value(val))
         }
 
-        NodeLogic::ChainMember { .. } => unreachable!("ChainMember should never be executed directly"),
+        NodeLogic::ChainMember { .. } => {
+            unreachable!("ChainMember should never be executed directly")
+        }
 
         _ => unreachable!("apply_logic called with non-chainable variant"),
     }
@@ -889,7 +895,9 @@ pub(crate) fn apply_logic_batch(
             Ok(BatchStepResult::Items(batch))
         }
 
-        NodeLogic::ChainMember { .. } => unreachable!("ChainMember should never be executed directly"),
+        NodeLogic::ChainMember { .. } => {
+            unreachable!("ChainMember should never be executed directly")
+        }
 
         _ => unreachable!("apply_logic_batch called with non-chainable variant"),
     }
@@ -901,11 +909,7 @@ impl Stream {
     // each arm is simple and independent.
     #[allow(clippy::cognitive_complexity)]
     #[pyo3(name = "_update_batch")]
-    pub fn update_batch(
-        &mut self,
-        py: Python,
-        items: Vec<Py<PyAny>>,
-    ) -> PyResult<()> {
+    pub fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
             std::ptr::from_ref(&*self) as usize
@@ -1380,11 +1384,7 @@ impl Stream {
                 }
                 let res = wrap_error(py, res, &self.name, &self.source_location)?;
                 let passes = res.is_truthy(py)?;
-                if passes {
-                    Some(x)
-                } else {
-                    None
-                }
+                if passes { Some(x) } else { None }
             }
 
             NodeLogic::Collect { buffer } => {
@@ -1642,7 +1642,9 @@ impl Stream {
                 let child = unsafe { self.compiled_downstream_ptrs[0].get_mut() };
                 return child.update_batch(py, output_batch);
             }
-            return self.downstreams[0].borrow_mut(py).update_batch(py, output_batch);
+            return self.downstreams[0]
+                .borrow_mut(py)
+                .update_batch(py, output_batch);
         }
 
         if use_lock {
@@ -1755,7 +1757,8 @@ impl Stream {
             return;
         }
         node.needs_lock = true;
-        let downstreams: Vec<Py<Stream>> = node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        let downstreams: Vec<Py<Stream>> =
+            node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
         drop(node);
         for child in downstreams {
             Self::mark_par_reachable(py, child);

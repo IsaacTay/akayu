@@ -3,10 +3,10 @@
 use pyo3::prelude::*;
 use std::collections::VecDeque;
 
+use crate::Stream;
 use crate::error::StreamError;
 use crate::helpers::{capture_source_location, check_not_compiled};
 use crate::node::NodeLogic;
-use crate::Stream;
 
 // Stream methods for combinators
 #[pymethods]
@@ -48,12 +48,7 @@ impl Stream {
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(
-            py,
-            NodeLogic::Parallel,
-            "par".to_string(),
-            source_location,
-        )?;
+        let node = Self::make_node(py, NodeLogic::Parallel, "par".to_string(), source_location)?;
         this.downstreams.push(node.clone_ref(py));
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -92,17 +87,12 @@ impl Stream {
     /// # Raises
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
-pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
+    pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let mut this = slf.borrow_mut();
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(
-            py,
-            NodeLogic::Source,
-            "seq".to_string(),
-            source_location,
-        )?;
+        let node = Self::make_node(py, NodeLogic::Source, "seq".to_string(), source_location)?;
         this.downstreams.push(node.clone_ref(py));
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -149,12 +139,7 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         }
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(
-            py,
-            NodeLogic::Source,
-            "union".to_string(),
-            source_location,
-        )?;
+        let node = Self::make_node(py, NodeLogic::Source, "union".to_string(), source_location)?;
 
         this.downstreams.push(node.clone_ref(py));
         drop(this);
@@ -163,7 +148,11 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         for other in others {
             if let Ok(mut other_ref) = other.try_borrow_mut(py) {
                 other_ref.downstreams.push(node.clone_ref(py));
-                node.borrow(py).parents.lock().unwrap().push(other.clone_ref(py));
+                node.borrow(py)
+                    .parents
+                    .lock()
+                    .unwrap()
+                    .push(other.clone_ref(py));
             }
         }
 
@@ -272,14 +261,27 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
-        slf.borrow_mut().add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
+        slf.borrow_mut()
+            .add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
         for (i, other) in others.iter().enumerate() {
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node, other.clone_ref(py), &source_location)?;
+                    other_ref.add_tag_node(
+                        py,
+                        i + 1,
+                        &node,
+                        other.clone_ref(py),
+                        &source_location,
+                    )?;
                 }
                 Err(_) => {
-                    slf.borrow_mut().add_tag_node(py, i + 1, &node, self_py.clone_ref(py), &source_location)?;
+                    slf.borrow_mut().add_tag_node(
+                        py,
+                        i + 1,
+                        &node,
+                        self_py.clone_ref(py),
+                        &source_location,
+                    )?;
                 }
             }
         }
@@ -341,14 +343,27 @@ pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
-        slf.borrow_mut().add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
+        slf.borrow_mut()
+            .add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
         for (i, other) in others.iter().enumerate() {
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
-                    other_ref.add_tag_node(py, i + 1, &node, other.clone_ref(py), &source_location)?;
+                    other_ref.add_tag_node(
+                        py,
+                        i + 1,
+                        &node,
+                        other.clone_ref(py),
+                        &source_location,
+                    )?;
                 }
                 Err(_) => {
-                    slf.borrow_mut().add_tag_node(py, i + 1, &node, self_py.clone_ref(py), &source_location)?;
+                    slf.borrow_mut().add_tag_node(
+                        py,
+                        i + 1,
+                        &node,
+                        self_py.clone_ref(py),
+                        &source_location,
+                    )?;
                 }
             }
         }
@@ -377,7 +392,12 @@ impl Stream {
             .borrow_mut(py)
             .downstreams
             .push(target.clone_ref(py));
-        target.borrow(py).parents.lock().unwrap().push(tag_node.clone_ref(py));
+        target
+            .borrow(py)
+            .parents
+            .lock()
+            .unwrap()
+            .push(tag_node.clone_ref(py));
         self.downstreams.push(tag_node.clone_ref(py));
         tag_node.borrow(py).parents.lock().unwrap().push(source_py);
         Ok(())
@@ -428,12 +448,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     }
 
     let source_location = capture_source_location(py);
-    let node = Stream::make_node(
-        py,
-        NodeLogic::Source,
-        "union".to_string(),
-        source_location,
-    )?;
+    let node = Stream::make_node(py, NodeLogic::Source, "union".to_string(), source_location)?;
 
     for stream in &streams {
         let stream_py: Py<Stream> = stream.clone_ref(py);
@@ -605,12 +620,7 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
         let source_location = capture_source_location(py);
         let stream_py: Py<Stream> = stream.clone_ref(py);
         drop(stream_ref);
-        let node = Stream::make_node(
-            py,
-            NodeLogic::Source,
-            "zip".to_string(),
-            source_location,
-        )?;
+        let node = Stream::make_node(py, NodeLogic::Source, "zip".to_string(), source_location)?;
         stream.borrow_mut(py).downstreams.push(node.clone_ref(py));
         node.borrow(py).parents.lock().unwrap().push(stream_py);
         return Ok(node);
