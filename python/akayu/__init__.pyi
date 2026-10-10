@@ -99,6 +99,11 @@ class Stream:
         """Return string representation of the stream."""
         ...
 
+    @property
+    def compiled(self) -> bool:
+        """True if the stream graph is compiled (frozen)."""
+        ...
+
     def map(self, func: Callable[..., T], *args: Any, stream_name: str | None = None, **kwargs: Any) -> Stream:
         """Apply a function to each element in the stream.
 
@@ -217,6 +222,39 @@ class Stream:
 
         Returns:
             A new Stream emitting tuples of chunked items.
+        """
+        ...
+
+    def chunks_between(
+        self, open: Callable[[Any], Any], close: Callable[[Any], Any], *, stream_name: str | None = None
+    ) -> Stream:
+        """Emit the items between an opening and a closing delimiter as a tuple.
+
+        Outside a chunk only `open` is called; inside one only `close` is.
+        Items are buffered until `close` matches, then emitted as a tuple.
+        The delimiters themselves are not included, and empty chunks are not
+        emitted. The same predicate can serve as both delimiters.
+
+        `flush()`/`drain()` discard an incomplete chunk, return to the
+        outside state, and continue on to downstream nodes.
+
+        Args:
+            open: Predicate that returns True for the opening delimiter.
+            close: Predicate that returns True for the closing delimiter.
+            stream_name: Optional custom name for this node.
+
+        Returns:
+            A new Stream emitting tuples of the items between delimiters.
+
+        Example:
+            ```python
+            source = Stream()
+            out = []
+            source.chunks_between(lambda c: c == "[", lambda c: c == "]").sink(out.append)
+            for ch in "a[bc]d[e]":
+                source.emit(ch)
+            out  # [('b', 'c'), ('e',)]
+            ```
         """
         ...
 
@@ -631,6 +669,17 @@ class MultiStream:
         """
         ...
 
+    def __setitem__(self, key: int | str, value: Stream | MultiStream) -> None:
+        """Replace the stream at an index or key.
+
+        In dict mode, assigning to a new str key appends it.
+
+        Raises:
+            TypeError: If value is not a Stream or MultiStream, or a str key
+                is used in list mode.
+        """
+        ...
+
     def keys(self) -> Iterator[str]:
         """Iterate over keys in dict mode.
 
@@ -709,6 +758,12 @@ class MultiStream:
         """Apply chunk_by to each stream in the batch."""
         ...
 
+    def chunks_between(
+        self, open: Callable[[Any], Any], close: Callable[[Any], Any], *, stream_name: str | None = None, **kwargs: Any
+    ) -> MultiStream:
+        """Apply chunks_between to each stream in the batch."""
+        ...
+
     @overload
     def to_list(self) -> list[list[Any]]: ...
     @overload
@@ -745,6 +800,30 @@ class MultiStream:
 
     def compile(self) -> MultiStream:
         """Compile all streams in the batch. Returns self for chaining."""
+        ...
+
+    def par(self, **kwargs: Any) -> MultiStream:
+        """Apply par() to each stream in the batch."""
+        ...
+
+    def parallel(self, **kwargs: Any) -> MultiStream:
+        """Alias for `par()`."""
+        ...
+
+    def seq(self, **kwargs: Any) -> MultiStream:
+        """Apply seq() to each stream in the batch."""
+        ...
+
+    def prefetch(self, n: int, **kwargs: Any) -> MultiStream:
+        """Apply prefetch(n) to each stream in the batch."""
+        ...
+
+    def profile(self) -> list[ContextManager[Any]] | dict[str, ContextManager[Any]]:
+        """Return a profiler for each stream.
+
+        In list mode: returns a list of profilers.
+        In dict mode: returns a dict of profilers.
+        """
         ...
 
     def union(self, *others: _StreamOrMultiStream) -> MultiStream:
