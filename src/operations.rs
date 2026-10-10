@@ -10,50 +10,8 @@ use crate::helpers::{
     get_func_name, get_prefetch_batch_map_state_class, get_prefetch_filter_state_class,
     get_prefetch_state_class, get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
+use crate::lock::{Downstream, NodeLock};
 use crate::node::NodeLogic;
-
-struct PyLockGuard {
-    lock: Py<PyAny>,
-    released: bool,
-}
-
-impl PyLockGuard {
-    fn acquire(py: Python, lock: &Py<PyAny>) -> PyResult<Self> {
-        lock.call_method0(py, "acquire")?;
-        Ok(Self {
-            lock: lock.clone_ref(py),
-            released: false,
-        })
-    }
-
-    fn release(mut self, py: Python) -> PyResult<()> {
-        if !self.released {
-            self.lock.call_method1(py, "release", ())?;
-            self.released = true;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for PyLockGuard {
-    fn drop(&mut self) {
-        if !self.released {
-            Python::attach(|py| {
-                let _ = self.lock.call_method1(py, "release", ());
-            });
-        }
-    }
-}
-
-fn make_emit_lock(py: Python) -> Py<PyAny> {
-    py.import("threading")
-        .unwrap()
-        .getattr("RLock")
-        .unwrap()
-        .call0()
-        .unwrap()
-        .unbind()
-}
 
 /// Wrap a function with additional args/kwargs using the build_map_func helper.
 fn wrap_func(
@@ -80,7 +38,7 @@ impl Stream {
         py: Python,
         logic: NodeLogic,
         name: String,
-        source_location: String,
+        source_location: std::sync::Arc<str>,
     ) -> PyResult<Py<Self>> {
         let compiled_chainable = (logic.is_chainable()
             && !matches!(&logic, NodeLogic::Filter { .. }))
@@ -107,7 +65,7 @@ impl Stream {
                 emit_target: None,
                 flushing: false,
                 emitting: std::sync::atomic::AtomicBool::new(false),
-                emit_lock: make_emit_lock(py),
+                lock: NodeLock::new(),
                 convergence_checked: false,
             },
         )
@@ -117,7 +75,8 @@ impl Stream {
     /// node the user called `flush()` on: nodes reached by propagation are
     /// expected to be leaves and must not warn.
     pub(crate) fn flush_guarded(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
-        let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
+        let lock = std::sync::Arc::clone(&self.lock);
+        let _guard = lock.acquire(py);
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.clone()).into());
         }
@@ -288,7 +247,7 @@ impl Stream {
             emit_target: None,
             flushing: false,
             emitting: std::sync::atomic::AtomicBool::new(false),
-            emit_lock: make_emit_lock(py),
+            lock: NodeLock::new(),
             convergence_checked: false,
         }
     }
@@ -354,7 +313,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_map({size})+{name}");
-            this.source_location = format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
 
@@ -364,7 +323,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -420,7 +379,7 @@ impl Stream {
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, &format!("prefetch({})", n), None);
         let node = Self::make_node(py, NodeLogic::Prefetch { size: n }, name, source_location)?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -481,7 +440,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -546,7 +505,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_batch_map({size})+{name}");
-            this.source_location = format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
 
@@ -556,7 +515,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -624,7 +583,7 @@ impl Stream {
                 state,
             };
             this.name = format!("prefetch_filter({size})+{name}");
-            this.source_location = format!("{}, {}", this.source_location, source_location);
+            this.source_location = format!("{}, {}", this.source_location, source_location).into();
             return Ok(slf.clone().unbind());
         }
 
@@ -636,7 +595,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -678,7 +637,7 @@ impl Stream {
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "flatten", None);
         let node = Self::make_node(py, NodeLogic::Flatten, name, source_location)?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -730,7 +689,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -819,7 +778,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -907,7 +866,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -1051,7 +1010,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -1141,7 +1100,7 @@ impl Stream {
             name,
             source_location,
         )?;
-        this.downstreams.push(node.clone_ref(py));
+        this.downstreams.push(Downstream::new(py, &node));
         let self_py = slf.clone().unbind();
         drop(this);
         node.borrow(py).parents.lock().unwrap().push(self_py);
@@ -1174,7 +1133,7 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
-        let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
+        let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }
@@ -1225,7 +1184,7 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
-        let _guard = PyLockGuard::acquire(py, &self.emit_lock)?;
+        let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.clone()).into());
         }

@@ -135,7 +135,7 @@ fn visit_chain_node(step: &ChainNode, visit: &PyVisit<'_>) -> Result<(), PyTrave
 impl Stream {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         for downstream in &self.downstreams {
-            visit.call(downstream)?;
+            visit.call(&downstream.node)?;
         }
         // Never block inside the GC. If another thread holds the lock, skip
         // the parents: the GC then treats them as externally referenced, so
@@ -152,7 +152,6 @@ impl Stream {
         }
         visit.call(&self.flush_target)?;
         visit.call(&self.emit_target)?;
-        visit.call(&self.emit_lock)?;
         visit_logic(&self.logic, &visit)?;
         if let Some(op) = &self.builtin_op {
             visit_builtin(op, &visit)?;

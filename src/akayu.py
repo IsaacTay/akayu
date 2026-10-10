@@ -5,9 +5,7 @@ import dis
 import functools
 import inspect
 import os
-import sys
 import threading
-import types as _types
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 
@@ -650,20 +648,6 @@ def _analyze_code(func, code):
     return _analyze_expr(clean, func)
 
 
-def _get_caller_location():
-    """Return 'filename:lineno' of the caller's caller.
-
-    Frame 0 = this function, frame 1 = the user's code.
-    PyO3 Rust methods don't create Python frames, so frame 1
-    is the Python code that called the Rust method which called us.
-    """
-    try:
-        frame = sys._getframe(1)
-        return f"{frame.f_code.co_filename}:{frame.f_lineno}"
-    except ValueError:
-        return "<unknown>"
-
-
 def _reject_async(func, op):
     """Raise TypeError for async callables: akayu never awaits coroutines."""
     if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
@@ -735,13 +719,6 @@ def _build_starmap_func(func, args, kwargs):
         return wrapper
 
 
-# Per-node locks that serialize concurrent _update calls at par()/prefetch()
-# convergence points. Weakly keyed so a lock dies with its node; keying by
-# id(node) leaked one lock per node and handed dead nodes' locks to new ones.
-_node_locks = weakref.WeakKeyDictionary()
-_node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
-
-
 @functools.cache
 def _get_global_pool():
     """Get or create the shared global thread pool for par() and prefetch().
@@ -753,80 +730,23 @@ def _get_global_pool():
     return ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
 
 
-def _get_node_lock(node):
-    """Get or create the lock that serializes concurrent updates of a node."""
-    lock = _node_locks.get(node)
-    if lock is None:
-        with _node_locks_lock:
-            lock = _node_locks.get(node)
-            if lock is None:
-                lock = _node_locks[node] = threading.RLock()
-    return lock
+def _parallel_execute(val, branches):
+    """Run each par() branch on the thread pool and wait for all of them.
 
-
-def _parallel_execute(val, downstreams):
-    """Execute downstream updates in parallel using a thread pool."""
+    `branches` are Rust callables that take the branch's lock and update it.
+    Each runs in its own copy of the caller's context.
+    """
     pool = _get_global_pool()
-
-    def make_update_fn(d, v):
-        ctx = contextvars.copy_context()
-
-        def update_in_context():
-            lock = _get_node_lock(d)
-            with lock:
-                return ctx.run(d._update, v)
-
-        return update_in_context
-
-    futures = [pool.submit(make_update_fn(d, val)) for d in downstreams]
-
-    results = []
-    errors = []
+    futures = [pool.submit(contextvars.copy_context().run, b, val) for b in branches]
+    # Wait for every branch before raising, so none is still running.
+    error = None
     for f in futures:
         try:
-            res = f.result()
-            if res is not None:
-                results.append(res)
+            f.result()
         except Exception as e:
-            errors.append(e)
-
-    if errors:
-        raise errors[0]
-
-    return None
-
-
-_INTERNAL_NAMES = frozenset(("_safe_update", "_safe_update_batch", "_strip_internal_frames"))
-
-
-def _strip_internal_frames(exc):
-    tb = exc.__traceback__
-    if tb is None:
-        return
-    frames = []
-    while tb is not None:
-        code = tb.tb_frame.f_code
-        if code.co_name not in _INTERNAL_NAMES:
-            frames.append((tb.tb_frame, tb.tb_lasti, tb.tb_lineno))
-        tb = tb.tb_next
-    if not frames:
-        return
-    new_tb = None
-    for frame, lasti, lineno in reversed(frames):
-        new_tb = _types.TracebackType(new_tb, frame, lasti, lineno)
-    exc.__traceback__ = new_tb
-
-
-def _safe_update(node, val):
-    lock = _get_node_lock(node)
-    with lock:
-        return node._update(val)
-
-
-def _safe_update_batch(node, items):
-    lock = _get_node_lock(node)
-    with lock:
-        return node._update_batch(items)
+            error = error or e
+    if error is not None:
+        raise error
 
 
 class _Profiler:

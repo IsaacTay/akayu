@@ -7,6 +7,7 @@ use crate::builtin::{
     cache_secondary_vectorcalls, detect_builtin_for_logic, detect_emit_target_from_func,
     detect_flush_target_from_func, extract_vectorcall_for_logic,
 };
+use crate::lock::Downstream;
 use crate::node::{ChainNode, NodeLogic};
 use crate::{Stream, StreamPtr};
 
@@ -244,8 +245,8 @@ impl Stream {
             if child.parents.lock().unwrap().len() != 1 {
                 return;
             }
-            let new_downstreams: Vec<Py<Self>> =
-                child.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+            let new_downstreams: Vec<Downstream> =
+                child.downstreams.iter().map(|d| d.clone_edge(py)).collect();
             drop(child);
             self.downstreams = new_downstreams;
         }
@@ -323,8 +324,8 @@ impl Stream {
         // Get tail downstreams before we start mutating
         let last_py = chain_node_refs.last().unwrap();
         let last = last_py.borrow(py);
-        let tail_downstreams: Vec<Py<Self>> =
-            last.downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        let tail_downstreams: Vec<Downstream> =
+            last.downstreams.iter().map(|d| d.clone_edge(py)).collect();
         drop(last);
 
         // Extract logic from each node into ChainNode structs
@@ -365,7 +366,7 @@ impl Stream {
             .collect::<Vec<_>>()
             .join(" -> ");
         head.logic = NodeLogic::Chain { steps };
-        head.downstreams = tail_downstreams.iter().map(|d| d.clone_ref(py)).collect();
+        head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
         drop(head);
 
         // Recurse into tail downstreams and any branches from branching nodes
@@ -630,7 +631,7 @@ impl Stream {
                 collect_node
                     .downstreams
                     .iter()
-                    .map(|d| d.clone_ref(py))
+                    .map(|d| d.clone_edge(py))
                     .collect::<Vec<_>>()
             };
 

@@ -112,7 +112,7 @@ pub enum NodeLogic {
 pub struct ChainNode {
     pub logic: NodeLogic,
     pub name: String,
-    pub source_location: String,
+    pub source_location: std::sync::Arc<str>,
     pub builtin_op: Option<BuiltinOp>,
     pub node_id: usize,
     /// Cached vectorcall function pointer, extracted at compile time.

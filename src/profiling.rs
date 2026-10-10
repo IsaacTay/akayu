@@ -6,6 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use pyo3::prelude::*;
@@ -57,6 +58,12 @@ thread_local! {
     static PROFILE: RefCell<ProfileState> = RefCell::new(ProfileState::default());
 }
 
+/// Number of threads with an active session. Every node update asks
+/// `is_profiling()`; reading this first keeps the common no-profiling case to
+/// one relaxed load instead of a thread-local lookup (a `__tls_get_addr` call
+/// in a shared library).
+static ACTIVE_SESSIONS: AtomicUsize = AtomicUsize::new(0);
+
 // ---------------------------------------------------------------------------
 // Public API for controlling profiling sessions
 // ---------------------------------------------------------------------------
@@ -64,7 +71,7 @@ thread_local! {
 /// Fast-path check: is profiling currently active?
 #[inline(always)]
 pub fn is_profiling() -> bool {
-    PROFILE.with(|p| p.borrow().active)
+    ACTIVE_SESSIONS.load(Ordering::Relaxed) != 0 && PROFILE.with(|p| p.borrow().active)
 }
 
 /// Start a new profiling session. Clears any previous data.
@@ -78,6 +85,7 @@ pub fn start_session() -> PyResult<()> {
             ));
         }
         state.active = true;
+        ACTIVE_SESSIONS.fetch_add(1, Ordering::Relaxed);
         state.nodes.clear();
         state.emit_start = None;
         state.wall_total = Duration::ZERO;
@@ -110,7 +118,9 @@ pub fn end_emit() {
 pub fn stop_session() -> (HashMap<usize, NodeProfile>, Duration, u64) {
     PROFILE.with(|p| {
         let mut state = p.borrow_mut();
-        state.active = false;
+        if std::mem::replace(&mut state.active, false) {
+            ACTIVE_SESSIONS.fetch_sub(1, Ordering::Relaxed);
+        }
         // If an emit was in-flight (e.g., error path), finalize it
         if let Some(start) = state.emit_start.take() {
             state.wall_total += start.elapsed();
@@ -202,7 +212,7 @@ pub fn build_report(
     let source_profile = data.get(&source_ptr);
     let source_node = ReportNode {
         name: source.name.clone(),
-        source_location: source.source_location.clone(),
+        source_location: source.source_location.to_string(),
         func_time_ns: source_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
         items_in: source_profile.map_or(0, |p| p.items_in),
         items_out: source_profile.map_or(0, |p| p.items_out),
@@ -251,7 +261,7 @@ pub fn build_report(
                 let step_profile = data.get(&step.node_id);
                 let step_node = ReportNode {
                     name: step.name.clone(),
-                    source_location: step.source_location.clone(),
+                    source_location: step.source_location.to_string(),
                     func_time_ns: step_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
                     items_in: step_profile.map_or(0, |p| p.items_in),
                     items_out: step_profile.map_or(0, |p| p.items_out),
@@ -282,7 +292,7 @@ pub fn build_report(
 
         let child_node = ReportNode {
             name: child.name.clone(),
-            source_location: child.source_location.clone(),
+            source_location: child.source_location.to_string(),
             func_time_ns: child_profile.map_or(0, |p| p.func_time.as_nanos() as u64),
             items_in: child_profile.map_or(0, |p| p.items_in),
             items_out: child_profile.map_or(0, |p| p.items_out),

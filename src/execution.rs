@@ -7,9 +7,9 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::Stream;
 use crate::helpers::{
-    cached_vectorcall1, get_parallel_execute, get_safe_update, get_safe_update_batch, vectorcall1,
-    wrap_error,
+    cached_vectorcall1, get_parallel_execute, vectorcall1, vectorcall2, wrap_error,
 };
+use crate::lock::BranchUpdate;
 use crate::node::{BinaryOp, BuiltinOp, NodeLogic};
 use crate::profiling;
 
@@ -116,6 +116,45 @@ fn extract_between_step(
     }
     let chunk = std::mem::take(buffer);
     Ok(Some(PyTuple::new(py, chunk)?.into_any().unbind()))
+}
+
+/// Buffer `val` on zip input `index`; return the next tuple once every input has one.
+fn zip_push(
+    py: Python,
+    buffers: &mut [std::collections::VecDeque<Py<PyAny>>],
+    index: usize,
+    val: Py<PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(buf) = buffers.get_mut(index) {
+        buf.push_back(val);
+    }
+    if !buffers.iter().all(|buf| !buf.is_empty()) {
+        return Ok(None);
+    }
+    // Every buffer is non-empty, so each pop yields a value.
+    let values = buffers.iter_mut().map(|buf| buf.pop_front().unwrap());
+    Ok(Some(PyTuple::new(py, values)?.into_any().unbind()))
+}
+
+/// Record `val` as the latest on input `index`; return the combined tuple when
+/// every input has a value and `index` triggers emission.
+fn combine_latest_push(
+    py: Python,
+    state: &mut [Option<Py<PyAny>>],
+    emit_on_indices: &[usize],
+    index: usize,
+    val: Py<PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(slot) = state.get_mut(index) {
+        *slot = Some(val);
+    }
+    let should_emit = state.iter().all(Option::is_some)
+        && (emit_on_indices.is_empty() || emit_on_indices.contains(&index));
+    if !should_emit {
+        return Ok(None);
+    }
+    let values = state.iter().map(|v| v.as_ref().unwrap().clone_ref(py));
+    Ok(Some(PyTuple::new(py, values)?.into_any().unbind()))
 }
 
 /// Apply a `BuiltinOp` to a single value, returning the result.
@@ -501,7 +540,7 @@ pub(crate) fn apply_logic(
             returns_state,
         } => {
             let t = prof_start(profiling);
-            let result = func.call1(py, (state.clone_ref(py), x));
+            let result = vectorcall2(py, func, state, &x);
             let ft = if let Some(t) = t {
                 t.elapsed()
             } else {
@@ -781,7 +820,7 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = Vec::with_capacity(items.len());
             for x in items {
-                let result = func.call1(py, (state.clone_ref(py), x));
+                let result = vectorcall2(py, func, state, &x);
                 let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
                 if *returns_state {
                     let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
@@ -1141,42 +1180,26 @@ impl Stream {
 
             // -- Multi-stream --
             NodeLogic::Tag { index } => {
-                let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
-                for x in items {
-                    let tuple = PyTuple::new(py, &[idx_obj.clone_ref(py), x])?;
-                    output_batch.push(tuple.into());
-                }
+                let index = *index;
                 if profiling_active {
                     profiling::record_node(
                         node_id,
                         Duration::ZERO,
                         items_in,
-                        output_batch.len() as u64,
+                        items_in,
                         &self.name,
                         &self.source_location,
                     );
                 }
+                return self.propagate_batch_tagged(py, index, items);
             }
             NodeLogic::CombineLatest {
                 state,
                 emit_on_indices,
             } => {
                 for x in items {
-                    let tuple: (usize, Py<PyAny>) = x.extract(py)?;
-                    let (idx, val) = tuple;
-                    if idx < state.len() {
-                        state[idx] = Some(val);
-                    }
-                    let should_emit = state.iter().all(std::option::Option::is_some)
-                        && (emit_on_indices.is_empty() || emit_on_indices.contains(&idx));
-                    if should_emit {
-                        let values: Vec<Py<PyAny>> = state
-                            .iter()
-                            .map(|s| s.as_ref().unwrap().clone_ref(py))
-                            .collect();
-                        let tuple_out = PyTuple::new(py, values)?;
-                        output_batch.push(tuple_out.into());
-                    }
+                    let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
+                    output_batch.extend(combine_latest_push(py, state, emit_on_indices, idx, val)?);
                 }
                 if profiling_active {
                     profiling::record_node(
@@ -1191,21 +1214,8 @@ impl Stream {
             }
             NodeLogic::Zip { buffers } => {
                 for x in items {
-                    let tuple: (usize, Py<PyAny>) = x.extract(py)?;
-                    let (idx, val) = tuple;
-                    if idx < buffers.len() {
-                        buffers[idx].push_back(val);
-                    }
-                }
-                while buffers.iter().all(|buf| !buf.is_empty()) {
-                    let mut values = Vec::with_capacity(buffers.len());
-                    for buf in buffers.iter_mut() {
-                        if let Some(v) = buf.pop_front() {
-                            values.push(v);
-                        }
-                    }
-                    let tuple_out = PyTuple::new(py, values)?;
-                    output_batch.push(tuple_out.into());
+                    let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
+                    output_batch.extend(zip_push(py, buffers, idx, val)?);
                 }
                 if profiling_active {
                     profiling::record_node(
@@ -1520,51 +1530,29 @@ impl Stream {
                 };
             }
             NodeLogic::Tag { index } => {
-                let idx_obj: Py<PyAny> = (*index).into_pyobject(py)?.into();
-                let elements = vec![idx_obj, x];
-                let tuple = PyTuple::new(py, elements)?;
-                Some(tuple.into())
+                let index = *index;
+                if profiling_active {
+                    profiling::record_node(
+                        node_id,
+                        Duration::ZERO,
+                        1,
+                        1,
+                        &self.name,
+                        &self.source_location,
+                    );
+                }
+                return self.propagate_tagged(py, index, x);
             }
             NodeLogic::CombineLatest {
                 state,
                 emit_on_indices,
             } => {
-                let tuple: (usize, Py<PyAny>) = x.extract(py)?;
-                let (idx, val) = tuple;
-                if idx < state.len() {
-                    state[idx] = Some(val);
-                }
-                let should_emit = state.iter().all(std::option::Option::is_some)
-                    && (emit_on_indices.is_empty() || emit_on_indices.contains(&idx));
-                if should_emit {
-                    let values: Vec<Py<PyAny>> = state
-                        .iter()
-                        .map(|s| s.as_ref().unwrap().clone_ref(py))
-                        .collect();
-                    let tuple_out = PyTuple::new(py, values)?;
-                    Some(tuple_out.into())
-                } else {
-                    None
-                }
+                let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
+                combine_latest_push(py, state, emit_on_indices, idx, val)?
             }
             NodeLogic::Zip { buffers } => {
-                let tuple: (usize, Py<PyAny>) = x.extract(py)?;
-                let (idx, val) = tuple;
-                if idx < buffers.len() {
-                    buffers[idx].push_back(val);
-                }
-                if buffers.iter().all(|buf| !buf.is_empty()) {
-                    let mut values = Vec::with_capacity(buffers.len());
-                    for buf in buffers.iter_mut() {
-                        if let Some(v) = buf.pop_front() {
-                            values.push(v);
-                        }
-                    }
-                    let tuple_out = PyTuple::new(py, values)?;
-                    Some(tuple_out.into())
-                } else {
-                    None
-                }
+                let (idx, val): (usize, Py<PyAny>) = x.extract(py)?;
+                zip_push(py, buffers, idx, val)?
             }
             NodeLogic::Parallel => {
                 if profiling_active {
@@ -1629,15 +1617,14 @@ impl Stream {
             return Ok(());
         }
 
-        // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
-        // for all downstream calls to prevent borrow conflicts at convergence points.
+        // If THIS node needs locking (par() branches, union inputs), take each
+        // child's lock before updating it: the child may be shared with another
+        // thread's branch.
         let use_lock = self.needs_lock;
 
         if n == 1 {
             if use_lock {
-                let batch_list = PyList::new(py, &output_batch)?;
-                get_safe_update_batch()?.call1(py, (&self.downstreams[0], batch_list))?;
-                return Ok(());
+                return self.downstreams[0].locked_update_batch(py, output_batch);
             } else if !self.compiled_downstream_ptrs.is_empty() {
                 let child = unsafe { self.compiled_downstream_ptrs[0].get_mut() };
                 return child.update_batch(py, output_batch);
@@ -1648,12 +1635,11 @@ impl Stream {
         }
 
         if use_lock {
-            let safe_update = get_safe_update()?;
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    safe_update.call1(py, (child, val.clone_ref(py)))?;
+                    child.locked_update(py, val.clone_ref(py))?;
                 }
-                safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
+                self.downstreams[n - 1].locked_update(py, val)?;
             }
         } else if !self.compiled_downstream_ptrs.is_empty() {
             let ptrs = &self.compiled_downstream_ptrs;
@@ -1682,14 +1668,14 @@ impl Stream {
             return Ok(());
         }
 
-        // If THIS node needs locking (e.g., PrefetchMap inside par), use safe_update
-        // for all downstream calls to prevent borrow conflicts at convergence points.
+        // If THIS node needs locking (par() branches, union inputs), take each
+        // child's lock before updating it: the child may be shared with another
+        // thread's branch.
         if self.needs_lock {
-            let safe_update = get_safe_update()?;
             for child in self.downstreams.iter().take(n - 1) {
-                safe_update.call1(py, (child, val.clone_ref(py)))?;
+                child.locked_update(py, val.clone_ref(py))?;
             }
-            safe_update.call1(py, (&self.downstreams[n - 1], &val))?;
+            self.downstreams[n - 1].locked_update(py, val)?;
         } else if !self.compiled_downstream_ptrs.is_empty() {
             // Compiled fast path: bypass PyCell borrow checks using cached raw pointers.
             // Safe because: DAG (no cycles), sequential processing (no aliasing),
@@ -1716,6 +1702,140 @@ impl Stream {
             self.downstreams[n - 1].borrow_mut(py).update(py, val)?;
         }
         Ok(())
+    }
+
+    /// A Tag's only downstream is its zip/combine_latest node: pass the input
+    /// index alongside the value instead of packing an `(index, value)` tuple
+    /// that the combinator would unpack again.
+    fn propagate_tagged(&self, py: Python, index: usize, val: Py<PyAny>) -> PyResult<()> {
+        let [child] = self.downstreams.as_slice() else {
+            return self.propagate(
+                py,
+                PyTuple::new(py, [index.into_pyobject(py)?.into_any().unbind(), val])?
+                    .into_any()
+                    .unbind(),
+            );
+        };
+        if self.needs_lock {
+            let _guard = child.lock.acquire(py);
+            return child.try_borrow_mut(py)?.update_tagged(py, index, val);
+        }
+        if let [ptr] = self.compiled_downstream_ptrs.as_slice() {
+            return unsafe { ptr.get_mut() }.update_tagged(py, index, val);
+        }
+        child.borrow_mut(py).update_tagged(py, index, val)
+    }
+
+    fn propagate_batch_tagged(
+        &self,
+        py: Python,
+        index: usize,
+        items: Vec<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let [child] = self.downstreams.as_slice() else {
+            let tagged = items
+                .into_iter()
+                .map(|v| {
+                    Ok(
+                        PyTuple::new(py, [index.into_pyobject(py)?.into_any().unbind(), v])?
+                            .into_any()
+                            .unbind(),
+                    )
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            return self.propagate_batch(py, tagged);
+        };
+        if self.needs_lock {
+            let _guard = child.lock.acquire(py);
+            return child
+                .try_borrow_mut(py)?
+                .update_batch_tagged(py, index, items);
+        }
+        if let [ptr] = self.compiled_downstream_ptrs.as_slice() {
+            return unsafe { ptr.get_mut() }.update_batch_tagged(py, index, items);
+        }
+        child.borrow_mut(py).update_batch_tagged(py, index, items)
+    }
+
+    /// Receive `val` on input `index` of a zip/combine_latest node.
+    fn update_tagged(&mut self, py: Python, index: usize, val: Py<PyAny>) -> PyResult<()> {
+        let out = match &mut self.logic {
+            NodeLogic::Zip { buffers } => zip_push(py, buffers, index, val)?,
+            NodeLogic::CombineLatest {
+                state,
+                emit_on_indices,
+            } => combine_latest_push(py, state, emit_on_indices, index, val)?,
+            _ => {
+                let tuple = PyTuple::new(py, [index.into_pyobject(py)?.into_any().unbind(), val])?;
+                return self.update(py, tuple.into_any().unbind());
+            }
+        };
+        if profiling::is_profiling() {
+            let node_id = std::ptr::from_ref(&*self) as usize;
+            let n_out = u64::from(out.is_some());
+            profiling::record_node(
+                node_id,
+                Duration::ZERO,
+                1,
+                n_out,
+                &self.name,
+                &self.source_location,
+            );
+        }
+        match out {
+            Some(tuple) => self.propagate(py, tuple),
+            None => Ok(()),
+        }
+    }
+
+    fn update_batch_tagged(
+        &mut self,
+        py: Python,
+        index: usize,
+        items: Vec<Py<PyAny>>,
+    ) -> PyResult<()> {
+        let items_in = items.len() as u64;
+        let mut output = Vec::new();
+        match &mut self.logic {
+            NodeLogic::Zip { buffers } => {
+                for val in items {
+                    output.extend(zip_push(py, buffers, index, val)?);
+                }
+            }
+            NodeLogic::CombineLatest {
+                state,
+                emit_on_indices,
+            } => {
+                for val in items {
+                    output.extend(combine_latest_push(py, state, emit_on_indices, index, val)?);
+                }
+            }
+            _ => {
+                let tagged = items
+                    .into_iter()
+                    .map(|v| {
+                        Ok(
+                            PyTuple::new(py, [index.into_pyobject(py)?.into_any().unbind(), v])?
+                                .into_any()
+                                .unbind(),
+                        )
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                return self.update_batch(py, tagged);
+            }
+        }
+        if profiling::is_profiling() {
+            let node_id = std::ptr::from_ref(&*self) as usize;
+            profiling::record_node(
+                node_id,
+                Duration::ZERO,
+                items_in,
+                output.len() as u64,
+                &self.name,
+                &self.source_location,
+            );
+        }
+        self.propagate_batch(py, output)
     }
 
     /// Iterate results from a stateful node (Prefetch*), propagate each,
@@ -1748,7 +1868,7 @@ impl Stream {
     }
 
     /// Recursively mark all nodes reachable from `node_py` with needs_lock=true.
-    /// This ensures propagate() uses _safe_update (per-node Python locking) for
+    /// This ensures propagate() takes each child's lock (Downstream::locked_update) for
     /// all downstream access, preventing concurrent borrow_mut on shared PyCells
     /// when par() branches converge.
     pub(crate) fn mark_par_reachable(py: Python, node_py: Py<Stream>) {
@@ -1778,10 +1898,12 @@ impl Stream {
         }
 
         // Multiple downstreams: use thread pool for parallel execution
-        let downstreams_list: Vec<Py<Self>> =
-            self.downstreams.iter().map(|s| s.clone_ref(py)).collect();
-        let dl = PyList::new(py, downstreams_list)?;
-        get_parallel_execute()?.call1(py, (val, dl))?;
+        let branches = self
+            .downstreams
+            .iter()
+            .map(|d| Py::new(py, BranchUpdate::new(d.clone_edge(py))))
+            .collect::<PyResult<Vec<_>>>()?;
+        get_parallel_execute()?.call1(py, (val, PyList::new(py, branches)?))?;
         Ok(())
     }
 }
