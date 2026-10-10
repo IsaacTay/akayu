@@ -159,13 +159,20 @@ fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp>
     }
 }
 
-/// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.
-fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
-    let analyzer = get_analyze_lambda().ok()?;
-    let result = analyzer.call1(py, (func,)).ok()?;
-    if result.is_none(py) {
+/// Run `_analyze_lambda()` on a callable's bytecode. Builtins have none, so
+/// they skip the Python call (`sink(out.append)` is the common sink).
+fn analyze_bytecode(py: Python, func: &Py<PyAny>) -> Option<Py<PyAny>> {
+    // SAFETY: GIL held; a type check on a live object.
+    if unsafe { pyo3::ffi::PyCFunction_Check(func.as_ptr()) } != 0 {
         return None;
     }
+    let result = get_analyze_lambda().ok()?.call1(py, (func,)).ok()?;
+    (!result.is_none(py)).then_some(result)
+}
+
+/// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.
+fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
+    let result = analyze_bytecode(py, func)?;
     parse_analysis_tuple(py, result.bind(py))
 }
 
@@ -244,8 +251,7 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Bu
         return Some(op);
     }
     // Fallback: analyze lambda bytecode
-    let analyzer = get_analyze_lambda().ok()?;
-    let result = analyzer.call1(py, (func.clone_ref(py),)).ok()?;
+    let result = analyze_bytecode(py, func)?;
     if result.is_none(py) {
         return None;
     }
@@ -267,9 +273,15 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Bu
 /// set by `_build_map_func` when extra args were provided (e.g., `filter(isinstance, int)`).
 fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<BuiltinOp> {
     // Try to recover the original function and args from the wrapper
-    let (func, args) = if let Ok(inner) = predicate.getattr(py, "_akayu_inner") {
-        let args = predicate.getattr(py, "_akayu_args").ok();
-        (inner, args)
+    let pred = predicate.bind(py);
+    let (func, args) = if let Ok(Some(inner)) = pred.getattr_opt(pyo3::intern!(py, "_akayu_inner"))
+    {
+        let args = pred
+            .getattr_opt(pyo3::intern!(py, "_akayu_args"))
+            .ok()
+            .flatten()
+            .map(Bound::unbind);
+        (inner.unbind(), args)
     } else {
         // No wrapper — predicate is the original function (no extra args)
         // Fall through to lambda bytecode analysis
@@ -335,8 +347,12 @@ pub(crate) fn detect_builtin_for_logic(py: Python, logic: &mut NodeLogic) -> Opt
 pub(crate) fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Stream>> {
     // Method A: Bound method check (e.g., .sink(collected.flush))
     let bound = func.bind(py);
-    if let (Ok(self_obj), Ok(func_obj)) = (bound.getattr("__self__"), bound.getattr("__func__"))
-        && let Ok(name) = func_obj.getattr("__name__")
+    // getattr_opt: plain functions have no __self__, and a raised-and-discarded
+    // AttributeError per sink made this a large part of compile().
+    if let (Ok(Some(self_obj)), Ok(Some(func_obj))) = (
+        bound.getattr_opt(pyo3::intern!(py, "__self__")),
+        bound.getattr_opt(pyo3::intern!(py, "__func__")),
+    ) && let Ok(name) = func_obj.getattr("__name__")
         && let Ok(name_str) = name.extract::<String>()
         && name_str == "flush"
         && self_obj.is_instance_of::<Stream>()
@@ -351,11 +367,7 @@ pub(crate) fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Opt
     }
 
     // Method B: Lambda bytecode analysis (e.g., .sink(lambda _: collected.flush()))
-    let analyzer = get_analyze_lambda().ok()?;
-    let result = analyzer.call1(py, (func,)).ok()?;
-    if result.is_none(py) {
-        return None;
-    }
+    let result = analyze_bytecode(py, func)?;
     let bound_result = result.bind(py);
     let tuple = bound_result.cast::<PyTuple>().ok()?;
     if tuple.len() != 3 {
@@ -391,8 +403,12 @@ pub(crate) fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Opt
 pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Option<Py<Stream>> {
     // Method A: Bound method check (e.g., .sink(source.emit))
     let bound = func.bind(py);
-    if let (Ok(self_obj), Ok(func_obj)) = (bound.getattr("__self__"), bound.getattr("__func__"))
-        && let Ok(name) = func_obj.getattr("__name__")
+    // getattr_opt: plain functions have no __self__, and a raised-and-discarded
+    // AttributeError per sink made this a large part of compile().
+    if let (Ok(Some(self_obj)), Ok(Some(func_obj))) = (
+        bound.getattr_opt(pyo3::intern!(py, "__self__")),
+        bound.getattr_opt(pyo3::intern!(py, "__func__")),
+    ) && let Ok(name) = func_obj.getattr("__name__")
         && let Ok(name_str) = name.extract::<String>()
         && name_str == "emit"
         && self_obj.is_instance_of::<Stream>()
@@ -407,11 +423,7 @@ pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Opti
     }
 
     // Method B: Lambda bytecode analysis (e.g., .sink(lambda x: source.emit(x)))
-    let analyzer = get_analyze_lambda().ok()?;
-    let result = analyzer.call1(py, (func,)).ok()?;
-    if result.is_none(py) {
-        return None;
-    }
+    let result = analyze_bytecode(py, func)?;
     let bound_result = result.bind(py);
     let tuple = bound_result.cast::<PyTuple>().ok()?;
     if tuple.len() != 3 {

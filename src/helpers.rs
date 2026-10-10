@@ -77,22 +77,22 @@ pub(crate) fn get_func_name(py: Python, func: &Py<PyAny>) -> Option<String> {
     let bound = func.bind(py);
     // Try __name__ first (cleanest for most functions)
     if let Ok(s) = bound
-        .getattr("__name__")
+        .getattr(pyo3::intern!(py, "__name__"))
         .and_then(|n| n.extract::<String>())
     {
         return Some(s);
     }
     // Fallback: functools.partial — extract from .func attribute
     if let Ok(s) = bound
-        .getattr("func")
-        .and_then(|inner| inner.getattr("__name__"))
+        .getattr(pyo3::intern!(py, "func"))
+        .and_then(|inner| inner.getattr(pyo3::intern!(py, "__name__")))
         .and_then(|n| n.extract::<String>())
     {
         return Some(s);
     }
     // Fallback to __qualname__ (works for some edge cases)
     if let Ok(s) = bound
-        .getattr("__qualname__")
+        .getattr(pyo3::intern!(py, "__qualname__"))
         .and_then(|n| n.extract::<String>())
     {
         return Some(s);
@@ -131,10 +131,10 @@ fn wrapper_file(py: Python) -> Option<&'static str> {
 /// outside akayu's wrapper module. Read from the frame directly (no Python
 /// helper, no string formatting once the line has been seen).
 pub(crate) fn capture_source_location(py: Python) -> Arc<str> {
-    caller_file_line(py).map_or_else(|| Arc::from("<unknown>"), |(f, l)| intern_location(&f, l))
+    caller_location(py).unwrap_or_else(|| Arc::from("<unknown>"))
 }
 
-fn caller_file_line(py: Python) -> Option<(String, u32)> {
+fn caller_location(py: Python) -> Option<Arc<str>> {
     let wrapper = wrapper_file(py);
     // SAFETY: GIL held. PyEval_GetFrame returns a borrowed frame (or NULL);
     // PyFrame_GetCode and PyFrame_GetBack return new references.
@@ -148,17 +148,16 @@ fn caller_file_line(py: Python) -> Option<(String, u32)> {
         loop {
             let code =
                 Bound::from_owned_ptr(py, pyo3::ffi::PyFrame_GetCode(frame.as_ptr().cast()).cast());
-            let file: String = code
-                .getattr(pyo3::intern!(py, "co_filename"))
-                .ok()?
-                .extract()
-                .ok()?;
+            let file = code.getattr(pyo3::intern!(py, "co_filename")).ok()?;
+            let file = file.cast::<pyo3::types::PyString>().ok()?.to_str().ok()?;
             let line =
                 u32::try_from(pyo3::ffi::PyFrame_GetLineNumber(frame.as_ptr().cast())).unwrap_or(0);
-            if wrapper != Some(file.as_str()) {
-                return Some((file, line));
+            if wrapper != Some(file) {
+                return Some(intern_location(file, line));
             }
-            fallback.get_or_insert((file, line));
+            if fallback.is_none() {
+                fallback = Some(intern_location(file, line));
+            }
             let back = pyo3::ffi::PyFrame_GetBack(frame.as_ptr().cast());
             if back.is_null() {
                 return fallback;
@@ -393,9 +392,42 @@ pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
 
 /// Initialize Python helper functions from embedded Python code.
 /// Raise TypeError if `func` is an async function: akayu never awaits coroutines.
+/// Raise TypeError for async callables: akayu never awaits coroutines.
 pub(crate) fn reject_async(py: Python, func: &Py<PyAny>, op: &str) -> PyResult<()> {
+    if certainly_sync(py, func.bind(py))? {
+        return Ok(());
+    }
+    // Exact check (inspect.iscoroutinefunction / isasyncgenfunction) and the error.
     get_reject_async()?.call1(py, (func, op))?;
     Ok(())
+}
+
+/// True when `func` is certainly not an async function, decided natively for
+/// builtins and plain functions (the common case). The `inspect` checks cost
+/// more than building the node did. Anything else is left to `inspect`.
+fn certainly_sync(py: Python, func: &Bound<'_, PyAny>) -> PyResult<bool> {
+    const CO_COROUTINE: u32 = 0x0080;
+    const CO_ASYNC_GENERATOR: u32 = 0x0200;
+    let ptr = func.as_ptr();
+    // SAFETY: GIL held; type checks on a live object, and PyFunction_GetCode
+    // returns a borrowed reference that `func` keeps alive.
+    unsafe {
+        if pyo3::ffi::PyCFunction_Check(ptr) != 0 {
+            return Ok(true); // builtins and bound builtin methods are never async
+        }
+        if pyo3::ffi::PyFunction_Check(ptr) == 0 {
+            return Ok(false);
+        }
+        let code = Bound::from_borrowed_ptr(py, pyo3::ffi::PyFunction_GetCode(ptr));
+        let flags: u32 = code.getattr(pyo3::intern!(py, "co_flags"))?.extract()?;
+        if flags & (CO_COROUTINE | CO_ASYNC_GENERATOR) != 0 {
+            return Ok(false);
+        }
+    }
+    // inspect.markcoroutinefunction() marks plain functions with this attribute.
+    Ok(func
+        .getattr_opt(pyo3::intern!(py, "_is_coroutine_marker"))?
+        .is_none())
 }
 
 pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
