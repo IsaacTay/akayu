@@ -689,7 +689,10 @@ def _build_starmap_func(func, args, kwargs):
         return wrapper
 
 _thread_pool = None
-_node_locks = {}  # Per-node locks to prevent concurrent update calls
+# Per-node locks that serialize concurrent _update calls at par()/prefetch()
+# convergence points. Weakly keyed so a lock dies with its node; keying by
+# id(node) leaked one lock per node and handed dead nodes' locks to new ones.
+_node_locks = weakref.WeakKeyDictionary()
 _node_locks_lock = threading.Lock()  # Lock for accessing _node_locks dict
 
 def _get_global_pool():
@@ -705,13 +708,14 @@ def _get_global_pool():
     return _thread_pool
 
 def _get_node_lock(node):
-    """Get or create a lock for a specific node."""
-    node_id = id(node)
-    if node_id not in _node_locks:
+    """Get or create the lock that serializes concurrent updates of a node."""
+    lock = _node_locks.get(node)
+    if lock is None:
         with _node_locks_lock:
-            if node_id not in _node_locks:
-                _node_locks[node_id] = threading.RLock()
-    return _node_locks[node_id]
+            lock = _node_locks.get(node)
+            if lock is None:
+                lock = _node_locks[node] = threading.RLock()
+    return lock
 
 def _parallel_execute(val, downstreams):
     """Execute downstream updates in parallel using a thread pool."""
