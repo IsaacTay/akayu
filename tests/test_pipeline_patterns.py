@@ -1,10 +1,9 @@
-import pytest
 import numpy as np
 
 import akayu
 from pipeline.nodes import _create_source_node
-from pipeline.types import Start, Stop, Timestamp, Rotmat, Accel, Gyro, SegmentStart, SegmentStop
-from pipeline.utils import split_filter, merge_tagged_events, flush_segments, batch_events
+from pipeline.types import Accel, Gyro, Rotmat, SegmentStart, SegmentStop, Start, Stop, Timestamp
+from pipeline.utils import batch_events, flush_segments, merge_tagged_events, split_filter
 
 
 def test_create_source_node():

@@ -46,17 +46,26 @@ bench: build-release
     uv run python -m pytest tests/test_benchmark.py tests/test_benchmark_split.py tests/test_compile_benchmark.py \
         tests/test_lambda_benchmark.py tests/test_vectorcall_benchmark.py -v
 
-# Run clippy lints
+# Run clippy lints (warnings are errors)
 clippy:
-    cargo clippy
+    cargo clippy -- -D warnings
 
-# Format Rust code
+# Format Rust and Python code
 fmt:
     cargo fmt
+    uv run ruff format .
 
-# Run ruff linter on Python tests
+# Check formatting without changing anything
+fmt-check:
+    cargo fmt --check
+    uv run ruff format --check .
+
+# Lint all Python (the vendored pipeline/ fixture is excluded in pyproject.toml)
 lint:
-    uv run ruff check tests/
+    uv run ruff check .
+
+# Everything CI would run: lint, formatting, clippy, quick tests, docs examples and diagrams
+check: lint fmt-check clippy test-quick docs-check
 
 # Clean build artifacts
 clean:

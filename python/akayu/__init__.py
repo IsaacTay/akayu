@@ -1,6 +1,7 @@
 import builtins as _builtins
 import threading as _threading
 import time as _time
+from pathlib import Path as _Path
 
 from akayu.akayu import (
     ProfileReport,
@@ -62,15 +63,18 @@ def _broadcast(*streams_args):
 
 
 def _combine_batch(broadcasted, combinator, **extra):
-    streams_per_row = _builtins.zip(*[b._streams for b in broadcasted])
+    streams_per_row = _builtins.zip(*[b._streams for b in broadcasted], strict=True)
     if "emit_on_streams" in extra:
-        return [combinator(*row, emit_on=eo) for row, eo in _builtins.zip(streams_per_row, extra["emit_on_streams"])]
+        return [
+            combinator(*row, emit_on=eo)
+            for row, eo in _builtins.zip(streams_per_row, extra["emit_on_streams"], strict=True)
+        ]
     return [combinator(*row) for row in streams_per_row]
 
 
 def _wrap_results(keys, results):
     if keys is not None:
-        return dict(_builtins.zip(keys, results))
+        return dict(_builtins.zip(keys, results, strict=True))
     return results
 
 
@@ -100,7 +104,7 @@ def _check_keys(ms_list):
 
 
 class MultiStream:
-    __slots__ = ("_streams", "_keys")
+    __slots__ = ("_keys", "_streams")
 
     def __init__(self, streams):
         if isinstance(streams, dict):
@@ -178,7 +182,7 @@ class MultiStream:
             try:
                 idx = self._keys.index(key)
             except ValueError:
-                self._keys = self._keys + (key,)
+                self._keys = (*self._keys, key)
                 self._streams.append(value)
             else:
                 self._streams[idx] = value
@@ -243,12 +247,12 @@ class MultiStream:
     def items(self):
         if self._keys is None:
             raise TypeError("items() is only available on dict-backed MultiStream.")
-        return _builtins.zip(self._keys, self._streams)
+        return _builtins.zip(self._keys, self._streams, strict=True)
 
     def to_dict(self):
         if self._keys is None:
             raise TypeError("to_dict() is only available on dict-backed MultiStream.")
-        return dict(_builtins.zip(self._keys, self._streams))
+        return dict(_builtins.zip(self._keys, self._streams, strict=True))
 
     # --- transforms (return MultiStream, preserving keys) ---
 
@@ -330,7 +334,7 @@ class MultiStream:
     def profile(self):
         profilers = [s.profile() for s in self._streams]
         if self._keys is not None:
-            return dict(_builtins.zip(self._keys, profilers))
+            return dict(_builtins.zip(self._keys, profilers, strict=True))
         return profilers
 
     def par(self, **kwargs):
@@ -367,7 +371,7 @@ class MultiStream:
             ms._keys = keys
             return ms
         broadcasted = _broadcast(*args)
-        results = [_rust_union(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted])]
+        results = [_rust_union(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted], strict=True)]
         return MultiStream(results)
 
     def combine_latest(self, *others, emit_on=None):
@@ -395,10 +399,7 @@ class MultiStream:
                     )
                 if emit_on_s._keys is None and len(emit_on_s) != 1:
                     raise TypeError("Cannot use list-backed MultiStream as emit_on with dict-backed arguments.")
-                if len(emit_on_s) == 1:
-                    emit_on_streams = emit_on_s._streams * len(keys)
-                else:
-                    emit_on_streams = emit_on_s._streams
+                emit_on_streams = emit_on_s._streams * len(keys) if len(emit_on_s) == 1 else emit_on_s._streams
             else:
                 emit_on_streams = [None] * len(keys)
             results = []
@@ -417,7 +418,9 @@ class MultiStream:
         else:
             emit_on_streams = [None] * len(broadcasted[0])
         results = []
-        for pair, eo in _builtins.zip(_builtins.zip(*[b._streams for b in broadcasted]), emit_on_streams):
+        for pair, eo in _builtins.zip(
+            _builtins.zip(*[b._streams for b in broadcasted], strict=True), emit_on_streams, strict=True
+        ):
             results.append(_rust_combine_latest(*pair, emit_on=eo))
         return MultiStream(results)
 
@@ -441,7 +444,7 @@ class MultiStream:
             ms._keys = keys
             return ms
         broadcasted = _broadcast(*args)
-        results = [_rust_zip(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted])]
+        results = [_rust_zip(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted], strict=True)]
         return MultiStream(results)
 
 
@@ -460,7 +463,7 @@ def union(*args):
         ms._keys = keys
         return ms
     broadcasted = _broadcast(*converted)
-    results = [_rust_union(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted])]
+    results = [_rust_union(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted], strict=True)]
     return MultiStream(results)
 
 
@@ -490,10 +493,7 @@ def combine_latest(*args, emit_on=None):
                 )
             if emit_on_s._keys is None and len(emit_on_s) != 1:
                 raise TypeError("Cannot use list-backed MultiStream as emit_on with dict-backed arguments.")
-            if len(emit_on_s) == 1:
-                emit_on_streams = emit_on_s._streams * len(keys)
-            else:
-                emit_on_streams = emit_on_s._streams
+            emit_on_streams = emit_on_s._streams * len(keys) if len(emit_on_s) == 1 else emit_on_s._streams
         else:
             emit_on_streams = [None] * len(keys)
         results = []
@@ -530,7 +530,7 @@ def zip(*args):
         ms._keys = keys
         return ms
     broadcasted = _broadcast(*converted)
-    results = [_rust_zip(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted])]
+    results = [_rust_zip(*pair) for pair in _builtins.zip(*[b._streams for b in broadcasted], strict=True)]
     return MultiStream(results)
 
 
@@ -543,7 +543,7 @@ class TextFileSource(Stream):
     re-raises any error from reading the file or from the pipeline.
     """
 
-    def __new__(cls, path, interval=None):
+    def __new__(cls, path, interval=None):  # noqa: ARG004 - same signature as __init__
         return super().__new__(cls, name="from_text_file")
 
     def __init__(self, path, interval=None):
@@ -572,7 +572,7 @@ class TextFileSource(Stream):
 
     def _read(self):
         try:
-            with open(self.path, encoding="utf-8") as f:
+            with _Path(self.path).open(encoding="utf-8") as f:
                 for line in f:
                     self.emit(line.rstrip("\r\n"))
                     if self.interval:

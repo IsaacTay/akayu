@@ -1,17 +1,16 @@
-import pytest
 import numpy as np
 
 import akayu
 from pipeline.nodes import (
-    merge_node,
     _create_calibration_node,
-    reinterpolate_imu_node,
-    resync_node,
-    rel_rotmat_node,
     _create_source_node,
+    merge_node,
+    reinterpolate_imu_node,
+    rel_rotmat_node,
+    resync_node,
 )
-from pipeline.types import Start, Stop, Timestamp, Rotmat, Accel, Gyro, SegmentStart, SegmentStop
-from pipeline.utils import split_filter, flush_segments, batch_events
+from pipeline.types import Accel, Gyro, Rotmat, SegmentStart, SegmentStop, Start, Stop, Timestamp
+from pipeline.utils import flush_segments, split_filter
 
 
 def test_merge_node_two_streams():
@@ -139,7 +138,7 @@ def test_full_pipeline_source_to_merge():
 
 def test_segment_csv_flow_pattern():
     events = akayu.Stream()
-    exe_events, seg_events = split_filter(events, lambda x: isinstance(x, (Start, Stop, Timestamp)))
+    _exe_events, seg_events = split_filter(events, lambda x: isinstance(x, (Start, Stop, Timestamp)))
 
     seg = flush_segments({"test": seg_events})
     result = []

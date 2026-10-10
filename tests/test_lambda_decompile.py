@@ -839,42 +839,42 @@ class TestErrorPropagation:
     def test_key_error_in_itemgetter(self):
         import pytest
 
-        s, r = _pipeline(lambda x: x["missing"])
+        s, _r = _pipeline(lambda x: x["missing"])
         with pytest.raises(Exception):
             s.emit({"a": 1})
 
     def test_attr_error_in_chain(self):
         import pytest
 
-        s, r = _pipeline(lambda x: x.nonexistent > 0)
+        s, _r = _pipeline(lambda x: x.nonexistent > 0)
         with pytest.raises(Exception):
             s.emit(42)
 
     def test_type_error_in_binop(self):
         import pytest
 
-        s, r = _pipeline(lambda x: x + 1)
+        s, _r = _pipeline(lambda x: x + 1)
         with pytest.raises(Exception):
             s.emit("not_a_number")
 
     def test_key_error_in_tuple_construct(self):
         import pytest
 
-        s, r = _pipeline(lambda x: (x["a"], x["missing"]))
+        s, _r = _pipeline(lambda x: (x["a"], x["missing"]))
         with pytest.raises(Exception):
             s.emit({"a": 1})
 
     def test_slice_on_non_subscriptable(self):
         import pytest
 
-        s, r = _pipeline(lambda x: x[1:3])
+        s, _r = _pipeline(lambda x: x[1:3])
         with pytest.raises(Exception):
             s.emit(42)
 
     def test_method2_on_wrong_type(self):
         import pytest
 
-        s, r = _pipeline(lambda x: x.replace("a", "b"))
+        s, _r = _pipeline(lambda x: x.replace("a", "b"))
         with pytest.raises(Exception):
             s.emit(42)
 
@@ -882,7 +882,7 @@ class TestErrorPropagation:
         """set(x) where x contains unhashable items."""
         import pytest
 
-        s, r = _pipeline(lambda x: set(x))
+        s, _r = _pipeline(lambda x: set(x))
         with pytest.raises(Exception):
             s.emit([[1, 2], [3]])  # lists aren't hashable
 

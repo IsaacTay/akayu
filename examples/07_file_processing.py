@@ -22,8 +22,8 @@ def main():
     print("AKAYU EXAMPLE 07: File Processing")
     print("=" * 60)
 
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
+    with tempfile.TemporaryDirectory() as tmp_name:
+        tmp = Path(tmp_name)
 
         # ---------------------------------------------------------
         # SECTION: Reading Lines with from_text_file()

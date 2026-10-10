@@ -1,6 +1,7 @@
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
 import akayu
-import pytest
-from hypothesis import given, strategies as st, settings
 
 st_ints = st.integers(min_value=-1000, max_value=1000)
 st_lists = st.lists(st_ints, min_size=0, max_size=50)
@@ -241,8 +242,11 @@ class TestTransformLaws:
     @settings(max_examples=50)
     @given(values=st_lists)
     def test_double_filter(self, values):
-        p1 = lambda x: x > 0
-        p2 = lambda x: x % 2 == 0
+        def p1(x):
+            return x > 0
+
+        def p2(x):
+            return x % 2 == 0
 
         results1 = []
         s1 = akayu.Stream()
@@ -263,8 +267,11 @@ class TestTransformLaws:
     @settings(max_examples=50)
     @given(values=st_lists)
     def test_map_compose(self, values):
-        f = lambda x: x * 2
-        g = lambda x: x + 1
+        def f(x):
+            return x * 2
+
+        def g(x):
+            return x + 1
 
         results1 = []
         s1 = akayu.Stream()
@@ -285,8 +292,11 @@ class TestTransformLaws:
     @settings(max_examples=50)
     @given(values=st_lists)
     def test_filter_then_map_equals_map_then_filter(self, values):
-        filt = lambda x: x >= 0
-        m = lambda x: x * 2
+        def filt(x):
+            return x >= 0
+
+        def m(x):
+            return x * 2
 
         results1 = []
         s1 = akayu.Stream()
@@ -453,11 +463,11 @@ class TestCombinatorProperties:
         results = []
         zipped.sink(results.append)
 
-        for l, r in zip(left, right):
-            s1.emit(l)
-            s2.emit(r)
+        for a, b in zip(left, right, strict=True):
+            s1.emit(a)
+            s2.emit(b)
 
-        expected = list(zip(left[: len(right)], right))
+        expected = list(zip(left[: len(right)], right, strict=True))
         assert results == expected
 
     @settings(max_examples=50)
@@ -473,8 +483,8 @@ class TestCombinatorProperties:
         results = []
         zipped.sink(results.append)
 
-        for l in left:
-            s1.emit(l)
+        for a in left:
+            s1.emit(a)
         for r in right:
             s2.emit(r)
 

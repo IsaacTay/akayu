@@ -1,5 +1,4 @@
 import random
-import traceback
 
 import pytest
 
@@ -224,7 +223,7 @@ class TestFuzzCombinators:
                 _check_no_panic(e)
 
         emit_counts = [random.randint(0, 5) for _ in sources]
-        for src, count in zip(sources, emit_counts):
+        for src, count in zip(sources, emit_counts, strict=True):
             for val in range(count):
                 try:
                     src.emit(val)
@@ -249,7 +248,7 @@ class TestFuzzSelfReferential:
             try:
                 if op in ("map", "filter"):
                     others = random.sample(streams, k=random.randint(1, min(3, len(streams))))
-                    targets = [source, upstream] + others
+                    targets = [source, upstream, *others]
                     for t in targets[: random.randint(1, len(targets))]:
                         if op == "map":
                             s = t.map(_inc)
@@ -310,7 +309,7 @@ class TestFuzzCompileFreeze:
         ]
 
         for op_fn in random.sample(modify_ops, k=len(modify_ops)):
-            with pytest.raises(RuntimeError, match="[Cc]ompiled|[Ff]rozen"):
+            with pytest.raises(RuntimeError, match=r"[Cc]ompiled|[Ff]rozen"):
                 op_fn()
 
 
@@ -533,8 +532,8 @@ class TestFuzzEmitOnNonSource:
             return
 
         target = random.choice(non_sources)
-        with pytest.raises(RuntimeError, match="[Nn]on-source|[Ee]mit"):
+        with pytest.raises(RuntimeError, match=r"[Nn]on-source|[Ee]mit"):
             target.emit(42)
 
-        with pytest.raises(RuntimeError, match="[Nn]on-source|[Ee]mit"):
+        with pytest.raises(RuntimeError, match=r"[Nn]on-source|[Ee]mit"):
             target.emit_batch([1, 2, 3])

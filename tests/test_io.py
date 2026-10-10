@@ -1,4 +1,5 @@
 import time
+from pathlib import Path
 
 import pytest
 
@@ -17,8 +18,7 @@ def test_write_file_sink(tmp_path):
     s.sink(to_text_file, path)  # to_text_file is a sink function
     s.emit("Line 1")
     s.emit("Line 2")
-    with open(path) as f:
-        assert f.read() == "Line 1\nLine 2\n"
+    assert Path(path).read_text() == "Line 1\nLine 2\n"
 
 
 def test_write_file_sink_append(tmp_path):
@@ -28,11 +28,9 @@ def test_write_file_sink_append(tmp_path):
     s.sink(to_text_file, path=path)
     s.emit("Line 1")
     s.emit("Line 2")
-    with open(path) as f:
-        assert f.read() == "Line 1\nLine 2\n"
+    assert Path(path).read_text() == "Line 1\nLine 2\n"
     s.emit(3)  # non-strings are written via str()
-    with open(path) as f:
-        assert f.read() == "Line 1\nLine 2\n3\n"
+    assert Path(path).read_text() == "Line 1\nLine 2\n3\n"
 
 
 def test_source_from_file(tmp_path):
@@ -73,7 +71,7 @@ def test_file_is_read_once(tmp_path):
     out = []
     s.sink(out.append)
     s.start().join(timeout=10)
-    with open(path, "a") as f:
+    with Path(path).open("a") as f:
         f.write("b\n")
     time.sleep(0.05)
     assert out == ["a"]

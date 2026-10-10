@@ -11,6 +11,7 @@ fuse consecutive operations together, reducing overhead significantly.
 """
 
 import time
+
 import akayu
 
 
@@ -31,7 +32,7 @@ def main():
     source = akayu.Stream()
     mapped = source.map(lambda x: x * 2)
     filtered = mapped.filter(lambda x: x > 5)
-    sink_node = filtered.sink(lambda x: None)
+    filtered.sink(lambda _: None)
 
     print(f"Stream compiled before optimize: {source.compiled}")
 

@@ -1,10 +1,10 @@
-import streamz as real_streamz
-import akayu
-
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Optional
+
 import numpy as np
+import streamz as real_streamz
+
+import akayu
 
 
 @dataclass
@@ -12,7 +12,7 @@ class ExerciseInfo:
     name: str
     timestamp: int
     set: int
-    addition_data: Optional[dict] = None
+    addition_data: dict | None = None
 
 
 @dataclass
@@ -192,7 +192,7 @@ def test_source_node_pattern():
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 real_streamz.zip(exe_chunk, batched_imu)
-                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
                 .flatten()
             )
             return events
@@ -209,7 +209,7 @@ def test_source_node_pattern():
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 akayu.zip(exe_chunk, batched_imu)
-                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
                 .flatten()
             )
             return events
@@ -347,7 +347,7 @@ def test_full_pipeline_comparison():
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 real_streamz.zip(exe_chunk, batched_imu)
-                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
                 .flatten()
             )
             return events
@@ -364,7 +364,7 @@ def test_full_pipeline_comparison():
             batched_imu = exe_chunk.starmap(source_fn, *args)
             events = (
                 akayu.zip(exe_chunk, batched_imu)
-                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+                .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
                 .flatten()
             )
             return events
@@ -389,7 +389,7 @@ def test_full_pipeline_comparison():
 
 
 def np_array_equal(a, b):
-    if type(a) != type(b):
+    if type(a) is not type(b):
         return False
     if hasattr(a, "data"):
         return np.array_equal(a.data, b.data)
@@ -399,7 +399,7 @@ def np_array_equal(a, b):
 
 
 def events_equal(ev_a, ev_b):
-    if type(ev_a) != type(ev_b):
+    if type(ev_a) is not type(ev_b):
         return False
     if hasattr(ev_a, "data"):
         return np.array_equal(ev_a.data, ev_b.data)
@@ -411,12 +411,12 @@ def events_equal(ev_a, ev_b):
 def lists_equal(l_a, l_b):
     if len(l_a) != len(l_b):
         return False
-    for a, b in zip(l_a, l_b):
+    for a, b in zip(l_a, l_b, strict=True):
         if isinstance(a, list) and isinstance(b, list):
             if not lists_equal(a, b):
                 return False
         elif isinstance(a, tuple) and isinstance(b, tuple):
-            if not all(events_equal(x, y) for x, y in zip(a, b)):
+            if not all(events_equal(x, y) for x, y in zip(a, b, strict=True)):
                 return False
         elif not events_equal(a, b):
             return False
@@ -494,9 +494,9 @@ def create_calibration_node_streamz(calib_func, apply_func):
         calibs = calibs.union(init_calib)
 
         exe_events_flat = []
-        for exe_events, calib_chunk in zip(exe_events_list, exe_chunk_list):
-            exe_events = real_streamz.combine_latest(exe_events, calib_chunk, emit_on=exe_events).starmap(
-                lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]]
+        for events, calib_chunk in zip(exe_events_list, exe_chunk_list, strict=True):
+            exe_events = real_streamz.combine_latest(events, calib_chunk, emit_on=events).starmap(
+                lambda data, chunk: [chunk[0], *list(data), chunk[1]]
             )
             exe_events = exe_events.flatten()
             exe_events_flat.append(exe_events)
@@ -575,9 +575,9 @@ def create_calibration_node_akayu(calib_func, apply_func):
         calibs = calibs.union(init_calib)
 
         exe_events_flat = []
-        for exe_events, calib_chunk in zip(exe_events_list, exe_chunk_list):
-            exe_events = akayu.combine_latest(exe_events, calib_chunk, emit_on=exe_events).starmap(
-                lambda data, chunk: [chunk[0]] + list(data) + [chunk[1]]
+        for events, calib_chunk in zip(exe_events_list, exe_chunk_list, strict=True):
+            exe_events = akayu.combine_latest(events, calib_chunk, emit_on=events).starmap(
+                lambda data, chunk: [chunk[0], *list(data), chunk[1]]
             )
             exe_events = exe_events.flatten()
             exe_events_flat.append(exe_events)
@@ -730,7 +730,7 @@ def create_source_node_streamz(source_fn):
         batched_imu = exe_chunk.starmap(source_fn, *args)
         events = (
             real_streamz.zip(exe_chunk, batched_imu)
-            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
             .flatten()
         )
         return events
@@ -748,7 +748,7 @@ def create_source_node_akayu(source_fn):
         batched_imu = exe_chunk.starmap(source_fn, *args)
         events = (
             akayu.zip(exe_chunk, batched_imu)
-            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0]] + batched_imu + [exe_chunk[1]]))
+            .starmap(lambda exe_chunk, batched_imu: ([exe_chunk[0], *batched_imu, exe_chunk[1]]))
             .flatten()
         )
         return events
@@ -762,6 +762,8 @@ class Image:
 
     def __repr__(self):
         return f"Image(shape={self.data.shape})"
+
+    __hash__ = None  # mutable array data: unhashable, like any class defining __eq__
 
     def __eq__(self, other):
         if not isinstance(other, Image):
@@ -789,10 +791,6 @@ def mock_source_v1_imu(start, stop, session_path, segment):
         result.append(Gyro(np.array([i, i, i], dtype=float)))
         result.append(Accel(np.array([i * 0.1, i * 0.1, i * 0.1], dtype=float)))
     return result
-
-
-def split_filter(stream, predicate, *args):
-    return stream.filter(predicate, *args), stream.filter(lambda *args: not predicate(*args), *args)
 
 
 def _is_exercise_info(e):
@@ -904,7 +902,7 @@ def run_source_v1_flow_streamz(exercises, segments, imu=True, ultrasound=True):
     source = real_streamz.Stream()
     events = source.map(lambda _: exercises).flatten()
 
-    segment_events = {segment: events for segment in segments}
+    segment_events = dict.fromkeys(segments, events)
     for segment, seg_events in segment_events.items():
         events_uls = seg_events
         if ultrasound:
@@ -928,7 +926,7 @@ def run_source_v1_flow_akayu(exercises, segments, imu=True, ultrasound=True):
     source = akayu.Stream()
     events = source.map(lambda _: exercises).flatten()
 
-    segment_events = {segment: events for segment in segments}
+    segment_events = dict.fromkeys(segments, events)
     for segment, seg_events in segment_events.items():
         events_uls = seg_events
         if ultrasound:
@@ -1069,7 +1067,7 @@ def test_source_v1_flow_multi_segment_multi_exercise():
             f"  streamz: {len(sz_starts)} {sz_starts}\n"
             f"  akayu:  {len(ak_starts)} {ak_starts}"
         )
-        for sz_start, ak_start in zip(sz_starts, ak_starts):
+        for sz_start, ak_start in zip(sz_starts, ak_starts, strict=True):
             assert sz_start.name == ak_start.name, f"Start name mismatch: {sz_start.name} vs {ak_start.name}"
             assert sz_start.timestamp == ak_start.timestamp
             assert sz_start.set == ak_start.set
@@ -1146,7 +1144,7 @@ def test_source_v1_flow_fan_out():
 
     sz_summary1 = exercise_event_summary([x[1] for x in sz_out1])
     ak_summary1 = exercise_event_summary([x[1] for x in ak_out1])
-    assert sz_summary1 == ak_summary1, f"seg1 types mismatch"
+    assert sz_summary1 == ak_summary1, "seg1 types mismatch"
 
     print("test_source_v1_flow_fan_out PASSED")
 

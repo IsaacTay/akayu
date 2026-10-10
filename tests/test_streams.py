@@ -358,7 +358,7 @@ class TestUnsupported:
     def test_unknown_attr_raises(self):
         ss = MultiStream(_sources(1))
         with pytest.raises(AttributeError, match="no attribute"):
-            ss.nonexistent
+            _ = ss.nonexistent
 
 
 class TestEdgeCases:
@@ -725,7 +725,7 @@ class TestDictModeCollectors:
 class TestDictModeActions:
     def test_compile_returns_self(self):
         sources = _dict_sources(["a", "b"])
-        ms = MultiStream(sources).map(lambda x: x).sink(lambda _: None)
+        MultiStream(sources).map(lambda x: x).sink(lambda _: None)
         compiled = MultiStream(sources).map(lambda x: x).sink(lambda _: None).compile()
         assert isinstance(compiled, MultiStream)
         assert compiled.keyed
@@ -805,7 +805,7 @@ class TestDictModeCombinators:
     def test_union_mixed_dict_list_raises(self):
         a = MultiStream(_dict_sources(["x", "y"]))
         b = MultiStream([Stream(), Stream()])
-        with pytest.raises(TypeError, match="dict-backed.*list-backed"):
+        with pytest.raises(TypeError, match=r"dict-backed.*list-backed"):
             a.union(b)
 
     def test_union_dict_with_plain_stream_broadcasts(self):

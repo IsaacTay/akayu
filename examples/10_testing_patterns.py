@@ -12,12 +12,10 @@ Writing tests for stream processing code requires understanding
 how to test components in isolation and how to verify pipeline behavior.
 """
 
-import asyncio
 import unittest
-from unittest.mock import Mock, patch, MagicMock
-import akayu
-from akayu import Stream, union
+from unittest.mock import Mock
 
+from akayu import Stream, union
 
 # =============================================================================
 # SECTION: Testing Individual Operations
@@ -286,11 +284,11 @@ class TestCompiledStreams(unittest.TestCase):
 
     def test_compiled_rejects_new_operations(self):
         source = Stream()
-        source.map(lambda x: x * 2).sink(lambda x: None)
+        source.map(lambda x: x * 2).sink(lambda _: None)
         source.compile()
 
         # After compile, adding more operations should fail
-        with self.assertRaises(Exception):
+        with self.assertRaises(RuntimeError):
             source.map(lambda x: x + 1)
 
 
@@ -318,7 +316,7 @@ class TestPropertyBasedPatterns(unittest.TestCase):
         for test_data in [[1, 2, 3], [1], [], list(range(50))]:
             results = []
             source = Stream()
-            source.filter(lambda x: True).sink(results.append)  # Keep all
+            source.filter(lambda _: True).sink(results.append)  # Keep all
 
             source.emit_batch(test_data)
 

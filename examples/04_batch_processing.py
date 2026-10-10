@@ -12,6 +12,7 @@ NumPy or pandas transformations.
 """
 
 import time
+
 import akayu
 
 
@@ -34,7 +35,7 @@ def main():
     # Emit a batch of 1000 numbers
     source.emit_batch(list(range(1000)))
 
-    print(f"Emitted 1000 items via emit_batch")
+    print("Emitted 1000 items via emit_batch")
     print(f"First 10 results: {results[:10]}")
     print(f"Last 10 results: {results[-10:]}")
 
@@ -46,7 +47,7 @@ def main():
     print("\n--- batch_map() for vectorized operations ---")
 
     try:
-        import numpy as np
+        import numpy as np  # noqa: PLC0415 - numpy is optional for this example
 
         source = akayu.Stream()
         source.batch_map(lambda batch: np.sqrt(batch).tolist()).sink(print)
@@ -126,7 +127,7 @@ def main():
 
     source.emit_batch([1, 2, 3])
 
-    print(f"Input: [1, 2, 3]")
+    print("Input: [1, 2, 3]")
     print(f"Output (pairs): {pairs}")
 
     # ---------------------------------------------------------
@@ -147,11 +148,7 @@ def main():
     source = akayu.Stream()
 
     def process_batch(batch):
-        records = []
-        for student in batch:
-            for score in student["scores"]:
-                records.append({"student": student["name"], "score": score})
-        return records
+        return [{"student": student["name"], "score": score} for student in batch for score in student["scores"]]
 
     source.batch_map(process_batch).flatten().sink(student_records.append)
 

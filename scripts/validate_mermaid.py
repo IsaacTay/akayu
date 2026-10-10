@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-import sys
-import subprocess
-import glob
-import os
-import tempfile
 import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 
 
 def _browser_env():
@@ -23,7 +23,7 @@ def check_mermaid(files):
     with tempfile.TemporaryDirectory() as temp_dir:
         for file_path in files:
             print(f"Checking {file_path}...", end="", flush=True)
-            output_file = os.path.join(temp_dir, os.path.basename(file_path))
+            output_file = str(Path(temp_dir) / Path(file_path).name)
 
             try:
                 # Use mmdc to process the file.
@@ -40,9 +40,7 @@ def check_mermaid(files):
                 print(e.output.decode())
                 failed = True
             except FileNotFoundError:
-                print(
-                    " ERROR: 'mmdc' command not found. Ensure mermaid-cli is installed (try 'direnv exec /mnt/ssd1/vibes/akayu')."
-                )
+                print(" ERROR: 'mmdc' not found. Install mermaid-cli, or run inside the dev shell ('nix develop').")
                 sys.exit(1)
 
     if failed:
@@ -60,7 +58,7 @@ def main():
 
     files = args.files
     if not files:
-        files = glob.glob("docs/**/*.md", recursive=True) + glob.glob("README.md")
+        files = [str(p) for p in sorted(Path("docs").rglob("*.md"))] + [str(p) for p in Path().glob("README.md")]
 
     check_mermaid(files)
 

@@ -493,7 +493,7 @@ def zip_streamz():
 def zip_python():
     count = 0
     r = range(N)
-    for a, b, c in zip(r, r, r):
+    for a, b, c in zip(r, r, r, strict=True):
         count += 1
     assert count == N
 
