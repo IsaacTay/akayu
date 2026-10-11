@@ -10,6 +10,8 @@ is reported instead, and is only meaningful on an idle machine.
     python scripts/bench_cost.py -w simple -w zip3     # some workloads
     python scripts/bench_cost.py --save before.json
     python scripts/bench_cost.py --compare before.json # show % change
+    python scripts/bench_cost.py -w deep -m batch --record prof
+    perf report -i prof/deep-batch-opaque.data       # where the instructions go
 
 `build` counts building one 4-node graph (`compiled`: and compiling it), the
 cost of per-request pipelines; it has no batch modes. Its `lambda` kind makes
@@ -30,6 +32,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from akayu._helpers import _analyze_accumulate, _analyze_lambda
+
 import akayu
 
 MODES = ("eager", "compiled", "batch", "batch-eager")
@@ -37,26 +41,32 @@ KINDS = ("opaque", "lambda")
 N = {"emit": 50_000, "batch": 200_000}
 
 
-# "opaque": ordinary functions the bytecode optimizer can't replace.
+# "opaque": ordinary functions the bytecode optimizer can't replace (two
+# statements: _check_opaque() fails if it ever learns them).
 # "lambda": simple lambdas it turns into native operations.
 def _inc(x):
-    return x * 1 + 1
+    y = x + 1
+    return y
 
 
 def _even(x):
-    return x % 2 == 0 or False
+    y = x % 2
+    return y == 0
 
 
 def _dbl(x):
-    return x * 2 + 0
+    y = x * 2
+    return y
 
 
 def _tri(x):
-    return x * 3 + 0
+    y = x * 3
+    return y
 
 
 def _add(a, x):
-    return a + x
+    y = a + x
+    return y
 
 
 def _pair(x):
@@ -68,15 +78,18 @@ def _sum2(a, b):
 
 
 def _delim(x):
-    return x % 64 == 0 or False
+    y = x % 64
+    return y == 0
 
 
 def _mod0(x):
-    return x % 3 == 0 or False
+    y = x % 3
+    return y == 0
 
 
 def _mod1(x):
-    return x % 3 == 1 or False
+    y = x % 3
+    return y == 1
 
 
 def _batch(xs):
@@ -92,6 +105,7 @@ FUNCS = {
         "delim": _delim,
         "mod0": _mod0,
         "mod1": _mod1,
+        "add": _add,
     },
     "lambda": {
         "inc": lambda x: x + 1,
@@ -101,8 +115,16 @@ FUNCS = {
         "delim": lambda x: x % 64 == 0,
         "mod0": lambda x: x % 3 == 0,
         "mod1": lambda x: x % 3 == 1,
+        "add": lambda acc, x: acc + x,
     },
 }
+
+
+def _check_opaque():
+    """The "opaque" kind must really call Python functions."""
+    native = [k for k, f in FUNCS["opaque"].items() if _analyze_lambda(f) or _analyze_accumulate(f)]
+    if native:
+        sys.exit(f"bench_cost: the optimizer now recognizes opaque functions {native}; make them opaque again")
 
 
 def _workloads(f, out):
@@ -155,7 +177,7 @@ def _workloads(f, out):
 
     def accumulate():
         s = akayu.Stream()
-        s.accumulate(_add, 0).sink(sink)
+        s.accumulate(f["add"], 0).sink(sink)
         return [s]
 
     def flatten():
@@ -290,8 +312,12 @@ def _perf():
 EVENT = "instructions:u"
 
 
-def measure(workload, mode, kind, event=EVENT):
-    """`event` counts (or ns) per source item; None where it doesn't apply."""
+def measure(workload, mode, kind, event=EVENT, record=None):
+    """`event` counts (or ns) per source item; None where it doesn't apply.
+
+    With `record` (a directory), also `perf record` the measured region into
+    record/WORKLOAD-MODE-KIND.data, with Python frames visible (-X perf).
+    """
     if workload == "build":
         if mode not in ("eager", "compiled"):
             return None
@@ -303,23 +329,33 @@ def measure(workload, mode, kind, event=EVENT):
     if not perf:
         best = min(json.loads(_run(cmd, os.environ))["elapsed"] for _ in range(3))
         return best / n * 1e9
+    r = _perf_region([perf, "stat", "-x,", "-e", event], cmd, f"{workload}/{mode}/{kind}")
+    if record:
+        Path(record).mkdir(parents=True, exist_ok=True)
+        out = Path(record, f"{workload}-{mode}-{kind}.data")
+        pcmd = [perf, "record", "-q", "-g", "-e", event, "-o", str(out)]
+        _perf_region(pcmd, [cmd[0], "-X", "perf", *cmd[1:]], f"{workload}/{mode}/{kind}")
+    line = next(ln for ln in r.stderr.splitlines() if event in ln)
+    return int(line.split(",")[0]) / n
+
+
+def _perf_region(pcmd, cmd, what):
+    """Run `pcmd -- cmd` with perf counting only inside the child's _Region."""
     with tempfile.TemporaryDirectory() as d:
         ctl, ack = Path(d, "ctl"), Path(d, "ack")
         os.mkfifo(ctl)
         os.mkfifo(ack)
         env = dict(os.environ, BENCH_CTL=ctl, BENCH_ACK=ack)
-        pcmd = [perf, "stat", "-x,", "-e", event, "--delay=-1"]
         r = subprocess.run(
-            [*pcmd, "--control", f"fifo:{ctl},{ack}", "--", *cmd],
+            [*pcmd, "--delay=-1", "--control", f"fifo:{ctl},{ack}", "--", *cmd],
             capture_output=True,
             text=True,
             env=env,
             check=False,
         )
     if r.returncode:
-        raise RuntimeError(f"{workload}/{mode}/{kind} failed:\n{r.stderr}")
-    line = next(ln for ln in r.stderr.splitlines() if event in ln)
-    return int(line.split(",")[0]) / n
+        raise RuntimeError(f"{what} failed:\n{r.stderr}")
+    return r
 
 
 def _run(cmd, env):
@@ -391,12 +427,14 @@ def main():
         "cache misses and stalls, but varies with machine load)",
     )
     ap.add_argument("--save", help="write results to this JSON file")
+    ap.add_argument("--record", metavar="DIR", help="also perf-record each cell's measured region into DIR")
     ap.add_argument("--compare", help="show %% change against this JSON file")
     a = ap.parse_args()
     if a.one:
         w, mode, kind, n = a.one
         run_one(w, mode, kind, int(n))
         return
+    _check_opaque()
 
     unit = a.event if _perf() else "ns (wall clock: idle machine only)"
     old = json.loads(Path(a.compare).read_text()) if a.compare else {}
@@ -417,7 +455,7 @@ def main():
             cells = []
             for mode in modes:
                 key = f"{w}/{mode}/{kind}"
-                res["cpu"][key] = v = measure(w, mode, kind, a.event)
+                res["cpu"][key] = v = measure(w, mode, kind, a.event, a.record)
                 cells.append(f"{show(key, v, '9.0f'):>22}")
             print(f"{w:12}" + "".join(cells), flush=True)
     if not a.no_memory:
