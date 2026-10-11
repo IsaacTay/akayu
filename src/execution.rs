@@ -416,6 +416,8 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
             Ok(PyBool::new(py, r == 0).to_owned().into_any().unbind())
         }
         BuiltinOp::MethodCall(call) => method_call(py, call, x),
+        BuiltinOp::Eager(eager) if eager.current() => apply_builtin(py, &eager.op, x),
+        BuiltinOp::Eager(eager) => vectorcall1(py, &eager.func, x),
         BuiltinOp::Slice(start, stop) => unsafe {
             let slice = pyo3::ffi::PySlice_New(start.as_ptr(), stop.as_ptr(), std::ptr::null_mut());
             if slice.is_null() {
@@ -516,6 +518,11 @@ fn apply_builtin_as_filter(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResul
             }
         }
         BuiltinOp::Negate(inner) => Ok(!apply_builtin_as_filter(py, inner, x)?),
+        BuiltinOp::Numeric(program, generic) => match program.truth(x) {
+            Some(keep) => Ok(keep),
+            None => apply_builtin_as_filter(py, generic, x),
+        },
+        BuiltinOp::Eager(eager) if eager.current() => apply_builtin_as_filter(py, &eager.op, x),
         _ => {
             let result = apply_builtin(py, op, x)?;
             result.is_truthy(py)

@@ -10,6 +10,7 @@ division by zero, float // and %, int-float mixes beyond 2**53, NaN) must
 fall back to the ordinary steps, also mid-batch.
 """
 
+import gc
 import math
 
 import pytest
@@ -228,3 +229,21 @@ def test_profiling_sees_every_step():
     assert out == [6, 8, 10]
     flow = [(n["items_in"], n["items_out"]) for n in nodes if n["name"].startswith(("map", "filter"))]
     assert flow == [(5, 5), (5, 5), (5, 3)], nodes
+
+
+def test_runs_are_shared_and_outlive_cache_eviction():
+    """Graphs with the same steps share one run; many distinct steps push old
+    runs out of the shared table while their graphs keep using them."""
+    graphs = []
+    for i in range(700):
+        f = eval(f"lambda x: x * {i} + 1")
+        g = eval(f"lambda x: x % {i % 7 + 2} == 0")
+        s, out = akayu.Stream(), []
+        s.map(f).filter(g).sink(out.append)
+        s.compile()
+        graphs.append((s, out, f, g))
+        if i % 100 == 0:
+            gc.collect()
+    for s, out, f, g in graphs[::50]:
+        s.emit_batch(list(range(30)))
+        assert out == [f(x) for x in range(30) if g(f(x))]

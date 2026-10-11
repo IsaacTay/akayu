@@ -188,6 +188,13 @@ so no Python function call happens per item. Recognized shapes include:
 Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
 item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
 
+Lambdas whose native form depends on nothing but their own code (`lambda x: x + 1`,
+`lambda x: x["k"]`, `lambda x: x.strip()`) run natively even before `compile()`: there is no
+closure, default or global value it would have to read once. Everything else is called until
+`compile()`: lambdas that read such values (`lambda x: x + k`), so late binding holds; `def`
+functions, so coverage and breakpoints in their bodies work as usual; and a function whose code
+was replaced in place (IPython's autoreload does that).
+
 A method call on an item of a builtin type (`x.strip()` on a `str`, `x.get("k", 0)` on a `dict`)
 calls that type's C method directly: builtin types can't be changed, so `compile()` looks the
 method up once. Other items, including subclasses that may override it, look it up per call.

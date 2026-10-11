@@ -53,6 +53,12 @@ independent of machine load:
 - `compile()` runs arithmetic and comparisons on ints and floats unboxed, keeping the item a
   machine number across consecutive steps: 30-65% less per item for numeric map/filter
   pipelines (ten `x + 1` maps: 5,100 -> 1,770 per item; in batches 3,580 -> 1,030).
+- Lambdas run natively without `compile()` when their native form depends only on their own
+  code (`lambda x: x + 1`, `lambda x: x["k"]`, `lambda x: x.strip()`): 27-51% less per item
+  in uncompiled pipelines. `def` functions and lambdas that read closure, default or global values
+  are still called, so late binding, coverage and breakpoints are unchanged.
+- Numeric filters (`x % 3 == 0`) test their result without making a Python bool: splitting a
+  stream into lists costs 5-13% less.
 - `compile()` calls methods of builtin types directly (`x.strip()`, `x.get("k", 0)`,
   `x.startswith("a")`): 165-185 fewer instructions per call, 14-27% less per item in batches.
 - `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary

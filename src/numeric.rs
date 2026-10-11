@@ -16,6 +16,7 @@
 
 use pyo3::ffi;
 use pyo3::prelude::*;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crate::node::{BinaryOp, BuiltinOp, CompareOp};
 
@@ -58,6 +59,17 @@ enum Out {
     Bool(bool),
 }
 
+impl Out {
+    /// Python truthiness: nonzero (a NaN is truthy).
+    fn truth(&self) -> bool {
+        match *self {
+            Out::Bool(b) => b,
+            Out::Num(Num::Int(i)) => i != 0,
+            Out::Num(Num::Float(f)) => f != 0.0,
+        }
+    }
+}
+
 /// 2**53: integers up to this size convert to f64 exactly.
 const EXACT: i64 = 1 << 53;
 
@@ -95,6 +107,12 @@ impl NumProgram {
                     .unbind(),
             ),
         }
+    }
+
+    /// The truth of the result on `x`, as a filter sees it, or None to use
+    /// the ordinary ops instead. No Python bool is made.
+    pub(crate) fn truth(&self, x: &Py<PyAny>) -> Option<bool> {
+        Some(self.eval(unbox(x)?)?.truth())
     }
 
     fn eval(&self, mut v: Num) -> Option<Out> {
@@ -135,10 +153,59 @@ pub(crate) enum RunOutcome {
     Fallback(Py<PyAny>),
 }
 
+/// Runs (or None: no run) by the ops of the chain steps they were made
+/// from, so graphs with the same steps share one: a run is a few allocations,
+/// a third of a small compiled graph's memory. Entries hold their ops, so a
+/// key's addresses can't be reused by other ops while it lives.
+type Runs =
+    crate::helpers::PtrMap<Box<[(bool, usize)]>, (Box<[Arc<BuiltinOp>]>, Option<Arc<NumRun>>)>;
+static RUNS: LazyLock<Mutex<Runs>> = LazyLock::new(Mutex::default);
+/// Beyond this many live entries, runs are no longer shared.
+const RUNS_MAX: usize = 1024;
+
 impl NumRun {
+    /// The shared run starting at the first of `steps`, (is_filter, op) for
+    /// consecutive chain steps (see `from_steps`).
+    pub(crate) fn shared<'a>(
+        py: Python,
+        steps: impl Iterator<Item = (bool, &'a Arc<BuiltinOp>)>,
+    ) -> Option<Arc<Self>> {
+        let steps: Vec<_> = steps.collect();
+        let key: Box<[_]> = steps
+            .iter()
+            .map(|(f, op)| (*f, Arc::as_ptr(op) as usize))
+            .collect();
+        if let Some((_, run)) = RUNS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            return run.clone();
+        }
+        let run = Self::from_steps(py, steps.iter().map(|(f, op)| (*f, &***op))).map(Arc::new);
+        let ops = steps.iter().map(|(_, op)| Arc::clone(op)).collect();
+        let freed = {
+            let mut runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut dead = Runs::default();
+            if runs.len() >= RUNS_MAX / 4 {
+                // Entries whose ops only this table still holds.
+                let live;
+                (live, dead) = std::mem::take(&mut *runs)
+                    .into_iter()
+                    .partition(|(_, (ops, _))| ops.iter().all(|op| Arc::strong_count(op) > 1));
+                *runs = live;
+            }
+            let replaced = (runs.len() < RUNS_MAX).then(|| runs.insert(key, (ops, run.clone())));
+            (dead, replaced)
+        };
+        // Freed outside the lock: freeing an op's constants can run Python code.
+        drop(freed);
+        run
+    }
+
     /// `steps` are (is_filter, op) for consecutive chain steps; the run is the
     /// longest prefix with programs (a map yielding a bool ends it).
-    pub(crate) fn from_steps<'a>(
+    fn from_steps<'a>(
         py: Python,
         steps: impl Iterator<Item = (bool, &'a BuiltinOp)>,
     ) -> Option<Self> {
@@ -193,13 +260,7 @@ impl NumRun {
                     ));
                 }
                 (true, out) => {
-                    let keep = match out {
-                        Out::Bool(b) => b,
-                        // Truthiness: nonzero (a NaN is truthy).
-                        Out::Num(Num::Int(i)) => i != 0,
-                        Out::Num(Num::Float(f)) => f != 0.0,
-                    };
-                    if !keep {
+                    if !out.truth() {
                         return Some(None);
                     }
                 }

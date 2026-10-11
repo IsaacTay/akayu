@@ -468,8 +468,13 @@ impl Stream {
         for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
 
-            // 1. Detect builtin fast-path (may mutate logic via "unwrap" on Map nodes)
-            node.builtin_op = detect_builtin_for_logic(py, &mut node.logic);
+            // 1. Detect builtin fast-path (may mutate logic via "unwrap" on Map nodes).
+            // A current eager op is what the analysis would find again: it
+            // depends only on the code.
+            node.builtin_op = match node.builtin_op.take().as_deref() {
+                Some(BuiltinOp::Eager(eager)) if eager.current() => Some(Arc::clone(&eager.op)),
+                _ => detect_builtin_for_logic(py, &mut node.logic),
+            };
 
             // 2. Detect flush targets (Sink nodes calling .flush() on Collect nodes)
             if let NodeLogic::Sink { ref func } = node.logic
@@ -826,12 +831,12 @@ fn annotate_numeric_runs(py: Python, steps: &mut [ChainNode]) {
                 NodeLogic::Filter { .. } => true,
                 _ => return None,
             };
-            Some((is_filter, step.builtin_op.as_deref()?))
+            Some((is_filter, step.builtin_op.as_ref()?))
         });
-        match crate::numeric::NumRun::from_steps(py, candidates) {
+        match crate::numeric::NumRun::shared(py, candidates) {
             Some(run) => {
                 let len = run.len();
-                steps[i].numeric_run = Some(Box::new(run));
+                steps[i].numeric_run = Some(run);
                 i += len;
             }
             None => i += 1,
