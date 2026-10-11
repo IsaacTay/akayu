@@ -19,11 +19,14 @@ pub(crate) enum PrefetchKind {
     Map,
     /// Keep the item when the predicate is true.
     Filter,
-    /// Call the function with a one-item list; take the first result.
+    /// Call the function with a one-item list; every result goes on.
     BatchMap,
 }
 
-type Pending = (Arc<Slot<Option<Py<PyAny>>>>, Arc<Task>);
+/// What one item turned into: nothing (filtered out), one result, or (for a
+/// batch function) any number.
+type Results = smallvec::SmallVec<[Py<PyAny>; 1]>;
+type Pending = (Arc<Slot<Results>>, Arc<Task>);
 
 pub struct Prefetcher {
     pub(crate) func: Py<PyAny>,
@@ -62,13 +65,18 @@ impl Prefetcher {
         Ok(out)
     }
 
-    /// Finish everything in flight, in order.
-    pub(crate) fn flush(&mut self, py: Python) -> PyResult<Vec<Py<PyAny>>> {
+    /// Finish everything in flight, in order: the results up to the first
+    /// error, and that error. The items after it stay in flight for the next
+    /// flush, so their results aren't lost with the error.
+    pub(crate) fn flush(&mut self, py: Python) -> (Vec<Py<PyAny>>, Option<PyErr>) {
         let mut out = Vec::new();
         while !self.pending.is_empty() {
-            out.extend(self.finish_oldest(py)?);
+            match self.finish_oldest(py) {
+                Ok(results) => out.extend(results),
+                Err(e) => return (out, Some(e)),
+            }
         }
-        Ok(out)
+        (out, None)
     }
 
     fn push(&mut self, py: Python, item: Py<PyAny>, out: &mut Vec<Py<PyAny>>) -> PyResult<()> {
@@ -88,7 +96,7 @@ impl Prefetcher {
         Ok(())
     }
 
-    fn finish_oldest(&mut self, py: Python) -> PyResult<Option<Py<PyAny>>> {
+    fn finish_oldest(&mut self, py: Python) -> PyResult<Results> {
         let (slot, task) = self.pending.front().expect("nothing in flight");
         // If interrupted (Ctrl+C), the item stays in flight for the next call.
         pool::wait_for(py, slot.as_ref(), std::slice::from_ref(task))?;
@@ -97,26 +105,25 @@ impl Prefetcher {
     }
 }
 
-fn apply(
-    py: Python,
-    kind: PrefetchKind,
-    func: &Py<PyAny>,
-    item: Py<PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
+fn apply(py: Python, kind: PrefetchKind, func: &Py<PyAny>, item: Py<PyAny>) -> PyResult<Results> {
     match kind {
-        PrefetchKind::Map => vectorcall1(py, func, &item).map(Some),
+        PrefetchKind::Map => Ok(smallvec::smallvec![vectorcall1(py, func, &item)?]),
         PrefetchKind::Filter => {
             let keep = vectorcall1(py, func, &item)?.is_truthy(py)?;
-            Ok(keep.then_some(item))
+            Ok(if keep {
+                smallvec::smallvec![item]
+            } else {
+                Results::new()
+            })
         }
         PrefetchKind::BatchMap => {
             let batch = PyList::new(py, [item])?.into_any().unbind();
             let results = vectorcall1(py, func, &batch)?;
-            let first = results.bind(py).try_iter()?.next();
-            match first {
-                Some(value) => Ok(Some(value?.unbind())),
-                None => Err(pyo3::exceptions::PyStopIteration::new_err(())),
-            }
+            results
+                .bind(py)
+                .try_iter()?
+                .map(|r| r.map(Bound::unbind))
+                .collect()
         }
     }
 }

@@ -291,6 +291,26 @@ so the sources can be emitted from different threads. In a graph without `par()`
 every node one shared lock instead: each `emit()` already takes it, so the per-item locks on merges
 are dropped.
 
+### Callbacks, Re-entrancy and Limits
+
+- `flush()` and `drain()` may be called from another thread (a timer flushing a `collect()`, say)
+  while other threads emit: they wait for a running emit to finish.
+- A callback may emit into another source. Emitting into a source that is itself mid-emit (from
+  its own graph, through a `sink(source.emit)` or a loop of sources) raises "Re-entrant emit
+  detected", and an item that comes back into a node still processing another raises "An item
+  re-entered a node". To feed results back, collect them and emit them after `emit()` returns.
+- Adding nodes, compiling or stopping a profile from a callback, on the part of the graph that is
+  running, raises a `RuntimeError`; the graph keeps working afterwards.
+- Two threads whose callbacks emit into each other's sources, when those sources merge (`union`,
+  `zip`, `combine_latest`), can deadlock in an uncompiled graph: each holds its own source's lock
+  and waits for the other's. `compile()` gives the connected graph one lock, which avoids it.
+- Each node an item passes adds to the thread's native stack. A graph thousands of nodes deep, a
+  long chain of sources feeding each other, or a thread with a small stack raises `RecursionError`
+  when the stack is nearly used up, rather than crashing.
+- `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` raised in a callback reach the caller as
+  they are; any other exception is wrapped in a `RuntimeError` naming the node, with the original
+  as its `__cause__`.
+
 ### Performance Characteristics
 
 | Configuration           | Behavior                                        |

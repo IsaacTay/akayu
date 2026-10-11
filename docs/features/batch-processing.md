@@ -41,6 +41,12 @@ flowchart LR
     end
 ```
 
+A batch goes through the pipeline step by step: each step processes every item before the next
+step starts (below a branch point, items go through the branches one at a time, unless
+`compile()` proves the branches independent). So if a step fails, the batch stops there, and the
+steps after it have seen none of the items. The items `flatten()` or a `batch_map()` makes from
+one item continue the same way, also under `emit()`.
+
 **Benefits of `emit_batch()`:**
 
 - Reduced per-item overhead

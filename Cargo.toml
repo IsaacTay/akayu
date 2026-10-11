@@ -16,5 +16,8 @@ parking_lot = "0.12"
 lock_api = "0.4"
 smallvec = { version = "1", features = ["union"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [profile.release]
 lto = "thin"

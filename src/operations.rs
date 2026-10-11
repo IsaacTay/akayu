@@ -10,7 +10,7 @@ use crate::helpers::{
     get_profiler_class, reject_async, resolve_stream_name, wrap_error,
 };
 use crate::lock::{Downstream, NodeLock};
-use crate::node::{ChunkByState, ExtractBetweenState, NodeLogic};
+use crate::node::{ChunkByState, ChunkOrder, ExtractBetweenState, NodeLogic};
 use crate::prefetch::{PrefetchKind, Prefetcher};
 
 /// Wrap a function with additional args/kwargs using the build_map_func helper.
@@ -68,6 +68,8 @@ impl Stream {
                 emit_target: None,
                 flushing: false,
                 emitting: std::sync::atomic::AtomicBool::new(false),
+                busy: false,
+                guard_reentry: false,
                 lock: NodeLock::new(),
             },
         )
@@ -77,18 +79,38 @@ impl Stream {
     /// node the user called `flush()` on: nodes reached by propagation are
     /// expected to be leaves and must not warn.
     pub(crate) fn flush_guarded(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
+        self.flush_visit(py, warn_if_noop, &mut crate::helpers::PtrSet::default())
+    }
+
+    /// One flush() call reaches each node once: below a merge (union, zip,
+    /// ...) a node is reachable along several paths, and a collect() there
+    /// used to emit once per path. `visited` holds the nodes already flushed.
+    fn flush_visit(
+        &mut self,
+        py: Python,
+        warn_if_noop: bool,
+        visited: &mut crate::helpers::PtrSet<usize>,
+    ) -> PyResult<()> {
+        if !visited.insert(std::ptr::from_ref(self) as usize) {
+            return Ok(());
+        }
         let lock = std::sync::Arc::clone(&self.lock);
         let _guard = lock.acquire(py);
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
         }
         self.flushing = true;
-        let result = self.flush_inner(py, warn_if_noop);
+        let result = self.flush_inner(py, warn_if_noop, visited);
         self.flushing = false;
         result
     }
 
-    fn flush_inner(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
+    fn flush_inner(
+        &mut self,
+        py: Python,
+        warn_if_noop: bool,
+        visited: &mut crate::helpers::PtrSet<usize>,
+    ) -> PyResult<()> {
         // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
         let has_buffer = matches!(
             self.logic,
@@ -126,11 +148,10 @@ impl Stream {
                 self.propagate(py, tuple.into())?;
             }
             NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState { buffer, .. } = &mut **boxed;
-                if !buffer.is_empty() {
-                    let items = std::mem::take(buffer);
-                    let tuple = PyTuple::new(py, items)?;
-                    self.propagate(py, tuple.into())?;
+                let ChunkByState { buffer, order, .. } = &mut **boxed;
+                let emit_empty = matches!(order, ChunkOrder::Fused { .. });
+                if let Some(chunk) = crate::execution::chunk_take(py, buffer, emit_empty)? {
+                    self.propagate(py, chunk)?;
                 }
             }
             NodeLogic::ExtractBetween(boxed) => {
@@ -140,10 +161,13 @@ impl Stream {
                 *inside = false;
             }
             NodeLogic::Prefetched { prefetcher } => {
-                let results =
-                    wrap_error(py, prefetcher.flush(py), &self.name, &self.source_location)?;
+                // The results before a failed item still go on, then its error.
+                let (results, error) = prefetcher.flush(py);
                 for result in results {
                     self.propagate(py, result)?;
+                }
+                if let Some(e) = error {
+                    return wrap_error(py, Err(e), &self.name, &self.source_location);
                 }
             }
             _ => {}
@@ -162,14 +186,39 @@ impl Stream {
         );
         if should_propagate {
             for downstream in &self.downstreams {
-                let mut d = downstream.borrow_mut(py);
-                d.flush_guarded(py, false)?;
+                let mut d = downstream
+                    .try_borrow_mut(py)
+                    .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+                d.flush_visit(py, false, visited)?;
             }
         }
         Ok(())
     }
 
-    fn drain_inner(&mut self, py: Python) -> PyResult<()> {
+    /// drain(), reaching each node once (see `flush_visit`).
+    fn drain_visit(
+        &mut self,
+        py: Python,
+        visited: &mut crate::helpers::PtrSet<usize>,
+    ) -> PyResult<()> {
+        if !visited.insert(std::ptr::from_ref(self) as usize) {
+            return Ok(());
+        }
+        // Re-entrancy guard: detect cycles in the flush graph
+        if self.flushing {
+            return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
+        }
+        self.flushing = true;
+        let result = self.drain_inner(py, visited);
+        self.flushing = false;
+        result
+    }
+
+    fn drain_inner(
+        &mut self,
+        py: Python,
+        visited: &mut crate::helpers::PtrSet<usize>,
+    ) -> PyResult<()> {
         // Flush this node's buffer
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
@@ -178,11 +227,10 @@ impl Stream {
                 self.propagate(py, tuple.into())?;
             }
             NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState { buffer, .. } = &mut **boxed;
-                if !buffer.is_empty() {
-                    let items = std::mem::take(buffer);
-                    let tuple = PyTuple::new(py, items)?;
-                    self.propagate(py, tuple.into())?;
+                let ChunkByState { buffer, order, .. } = &mut **boxed;
+                let emit_empty = matches!(order, ChunkOrder::Fused { .. });
+                if let Some(chunk) = crate::execution::chunk_take(py, buffer, emit_empty)? {
+                    self.propagate(py, chunk)?;
                 }
             }
             NodeLogic::ExtractBetween(boxed) => {
@@ -192,10 +240,13 @@ impl Stream {
                 *inside = false;
             }
             NodeLogic::Prefetched { prefetcher } => {
-                let results =
-                    wrap_error(py, prefetcher.flush(py), &self.name, &self.source_location)?;
+                // The results before a failed item still go on, then its error.
+                let (results, error) = prefetcher.flush(py);
                 for result in results {
                     self.propagate(py, result)?;
+                }
+                if let Some(e) = error {
+                    return wrap_error(py, Err(e), &self.name, &self.source_location);
                 }
             }
             _ => {}
@@ -203,8 +254,10 @@ impl Stream {
 
         // Always recurse into all downstreams
         for downstream in &self.downstreams {
-            let mut d = downstream.borrow_mut(py);
-            d.drain(py, vec![], None)?;
+            let mut d = downstream
+                .try_borrow_mut(py)
+                .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+            d.drain_visit(py, visited)?;
         }
         Ok(())
     }
@@ -238,6 +291,8 @@ impl Stream {
             emit_target: None,
             flushing: false,
             emitting: std::sync::atomic::AtomicBool::new(false),
+            busy: false,
+            guard_reentry: false,
             lock: NodeLock::new(),
         }
     }
@@ -287,7 +342,7 @@ impl Stream {
         stream_name: Option<String>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &func, "map")?;
         let func_name = get_func_name(py, &func);
@@ -355,14 +410,15 @@ impl Stream {
     pub fn prefetch(
         slf: &Bound<'_, Self>,
         py: Python,
-        n: usize,
+        n: i64,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
-        if n == 0 {
+        // Signed, so prefetch(-1) gets the same ValueError as prefetch(0).
+        let Ok(n @ 1..) = usize::try_from(n) else {
             return Err(StreamError::InvalidPrefetchSize(n).into());
-        }
+        };
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, &format!("prefetch({})", n), None);
         let node = Self::make_node(py, NodeLogic::Prefetch { size: n }, name, source_location)?;
@@ -413,7 +469,7 @@ impl Stream {
         stream_name: Option<String>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &func, "starmap")?;
         let func_name = get_func_name(py, &func);
@@ -485,7 +541,7 @@ impl Stream {
         stream_name: Option<String>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &func, "batch_map")?;
         let func_name = get_func_name(py, &func);
@@ -554,7 +610,7 @@ impl Stream {
         stream_name: Option<String>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &predicate, "filter")?;
         let func_name = get_func_name(py, &predicate);
@@ -620,7 +676,7 @@ impl Stream {
         py: Python,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "flatten", None);
@@ -667,7 +723,7 @@ impl Stream {
         py: Python,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "collect", None);
@@ -747,7 +803,7 @@ impl Stream {
         include_delimiter: bool,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &predicate, "chunk_by")?;
         let func_name = get_func_name(py, &predicate);
@@ -760,7 +816,7 @@ impl Stream {
             NodeLogic::ChunkBy(Box::new(ChunkByState {
                 buffer: Vec::new(),
                 predicate,
-                include_delimiter,
+                order: ChunkOrder::Operator { include_delimiter },
                 pre_buffer_chain: Vec::new(),
             })),
             name,
@@ -824,7 +880,7 @@ impl Stream {
         close: Py<PyAny>,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &open, "chunks_between")?;
         reject_async(py, &close, "chunks_between")?;
@@ -892,12 +948,12 @@ impl Stream {
     /// * `RuntimeError` - If called re-entrantly (during a flush).
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn flush(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        self.flush_guarded(py, true)
+        crate::helpers::with_node_mut(slf, py, |node| node.flush_guarded(py, true))
     }
 
     /// Recursively flush this node and all downstream nodes.
@@ -931,19 +987,14 @@ impl Stream {
     /// * `RuntimeError` - If called re-entrantly (during a drain).
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn drain(
-        &mut self,
+        slf: &Bound<'_, Self>,
         py: Python,
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        // Re-entrancy guard: detect cycles in the flush graph
-        if self.flushing {
-            return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
-        }
-        self.flushing = true;
-        let result = self.drain_inner(py);
-        self.flushing = false;
-        result
+        crate::helpers::with_node_mut(slf, py, |node| {
+            node.drain_visit(py, &mut crate::helpers::PtrSet::default())
+        })
     }
 
     /// Apply a function to each element for side effects.
@@ -984,7 +1035,7 @@ impl Stream {
         stream_name: Option<String>,
         kwargs: Option<Py<PyDict>>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &func, "sink")?;
         let func_name = get_func_name(py, &func);
@@ -1070,7 +1121,7 @@ impl Stream {
         returns_state: bool,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         reject_async(py, &func, "accumulate")?;
         let func_name = get_func_name(py, &func);
@@ -1125,11 +1176,7 @@ impl Stream {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
-        if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(StreamError::ReentrantEmit(self.name.to_string()).into());
-        }
-        self.emitting
-            .store(true, std::sync::atomic::Ordering::Release);
+        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1141,8 +1188,6 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting
-            .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
@@ -1176,11 +1221,7 @@ impl Stream {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
-        if self.emitting.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(StreamError::ReentrantEmit(self.name.to_string()).into());
-        }
-        self.emitting
-            .store(true, std::sync::atomic::Ordering::Release);
+        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1192,8 +1233,6 @@ impl Stream {
         if profiling {
             crate::profiling::end_emit();
         }
-        self.emitting
-            .store(false, std::sync::atomic::Ordering::Release);
         result
     }
 
@@ -1232,7 +1271,7 @@ impl Stream {
     ///   modifications are attempted after compilation.
     pub fn compile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let source_py_ptr = slf.as_ptr() as usize;
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         if this.compiled {
             return Err(StreamError::AlreadyCompiled(this.name.to_string()).into());
         }
@@ -1241,6 +1280,13 @@ impl Stream {
 
         this.freeze_all(py, &all_nodes);
         this.mark_independent_fanouts(py, &all_nodes);
+        if this.has_other_sources(py, source_py_ptr) {
+            for node_py in &all_nodes {
+                if let Ok(mut node) = node_py.try_borrow_mut(py) {
+                    node.guard_reentry = true;
+                }
+            }
+        }
 
         drop(this);
         Ok(slf.clone().unbind())
@@ -1295,7 +1341,7 @@ impl Stream {
     /// ```
     pub fn profile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyAny>> {
         {
-            let this = slf.borrow();
+            let this = crate::helpers::graph_node(slf)?;
             if !matches!(this.logic, NodeLogic::Source) {
                 return Err(StreamError::EmitOnNonSource(this.name.to_string()).into());
             }

@@ -551,7 +551,7 @@ pub(crate) fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Opt
         && let Ok(target) = self_obj.extract::<Py<Stream>>()
     {
         // Verify target is a Collect node
-        let target_node = target.borrow(py);
+        let target_node = target.try_borrow(py).ok()?;
         if matches!(target_node.logic, NodeLogic::Collect { .. }) {
             drop(target_node);
             return Some(target);
@@ -579,7 +579,7 @@ pub(crate) fn detect_flush_target_from_func(py: Python, func: &Py<PyAny>) -> Opt
     }
     let target: Py<Stream> = obj.extract().ok()?;
     // Verify target is a Collect node
-    let target_node = target.borrow(py);
+    let target_node = target.try_borrow(py).ok()?;
     if matches!(target_node.logic, NodeLogic::Collect { .. }) {
         drop(target_node);
         return Some(target);
@@ -607,7 +607,7 @@ pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Opti
         && let Ok(target) = self_obj.extract::<Py<Stream>>()
     {
         // Verify target is a Source node
-        let target_node = target.borrow(py);
+        let target_node = target.try_borrow(py).ok()?;
         if matches!(target_node.logic, NodeLogic::Source) {
             drop(target_node);
             return Some(target);
@@ -635,7 +635,7 @@ pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Opti
     }
     let target: Py<Stream> = obj.extract().ok()?;
     // Verify target is a Source node
-    let target_node = target.borrow(py);
+    let target_node = target.try_borrow(py).ok()?;
     if matches!(target_node.logic, NodeLogic::Source) {
         drop(target_node);
         return Some(target);

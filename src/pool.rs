@@ -139,6 +139,9 @@ pub(crate) fn submit(job: Job) -> Arc<Task> {
         q.threads += 1;
         let spawned = std::thread::Builder::new()
             .name("akayu-worker".into())
+            // As deep as the main thread's (Rust's default is 2 MiB): par()
+            // and prefetch() branches run whole subgraphs.
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || worker(pool));
         if spawned.is_err() {
             q.threads -= 1; // The submitter runs the task itself instead.
@@ -150,7 +153,9 @@ pub(crate) fn submit(job: Job) -> Arc<Task> {
 }
 
 fn worker(pool: &Pool) {
-    Python::attach(|py| {
+    // A worker started while the interpreter shuts down can't attach: it just
+    // ends. Its tasks are run by whoever waits for them (`wait_for`).
+    Python::try_attach(|py| {
         loop {
             let task = py.detach(|| {
                 let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);

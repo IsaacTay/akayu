@@ -8,8 +8,8 @@ use pyo3::types::{PyBool, PyList, PyTuple};
 use crate::Stream;
 use crate::helpers::{cached_vectorcall1, vectorcall1, vectorcall2, wrap_error};
 use crate::node::{
-    BinaryOp, BuiltinOp, ChainNode, ChunkByState, CombineLatestState, ExtractBetweenState,
-    MethodCall, NodeLogic,
+    BinaryOp, BuiltinOp, ChainNode, ChunkByState, ChunkOrder, CombineLatestState,
+    ExtractBetweenState, MethodCall, NodeLogic,
 };
 use crate::numeric::RunOutcome;
 use crate::pool::{self, Latch};
@@ -106,8 +106,8 @@ fn extract_between_step(
     } else {
         (open, open_vc)
     };
-    let res = wrap_error(py, vcall1(py, pred, x, vc), name, source_location)?;
-    if !res.is_truthy(py)? {
+    let res = vcall1(py, pred, x, vc).and_then(|r| truth(py, r));
+    if !wrap_error(py, res, name, source_location)? {
         if *inside {
             buffer.push(x.clone_ref(py));
         }
@@ -171,13 +171,39 @@ fn emit_into_target(
 ) -> PyResult<()> {
     let t = target.borrow(py);
     let _guard = t.lock.acquire(py);
-    if t.emitting.load(std::sync::atomic::Ordering::Acquire) {
-        return Err(crate::error::StreamError::ReentrantEmit(t.name.to_string()).into());
-    }
+    // Marked emitting like target.emit() does: a feedback loop back into a
+    // source that is mid-emit is rejected, not run as unbounded recursion.
+    let _emitting = crate::lock::Emitting::enter(&t.emitting, &t.name)?;
     for x in items {
         t.propagate(py, x)?;
     }
     Ok(())
+}
+
+/// The truth of a predicate's result. Released as a `Bound`: dropping a
+/// `Py` looks up pyo3's thread-local GIL count.
+#[inline(always)]
+fn truth(py: Python, result: Py<PyAny>) -> PyResult<bool> {
+    result.into_bound(py).is_truthy()
+}
+
+/// Everything `obj` iterates over, appended to `out` (flatten's items).
+fn iter_into(obj: &Bound<'_, PyAny>, out: &mut Vec<Py<PyAny>>) -> PyResult<()> {
+    for item in obj.try_iter()? {
+        out.push(item?.unbind());
+    }
+    Ok(())
+}
+
+/// Everything `obj` iterates over (flatten's item, batch_map's result).
+fn iter_all(obj: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+    // A loop, not `collect()`: that asks for a size hint, which calls
+    // `__length_hint__` through a bound method made for the purpose.
+    let mut items = Vec::new();
+    for item in obj.try_iter()? {
+        items.push(item?.unbind());
+    }
+    Ok(items)
 }
 
 /// `list.append(x)` for an exact list, without the method call.
@@ -392,15 +418,16 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
             Some(v) => Ok(v),
             None => apply_builtin(py, generic, x),
         },
-        BuiltinOp::Compare(cmp_op, rhs) => {
-            let r = unsafe {
-                pyo3::ffi::PyObject_RichCompareBool(x.as_ptr(), rhs.as_ptr(), cmp_op.to_ffi())
-            };
-            if r == -1 {
-                return Err(PyErr::fetch(py));
-            }
-            Ok(PyBool::new(py, r != 0).to_owned().into_any().unbind())
-        }
+        // The comparison's own result, as `x < c` gives it: not
+        // RichCompareBool, which treats identical objects as equal and turns
+        // any result (a numpy array, a query expression) into a bool.
+        BuiltinOp::Compare(cmp_op, rhs) => unsafe {
+            Bound::from_owned_ptr_or_err(
+                py,
+                pyo3::ffi::PyObject_RichCompare(x.as_ptr(), rhs.as_ptr(), cmp_op.to_ffi()),
+            )
+            .map(Bound::unbind)
+        },
         BuiltinOp::Contains(coll) => {
             let r = unsafe { pyo3::ffi::PySequence_Contains(coll.as_ptr(), x.as_ptr()) };
             if r == -1 {
@@ -572,7 +599,12 @@ pub(crate) fn apply_logic(
                     )?,
                     None => {
                         let res = vcall1(py, predicate, &x, ctx.cached_vc);
-                        wrap_error(py, res, ctx.name, ctx.source_location)?.is_truthy(py)?
+                        wrap_error(
+                            py,
+                            res.and_then(|r| truth(py, r)),
+                            ctx.name,
+                            ctx.source_location,
+                        )?
                     }
                 };
                 return Ok(if passes {
@@ -708,8 +740,12 @@ fn apply_logic_general(
                 }
                 None => {
                     let res = vcall1(py, predicate, &x, ctx.cached_vc);
-                    let res = wrap_error(py, res, ctx.name, ctx.source_location)?;
-                    res.is_truthy(py)?
+                    wrap_error(
+                        py,
+                        res.and_then(|r| truth(py, r)),
+                        ctx.name,
+                        ctx.source_location,
+                    )?
                 }
             };
             let ft = if let Some(t) = t {
@@ -733,8 +769,8 @@ fn apply_logic_general(
                 if profiling {
                     profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0);
                 }
-                let mut t = target.borrow_mut(py);
-                t.flush(py, vec![], None)?;
+                let mut t = crate::helpers::enter_node(target, py)?;
+                t.flush_guarded(py, true)?;
                 return Ok(StepResult::Terminal);
             }
             // Fast path: direct Rust emit (no Python dispatch)
@@ -802,12 +838,7 @@ fn apply_logic_general(
         }
 
         NodeLogic::Flatten => {
-            let x_bound = x.bind(py);
-            let iter = x_bound.try_iter()?;
-            let mut batch = Vec::new();
-            for item_res in iter {
-                batch.push(item_res?.into());
-            }
+            let batch = wrap_error(py, iter_all(x.bind(py)), ctx.name, ctx.source_location)?;
             if profiling {
                 profiling::record_node(ctx.node_id, Duration::ZERO, 1, batch.len() as u64);
             }
@@ -824,22 +855,18 @@ fn apply_logic_general(
                 Duration::ZERO
             };
             let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
-            let result_list = result.bind(py);
-            let mut iter = result_list.try_iter()?;
-            match iter.next() {
-                Some(item) => {
-                    if profiling {
-                        profiling::record_node(ctx.node_id, ft, 1, 1);
-                    }
-                    Ok(StepResult::Value(item?.into()))
-                }
-                None => {
-                    if profiling {
-                        profiling::record_node(ctx.node_id, ft, 1, 0);
-                    }
-                    Ok(StepResult::Filtered)
-                }
+            // Every result goes on, however many the function returned for
+            // the one item (it used to keep only the first).
+            let mut results =
+                wrap_error(py, iter_all(result.bind(py)), ctx.name, ctx.source_location)?;
+            if profiling {
+                profiling::record_node(ctx.node_id, ft, 1, results.len() as u64);
             }
+            Ok(match results.len() {
+                0 => StepResult::Filtered,
+                1 => StepResult::Value(results.pop().expect("one result")),
+                _ => StepResult::Batch(results),
+            })
         }
 
         NodeLogic::Chain { steps } => apply_chain(py, steps, x, profiling),
@@ -928,7 +955,12 @@ pub(crate) fn apply_logic_batch(
                 None => {
                     for i in 0..output.len() {
                         let res = vcall1(py, predicate, &output[i], ctx.cached_vc);
-                        if wrap_error(py, res, ctx.name, ctx.source_location)?.is_truthy(py)? {
+                        if wrap_error(
+                            py,
+                            res.and_then(|r| truth(py, r)),
+                            ctx.name,
+                            ctx.source_location,
+                        )? {
                             output.swap(kept, i);
                             kept += 1;
                         }
@@ -945,10 +977,12 @@ pub(crate) fn apply_logic_batch(
         NodeLogic::Flatten => {
             let mut output = Vec::new();
             for x in items {
-                let x_bound = x.bind(py);
-                for item_res in x_bound.try_iter()? {
-                    output.push(item_res?.into());
-                }
+                wrap_error(
+                    py,
+                    iter_into(x.bind(py), &mut output),
+                    ctx.name,
+                    ctx.source_location,
+                )?;
             }
             if profiling {
                 profiling::record_node(ctx.node_id, Duration::ZERO, items_in, output.len() as u64);
@@ -966,11 +1000,7 @@ pub(crate) fn apply_logic_batch(
                 Duration::ZERO
             };
             let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
-            let result_list = result.bind(py);
-            let mut output = Vec::new();
-            for item in result_list.try_iter()? {
-                output.push(item?.into());
-            }
+            let output = wrap_error(py, iter_all(result.bind(py)), ctx.name, ctx.source_location)?;
             if profiling {
                 profiling::record_node(ctx.node_id, ft, items_in, output.len() as u64);
             }
@@ -1013,8 +1043,8 @@ pub(crate) fn apply_logic_batch(
                     profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0);
                 }
                 for _x in items {
-                    let mut t = target.borrow_mut(py);
-                    t.flush(py, vec![], None)?;
+                    let mut t = crate::helpers::enter_node(target, py)?;
+                    t.flush_guarded(py, true)?;
                 }
                 return Ok(BatchStepResult::Terminal);
             }
@@ -1093,6 +1123,152 @@ pub(crate) fn apply_logic_batch(
     }
 }
 
+/// Entry points for the compiled fast path, which reaches a child through a
+/// raw pointer and so bypasses PyO3's borrow flag. An item coming back into
+/// a node that is still mid-update (through a callback's emit into another
+/// source that leads back here) would alias it: it is refused, as the borrow
+/// refuses it on the uncompiled path.
+macro_rules! compiled_entry {
+    ($name:ident, $inner:ident, ($($arg:ident: $ty:ty),*)) => {
+        #[inline(always)]
+        pub(crate) fn $name(&mut self, py: Python, $($arg: $ty),*) -> PyResult<()> {
+            if !self.guard_reentry {
+                return self.$inner(py, $($arg),*);
+            }
+            if self.busy {
+                return Err(reentered());
+            }
+            self.busy = true;
+            let result = self.$inner(py, $($arg),*);
+            self.busy = false;
+            result
+        }
+    };
+}
+
+/// The error for a re-entered node: out of line, it is never the hot path.
+#[cold]
+#[inline(never)]
+fn reentered() -> PyErr {
+    crate::error::StreamError::Reentered.into()
+}
+
+impl Stream {
+    compiled_entry!(update_compiled, update, (val: Py<PyAny>));
+    compiled_entry!(update_batch_compiled, update_batch, (items: Vec<Py<PyAny>>));
+    compiled_entry!(update_tagged_compiled, update_tagged, (index: usize, val: Py<PyAny>));
+    compiled_entry!(update_batch_tagged_compiled, update_batch_tagged, (index: usize, items: Vec<Py<PyAny>>));
+}
+
+/// (the chunk an item completed, the item to buffer after it went on)
+type ChunkStep = (Option<Py<PyAny>>, Option<Py<PyAny>>);
+
+/// One item into a chunk_by node, up to the chunk it completes: (chunk,
+/// item to buffer after). The caller buffers that item (`chunk_buffer`)
+/// once the chunk has gone downstream (see `ChunkOrder`).
+#[inline(always)]
+fn chunk_by_item(
+    py: Python,
+    state: &mut ChunkByState,
+    op: Option<&BuiltinOp>,
+    cached_vc: &Option<pyo3::ffi::vectorcallfunc>,
+    name: &str,
+    source_location: &str,
+    x: Py<PyAny>,
+) -> PyResult<ChunkStep> {
+    // Inline: it runs once per item.
+    #[inline(always)]
+    fn test(
+        py: Python,
+        state: &ChunkByState,
+        op: Option<&BuiltinOp>,
+        cached_vc: &Option<pyo3::ffi::vectorcallfunc>,
+        name: &str,
+        source_location: &str,
+        x: &Py<PyAny>,
+    ) -> PyResult<bool> {
+        let res = match op {
+            Some(op) => apply_builtin_as_filter(py, op, x),
+            None => vcall1(py, &state.predicate, x, cached_vc).and_then(|r| truth(py, r)),
+        };
+        wrap_error(py, res, name, source_location)
+    }
+    let is_delimiter = |state: &ChunkByState, x: &Py<PyAny>| {
+        test(py, state, op, cached_vc, name, source_location, x)
+    };
+    match state.order {
+        ChunkOrder::Operator { include_delimiter } => {
+            if !is_delimiter(state, &x)? {
+                chunk_buffer(py, state, x)?;
+                return Ok((None, None));
+            }
+            if include_delimiter {
+                chunk_buffer(py, state, x)?;
+            }
+            Ok((chunk_take(py, &mut state.buffer, false)?, None))
+        }
+        ChunkOrder::Fused { buffer_first: true } => {
+            chunk_buffer(py, state, x.clone_ref(py))?;
+            let chunk = if is_delimiter(state, &x)? {
+                chunk_take(py, &mut state.buffer, true)?
+            } else {
+                None
+            };
+            Ok((chunk, None))
+        }
+        ChunkOrder::Fused {
+            buffer_first: false,
+        } => {
+            let chunk = if is_delimiter(state, &x)? {
+                chunk_take(py, &mut state.buffer, true)?
+            } else {
+                None
+            };
+            Ok((chunk, Some(x)))
+        }
+    }
+}
+
+/// Buffer an item in a chunk_by node, through the steps fused before it.
+#[inline]
+fn chunk_buffer(py: Python, state: &mut ChunkByState, x: Py<PyAny>) -> PyResult<()> {
+    let mut val = x;
+    for step in &mut state.pre_buffer_chain {
+        let step_ctx = NodeCtx {
+            builtin_op: &step.builtin_op,
+            cached_vc: &step.cached_vectorcall,
+            name: &step.name,
+            source_location: &step.source_location,
+            node_id: step.node_id,
+            flush_target: &step.flush_target,
+            emit_target: &step.emit_target,
+        };
+        match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
+            StepResult::Value(v) => val = v,
+            _ => return Ok(()),
+        }
+    }
+    state.buffer.push(val);
+    Ok(())
+}
+
+/// A chunk_by node's buffer as a tuple, emptying it; None for an empty
+/// buffer unless `emit_empty`.
+pub(crate) fn chunk_take(
+    py: Python,
+    buffer: &mut Vec<Py<PyAny>>,
+    emit_empty: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if buffer.is_empty() && !emit_empty {
+        return Ok(None);
+    }
+    Ok(Some(
+        PyTuple::new(py, std::mem::take(buffer))?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 #[pymethods]
 impl Stream {
     // Complexity is inherent to dispatching across 20+ NodeLogic variants;
@@ -1114,7 +1290,7 @@ impl Stream {
             }
             // Call flush once per item (matching unfused behavior: filter passes each delimiter individually)
             for _x in items {
-                target.borrow_mut(py).flush(py, vec![], None)?;
+                crate::helpers::enter_node(target, py)?.flush_guarded(py, true)?;
             }
             return Ok(());
         }
@@ -1168,69 +1344,22 @@ impl Stream {
                 return Ok(());
             }
 
-            NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState {
-                    buffer,
-                    predicate,
-                    include_delimiter,
-                    pre_buffer_chain,
-                } = &mut **boxed;
+            NodeLogic::ChunkBy(state) => {
                 let t = prof_start(profiling_active);
                 let mut emitted = Vec::new();
                 for x in items {
-                    // Apply pre_buffer_chain transforms
-                    let buffered = if pre_buffer_chain.is_empty() {
-                        Some(x.clone_ref(py))
-                    } else {
-                        let mut result: Option<Py<PyAny>> = Some(x.clone_ref(py));
-                        for step in pre_buffer_chain.iter_mut() {
-                            let val = match result.take() {
-                                Some(v) => v,
-                                None => break,
-                            };
-                            let step_ctx = NodeCtx {
-                                builtin_op: &step.builtin_op,
-                                cached_vc: &step.cached_vectorcall,
-                                name: &step.name,
-                                source_location: &step.source_location,
-                                node_id: step.node_id,
-                                flush_target: &step.flush_target,
-                                emit_target: &step.emit_target,
-                            };
-                            match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
-                                StepResult::Value(v) => result = Some(v),
-                                _ => {
-                                    break;
-                                }
-                            }
-                        }
-                        result
-                    };
-                    if let Some(item) = buffered {
-                        buffer.push(item);
-                    }
-                    // Check predicate on raw item
-                    let is_delimiter = match &self.builtin_op {
-                        Some(op) => {
-                            let res = apply_builtin_as_filter(py, op, &x);
-                            wrap_error(py, res, &self.name, &self.source_location)?
-                        }
-                        None => {
-                            let pred_result = vcall1(py, predicate, &x, &self.cached_vectorcall);
-                            let pred_result =
-                                wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                            pred_result.is_truthy(py)?
-                        }
-                    };
-                    if is_delimiter {
-                        if !*include_delimiter {
-                            buffer.pop();
-                        }
-                        if !buffer.is_empty() {
-                            let chunk = std::mem::take(buffer);
-                            let tuple = PyTuple::new(py, chunk)?;
-                            emitted.push(tuple.into_any().unbind());
-                        }
+                    let (chunk, buffer_after) = chunk_by_item(
+                        py,
+                        state,
+                        self.builtin_op.as_deref(),
+                        &self.cached_vectorcall,
+                        &self.name,
+                        &self.source_location,
+                        x,
+                    )?;
+                    emitted.extend(chunk);
+                    if let Some(x) = buffer_after {
+                        chunk_buffer(py, state, x)?;
                     }
                 }
                 let items_out = emitted.len() as u64;
@@ -1244,7 +1373,6 @@ impl Stream {
                 }
                 return Ok(());
             }
-
             NodeLogic::ExtractBetween(boxed) => {
                 let ExtractBetweenState {
                     buffer,
@@ -1368,8 +1496,8 @@ impl Stream {
             if profiling_active {
                 profiling::record_node(node_id, Duration::ZERO, 1, 0);
             }
-            let mut t = target.borrow_mut(py);
-            return t.flush(py, vec![], None);
+            let mut t = crate::helpers::enter_node(target, py)?;
+            return t.flush_guarded(py, true);
         }
 
         // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
@@ -1414,8 +1542,8 @@ impl Stream {
                 if let Some(t) = t {
                     ft = t.elapsed();
                 }
-                let res = wrap_error(py, res, &self.name, &self.source_location)?;
-                let passes = res.is_truthy(py)?;
+                let res = res.and_then(|r| truth(py, r));
+                let passes = wrap_error(py, res, &self.name, &self.source_location)?;
                 if passes { Some(x) } else { None }
             }
 
@@ -1426,78 +1554,27 @@ impl Stream {
                 buffer.push(x);
                 return Ok(());
             }
-            NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState {
-                    buffer,
-                    predicate,
-                    include_delimiter,
-                    pre_buffer_chain,
-                } = &mut **boxed;
+            NodeLogic::ChunkBy(state) => {
                 let t = prof_start(profiling_active);
-                // Apply pre_buffer_chain transforms to get the buffered item
-                let buffered = if pre_buffer_chain.is_empty() {
-                    Some(x.clone_ref(py))
-                } else {
-                    let mut result: Option<Py<PyAny>> = Some(x.clone_ref(py));
-                    for step in pre_buffer_chain.iter_mut() {
-                        let val = match result.take() {
-                            Some(v) => v,
-                            None => break,
-                        };
-                        let step_ctx = NodeCtx {
-                            builtin_op: &step.builtin_op,
-                            cached_vc: &step.cached_vectorcall,
-                            name: &step.name,
-                            source_location: &step.source_location,
-                            node_id: step.node_id,
-                            flush_target: &step.flush_target,
-                            emit_target: &step.emit_target,
-                        };
-                        match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
-                            StepResult::Value(v) => result = Some(v),
-                            _ => {
-                                break;
-                            }
-                        }
-                    }
-                    result
-                };
-                // Buffer the transformed item (if it survived pre_buffer_chain)
-                if let Some(item) = buffered {
-                    buffer.push(item);
-                }
-                // Check predicate on the raw item (at branch point level)
-                let is_delimiter = match &self.builtin_op {
-                    Some(op) => {
-                        let res = apply_builtin_as_filter(py, op, &x);
-                        wrap_error(py, res, &self.name, &self.source_location)?
-                    }
-                    None => {
-                        let pred_result = vcall1(py, predicate, &x, &self.cached_vectorcall);
-                        let pred_result =
-                            wrap_error(py, pred_result, &self.name, &self.source_location)?;
-                        pred_result.is_truthy(py)?
-                    }
-                };
+                let (chunk, buffer_after) = chunk_by_item(
+                    py,
+                    state,
+                    self.builtin_op.as_deref(),
+                    &self.cached_vectorcall,
+                    &self.name,
+                    &self.source_location,
+                    x,
+                )?;
                 if let Some(t) = t {
-                    ft = t.elapsed();
+                    profiling::record_node(node_id, t.elapsed(), 1, u64::from(chunk.is_some()));
                 }
-                if is_delimiter {
-                    if !*include_delimiter {
-                        // Remove the delimiter (last item added) from buffer
-                        buffer.pop();
-                    }
-                    if !buffer.is_empty() {
-                        let items = std::mem::take(buffer);
-                        let tuple = PyTuple::new(py, items)?;
-                        if profiling_active {
-                            profiling::record_node(node_id, ft, 1, 1);
-                        }
-                        return self.propagate(py, tuple.into());
-                    }
+                if let Some(chunk) = chunk {
+                    self.propagate(py, chunk)?;
                 }
-                if profiling_active {
-                    profiling::record_node(node_id, ft, 1, 0);
+                if let Some(x) = buffer_after
+                    && let NodeLogic::ChunkBy(state) = &mut self.logic
+                {
+                    chunk_buffer(py, state, x)?;
                 }
                 return Ok(());
             }
@@ -1597,6 +1674,7 @@ impl Stream {
         if n == 0 {
             return Ok(());
         }
+        crate::stack::check()?;
 
         // If THIS node needs locking (par() branches, union inputs), take each
         // child's lock before updating it: the child may be shared with another
@@ -1608,10 +1686,9 @@ impl Stream {
                 return self.downstreams[0].locked_update_batch(py, output_batch);
             } else if let Some(ptr) = self.downstreams[0].ptr {
                 let child = unsafe { ptr.get_mut() };
-                return child.update_batch(py, output_batch);
+                return child.update_batch_compiled(py, output_batch);
             }
-            return self.downstreams[0]
-                .borrow_mut(py)
+            return crate::helpers::enter_node(&self.downstreams[0], py)?
                 .update_batch(py, output_batch);
         }
 
@@ -1621,10 +1698,10 @@ impl Stream {
             let ptr = |d: &crate::lock::Downstream| d.ptr.expect("compiled edge");
             for d in self.downstreams.iter().take(n - 1) {
                 let batch = output_batch.iter().map(|v| v.clone_ref(py)).collect();
-                unsafe { ptr(d).get_mut() }.update_batch(py, batch)?;
+                unsafe { ptr(d).get_mut() }.update_batch_compiled(py, batch)?;
             }
             return unsafe { ptr(&self.downstreams[n - 1]).get_mut() }
-                .update_batch(py, output_batch);
+                .update_batch_compiled(py, output_batch);
         }
         if use_lock {
             for val in output_batch {
@@ -1639,17 +1716,17 @@ impl Stream {
             for val in output_batch {
                 for d in self.downstreams.iter().take(n - 1) {
                     let child = unsafe { ptr(d).get_mut() };
-                    child.update(py, val.clone_ref(py))?;
+                    child.update_compiled(py, val.clone_ref(py))?;
                 }
                 let child = unsafe { ptr(&self.downstreams[n - 1]).get_mut() };
-                child.update(py, val)?;
+                child.update_compiled(py, val)?;
             }
         } else {
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    child.borrow_mut(py).update(py, val.clone_ref(py))?;
+                    crate::helpers::enter_node(child, py)?.update(py, val.clone_ref(py))?;
                 }
-                self.downstreams[n - 1].borrow_mut(py).update(py, val)?;
+                crate::helpers::enter_node(&self.downstreams[n - 1], py)?.update(py, val)?;
             }
         }
         Ok(())
@@ -1660,6 +1737,7 @@ impl Stream {
         if n == 0 {
             return Ok(());
         }
+        crate::stack::check()?;
 
         // If THIS node needs locking (par() branches, union inputs), take each
         // child's lock before updating it: the child may be shared with another
@@ -1675,24 +1753,24 @@ impl Stream {
             // frozen topology (pointers remain valid while Py<Stream> refs in downstreams live).
             if n == 1 {
                 let child = unsafe { first.get_mut() };
-                return child.update(py, val);
+                return child.update_compiled(py, val);
             }
             let ptr = |d: &crate::lock::Downstream| d.ptr.expect("compiled edge");
             for d in self.downstreams.iter().take(n - 1) {
                 let child = unsafe { ptr(d).get_mut() };
-                child.update(py, val.clone_ref(py))?;
+                child.update_compiled(py, val.clone_ref(py))?;
             }
             let child = unsafe { ptr(&self.downstreams[n - 1]).get_mut() };
-            child.update(py, val)?;
+            child.update_compiled(py, val)?;
         } else {
             // Pre-compile fallback: use PyCell borrow_mut
             if n == 1 {
-                return self.downstreams[0].borrow_mut(py).update(py, val);
+                return crate::helpers::enter_node(&self.downstreams[0], py)?.update(py, val);
             }
             for child in self.downstreams.iter().take(n - 1) {
-                child.borrow_mut(py).update(py, val.clone_ref(py))?;
+                crate::helpers::enter_node(child, py)?.update(py, val.clone_ref(py))?;
             }
-            self.downstreams[n - 1].borrow_mut(py).update(py, val)?;
+            crate::helpers::enter_node(&self.downstreams[n - 1], py)?.update(py, val)?;
         }
         Ok(())
     }
@@ -1711,12 +1789,12 @@ impl Stream {
         };
         if self.needs_lock {
             let _guard = child.lock.acquire(py);
-            return child.try_borrow_mut(py)?.update_tagged(py, index, val);
+            return crate::helpers::enter_node(child, py)?.update_tagged(py, index, val);
         }
         if let Some(ptr) = child.ptr {
-            return unsafe { ptr.get_mut() }.update_tagged(py, index, val);
+            return unsafe { ptr.get_mut() }.update_tagged_compiled(py, index, val);
         }
-        child.borrow_mut(py).update_tagged(py, index, val)
+        crate::helpers::enter_node(child, py)?.update_tagged(py, index, val)
     }
 
     fn propagate_batch_tagged(
@@ -1740,14 +1818,12 @@ impl Stream {
         };
         if self.needs_lock {
             let _guard = child.lock.acquire(py);
-            return child
-                .try_borrow_mut(py)?
-                .update_batch_tagged(py, index, items);
+            return crate::helpers::enter_node(child, py)?.update_batch_tagged(py, index, items);
         }
         if let Some(ptr) = child.ptr {
-            return unsafe { ptr.get_mut() }.update_batch_tagged(py, index, items);
+            return unsafe { ptr.get_mut() }.update_batch_tagged_compiled(py, index, items);
         }
-        child.borrow_mut(py).update_batch_tagged(py, index, items)
+        crate::helpers::enter_node(child, py)?.update_batch_tagged(py, index, items)
     }
 
     /// Receive `val` on input `index` of a zip/combine_latest node.
@@ -1847,7 +1923,7 @@ impl Stream {
 
         // For single downstream, no parallelism needed - just use normal propagation
         if n == 1 {
-            return self.downstreams[0].borrow_mut(py).update(py, val);
+            return crate::helpers::enter_node(&self.downstreams[0], py)?.update(py, val);
         }
 
         // Every branch but the last goes to the pool; the last runs here.
