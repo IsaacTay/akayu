@@ -172,7 +172,11 @@ fn emit_into_target(
     let t = target
         .try_borrow(py)
         .map_err(|_| PyErr::from(crate::error::StreamError::BusySource))?;
-    let _guard = t.lock.acquire(py);
+    let _guard = t.lock.acquire_checked(py, || {
+        crate::lock::Emitting::check_not_waited_on(&t.emitting, |state| {
+            crate::lock::refused(state, &t.name)
+        })
+    })?;
     // Marked emitting like target.emit() does: a feedback loop back into a
     // source that is mid-emit is rejected, not run as unbounded recursion.
     let _emitting = crate::lock::Emitting::enter(&t.emitting, &t.name)?;
@@ -1147,7 +1151,9 @@ pub(crate) fn apply_logic_batch(
 /// raw pointer and so bypasses PyO3's borrow flag. An item coming back into
 /// a node that is still mid-update (through a callback's emit into another
 /// source that leads back here) would alias it: it is refused, as the borrow
-/// refuses it on the uncompiled path.
+/// refuses it on the uncompiled path. Uncompiled hops enter through them too:
+/// when only one of the sources feeding a node is compiled, the node is
+/// reached both ways, and each must see the other mid-update.
 macro_rules! compiled_entry {
     ($name:ident, $inner:ident, ($($arg:ident: $ty:ty),*)) => {
         #[inline(always)]
@@ -1164,6 +1170,16 @@ macro_rules! compiled_entry {
             result
         }
     };
+}
+
+/// An item reached a node compile() folded into a chain of steps.
+#[cold]
+#[inline(never)]
+fn chain_member_reached(name: &str) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(format!(
+        "An item reached '{name}', which compile() folded into a chain of steps: emit into \
+         the compiled graph's source instead"
+    ))
 }
 
 /// The error for a re-entered node: out of line, it is never the hot path.
@@ -1482,17 +1498,13 @@ impl Stream {
             }
             NodeLogic::Prefetched { prefetcher } => {
                 let t = prof_start(profiling_active);
-                let results = prefetcher.update_batch(py, items);
+                let (results, error) = prefetcher.update_batch(py, items);
                 let ft = t.map_or(Duration::ZERO, |t| t.elapsed());
-                let results = wrap_error(py, results, &self.name, &self.source_location)?;
-                return self.dispatch_state_results(
-                    py,
-                    results,
-                    profiling_active,
-                    node_id,
-                    ft,
-                    items_in,
-                );
+                self.dispatch_state_results(py, results, profiling_active, node_id, ft, items_in)?;
+                return match error {
+                    Some(e) => wrap_error(py, Err(e), &self.name, &self.source_location),
+                    None => Ok(()),
+                };
             }
 
             // Chainable variants handled above
@@ -1666,8 +1678,10 @@ impl Stream {
                 return Ok(());
             }
 
-            // Chainable variants handled above
-            _ => unreachable!("chainable variant should have been handled by apply_logic"),
+            // Chainable variants are handled above. A chain member only gets
+            // here from a node compile() bypassed (an emit() into a seq()
+            // node it skipped): the member's work is done by its chain now.
+            _ => return Err(chain_member_reached(&self.name)),
         };
 
         // Record for nodes that fall through (non-early-return, non-terminal)
@@ -1709,7 +1723,7 @@ impl Stream {
                 return child.update_batch_compiled(py, output_batch);
             }
             return crate::helpers::enter_node(&self.downstreams[0], py)?
-                .update_batch(py, output_batch);
+                .update_batch_compiled(py, output_batch);
         }
 
         if self.batch_fanout {
@@ -1744,9 +1758,11 @@ impl Stream {
         } else {
             for val in output_batch {
                 for child in self.downstreams.iter().take(n - 1) {
-                    crate::helpers::enter_node(child, py)?.update(py, val.clone_ref(py))?;
+                    crate::helpers::enter_node(child, py)?
+                        .update_compiled(py, val.clone_ref(py))?;
                 }
-                crate::helpers::enter_node(&self.downstreams[n - 1], py)?.update(py, val)?;
+                crate::helpers::enter_node(&self.downstreams[n - 1], py)?
+                    .update_compiled(py, val)?;
             }
         }
         Ok(())
@@ -1785,12 +1801,13 @@ impl Stream {
         } else {
             // Pre-compile fallback: use PyCell borrow_mut
             if n == 1 {
-                return crate::helpers::enter_node(&self.downstreams[0], py)?.update(py, val);
+                return crate::helpers::enter_node(&self.downstreams[0], py)?
+                    .update_compiled(py, val);
             }
             for child in self.downstreams.iter().take(n - 1) {
-                crate::helpers::enter_node(child, py)?.update(py, val.clone_ref(py))?;
+                crate::helpers::enter_node(child, py)?.update_compiled(py, val.clone_ref(py))?;
             }
-            crate::helpers::enter_node(&self.downstreams[n - 1], py)?.update(py, val)?;
+            crate::helpers::enter_node(&self.downstreams[n - 1], py)?.update_compiled(py, val)?;
         }
         Ok(())
     }
@@ -1809,12 +1826,12 @@ impl Stream {
         };
         if self.needs_lock {
             let _guard = child.lock.acquire(py);
-            return crate::helpers::enter_node(child, py)?.update_tagged(py, index, val);
+            return crate::helpers::enter_node(child, py)?.update_tagged_compiled(py, index, val);
         }
         if let Some(ptr) = child.ptr {
             return unsafe { ptr.get_mut() }.update_tagged_compiled(py, index, val);
         }
-        crate::helpers::enter_node(child, py)?.update_tagged(py, index, val)
+        crate::helpers::enter_node(child, py)?.update_tagged_compiled(py, index, val)
     }
 
     fn propagate_batch_tagged(
@@ -1838,12 +1855,13 @@ impl Stream {
         };
         if self.needs_lock {
             let _guard = child.lock.acquire(py);
-            return crate::helpers::enter_node(child, py)?.update_batch_tagged(py, index, items);
+            return crate::helpers::enter_node(child, py)?
+                .update_batch_tagged_compiled(py, index, items);
         }
         if let Some(ptr) = child.ptr {
             return unsafe { ptr.get_mut() }.update_batch_tagged_compiled(py, index, items);
         }
-        crate::helpers::enter_node(child, py)?.update_batch_tagged(py, index, items)
+        crate::helpers::enter_node(child, py)?.update_batch_tagged_compiled(py, index, items)
     }
 
     /// Receive `val` on input `index` of a zip/combine_latest node.
@@ -1943,7 +1961,7 @@ impl Stream {
 
         // For single downstream, no parallelism needed - just use normal propagation
         if n == 1 {
-            return crate::helpers::enter_node(&self.downstreams[0], py)?.update(py, val);
+            return crate::helpers::enter_node(&self.downstreams[0], py)?.update_compiled(py, val);
         }
 
         // Every branch but the last goes to the pool; the last runs here.

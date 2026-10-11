@@ -798,3 +798,254 @@ def test_import_without_package_metadata():
 
 def test_the_stream_type_names_its_module():
     assert akayu.Stream.__module__ == "akayu"
+
+
+# --- Round 4: many threads at once ---
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_flush_and_an_emit_from_different_sources_of_a_union(compiled):
+    # Below a union, an emit holds the union's lock, not the flushed source's:
+    # the flush has to take the union's lock too, or it meets the emit there.
+    # Compiled, a union input fused into a chain (here after flatten) lost
+    # the lock on its edge, so two sources' items were in the union at once.
+    def let_others_in(x):
+        time.sleep(0)
+        return x
+
+    sources = [akayu.Stream() for _ in range(2)]
+    tails = [s.map(lambda x: [x]).flatten().map(let_others_in) for s in sources]
+    merged = akayu.union(*tails)
+    outs = ([], [])
+    branches = merged.par()
+    branches.map(let_others_in).sink(outs[0].append)
+    branches.map(let_others_in).sink(outs[1].append)
+    if compiled:
+        sources[0].compile()
+    errors, done = [], threading.Event()
+
+    def emitter(t):
+        for i in range(300):
+            try:
+                sources[t].emit((t, i))
+            except Exception as e:
+                errors.append(e)
+
+    def flusher():
+        while not done.is_set():
+            for s in sources:
+                try:
+                    s.flush()
+                except Exception as e:
+                    errors.append(e)
+
+    old = sys.getswitchinterval()
+    sys.setswitchinterval(1e-5)
+    try:
+        threads = [threading.Thread(target=emitter, args=(t,)) for t in range(2)]
+        f = threading.Thread(target=flusher)
+        for t in [*threads, f]:
+            t.start()
+        for t in threads:
+            t.join()
+        done.set()
+        f.join()
+    finally:
+        sys.setswitchinterval(old)
+    assert errors == []
+    assert sorted(outs[0]) == sorted(outs[1]) == sorted((t, i) for t in range(2) for i in range(300))
+
+
+class InterruptingGlobals(dict):
+    """Globals whose lookups raise KeyboardInterrupt once armed, as a Ctrl+C
+    landing while compile() analyses a function would."""
+
+    armed = False
+
+    def __contains__(self, key):
+        if InterruptingGlobals.armed:
+            raise KeyboardInterrupt
+        return dict.__contains__(self, key)
+
+
+def test_ctrl_c_during_compile_is_not_swallowed():
+    f = eval("lambda x: x + k", InterruptingGlobals(k=1))
+    s, out = akayu.Stream(), []
+    s.map(f).sink(out.append)
+    InterruptingGlobals.armed = True
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            s.compile()
+        with pytest.raises(KeyboardInterrupt):
+            akayu.Stream().map(f)  # analysed when built, too
+    finally:
+        InterruptingGlobals.armed = False
+    s.emit(1)  # the graph was compiled all the same
+    assert out == [2]
+
+
+def test_the_flush_idiom_below_seq_compiles():
+    # compile() bypassed the seq() node but left its children's parent links
+    # on it; chunk_by fusion followed them and left a dead node in the graph.
+    s, out = akayu.Stream(), []
+    q = s.seq()
+    c = q.collect()
+    q.filter(lambda x: x == 0).sink(lambda _: c.flush())
+    c.sink(out.append)
+    s.compile()
+    s.emit(5)
+    s.emit(0)
+    assert out == [(5, 0)]
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_seq_below_par_stays_sequential(compiled):
+    s, log = akayu.Stream(), []
+    q = s.par().seq()
+
+    def step(name):
+        def run(x):
+            log.append((f"{name} start", threading.current_thread().name))
+            time.sleep(0.02)
+            log.append((f"{name} end", threading.current_thread().name))
+
+        return run
+
+    q.sink(step("a"))
+    q.sink(step("b"))
+    if compiled:
+        with pytest.warns(UserWarning, match="par"):
+            s.compile()
+    s.emit(1)
+    assert [event for event, _ in log] == ["a start", "a end", "b start", "b end"]
+    assert len({thread for _, thread in log}) == 1
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_failing_branch_below_par_seq_stops_the_next(compiled):
+    s, out = akayu.Stream(), []
+    q = s.par().seq()
+    q.filter(lambda x: x % 2 == 0).sink(lambda x: None)  # raises for a str
+    q.map(str).sink(out.append)
+    if compiled:
+        with pytest.warns(UserWarning, match="par"):
+            s.compile()
+    with pytest.raises(RuntimeError):
+        s.emit("ab")
+    assert out == []  # as below a source: the second branch never sees it
+
+
+@pytest.mark.parametrize("compiled", ["none", "first", "both"])
+def test_reentry_is_refused_when_only_one_source_is_compiled(compiled):
+    s0, s1, out = akayu.Stream(), akayu.Stream(), []
+    merged = akayu.zip(s0, s1)
+    merged.sink(out.append)
+    merged.sink(lambda t: s0.emit(t[0] + 1000) if t[0] < 1000 else None)
+    if compiled in ("first", "both"):
+        s0.compile()
+    if compiled == "both":
+        s1.compile()
+    s0.emit(1)
+    with pytest.raises(RuntimeError) as info:
+        s1.emit("a")
+    assert "re-entered" in str(innermost(info.value))
+
+
+@pytest.mark.parametrize("call", ["emit", "flush"])
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_par_branch_on_a_pool_thread_feeding_back_raises(call, compiled):
+    # On the calling thread's branch this raised; on a pool thread it waited
+    # for the source's lock, held by the thread waiting for that branch.
+    code, last = run_script(
+        f"""
+        import akayu, time
+        s, results = akayu.Stream(), []
+        branches = s.par()
+        def feed_back(x):
+            time.sleep(0.01)
+            try:
+                s.{call}({"-1" if call == "emit" else ""})
+                results.append("ok")
+            except RuntimeError:
+                results.append("refused")
+        for _ in range(3):
+            branches.map(lambda x: x).sink(feed_back)
+        branches.map(lambda x: x).sink(lambda x: time.sleep(0.03))
+        if {compiled}:
+            s.compile()
+        for i in range(10):
+            try:
+                s.emit(i)
+            except RuntimeError:
+                pass
+        print(set(results))
+    """,
+        timeout=60,
+    )
+    assert (code, last) == (0, "{'refused'}")
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_failed_prefetched_batch_keeps_the_finished_results(compiled):
+    def boom3(x):
+        if x == 3:
+            raise ValueError("boom at 3")
+        return x * 10
+
+    s, out = akayu.Stream(), []
+    s.prefetch(2).map(boom3).sink(out.append)
+    if compiled:
+        s.compile()
+    s.emit(1)
+    with pytest.raises(RuntimeError):
+        s.emit_batch([2, 3, 4])
+    s.flush()
+    assert out == [10, 20, 40]  # as per-item emits deliver
+
+
+def test_sustained_par_emits_dont_pile_up_in_the_pool():
+    # Tasks a submitter ran itself stayed queued until a worker took the GIL
+    # to drop each one: memory grew by ~45 B per item while emits continued.
+    code, last = run_script("""
+        import akayu
+        def rss_kb():
+            with open("/proc/self/statm") as f:
+                return int(f.read().split()[1]) * 4
+        s = akayu.Stream()
+        branches = s.par()
+        branches.map(lambda x: x).sink(lambda x: None)
+        branches.map(lambda x: x).sink(lambda x: None)
+        for i in range(100_000):
+            s.emit(i)
+        before = rss_kb()
+        for i in range(300_000):
+            s.emit(i)
+        print((rss_kb() - before) // 1024)
+    """)
+    assert code == 0
+    assert int(last) < 6  # MB; it was ~13
+
+
+def test_the_profile_of_a_very_deep_compiled_graph_prints():
+    code, last = run_script("""
+        import akayu
+        s = akayu.Stream(); node = s
+        for i in range(40_000):
+            node = node.map(lambda x: x)
+        node.sink(lambda x: None)
+        s.compile()
+        report = s.emit_profiled(1)
+        print(len(str(report)) < 50_000_000)
+    """)
+    assert (code, last) == (0, "True")
+
+
+def test_a_profile_prints_a_node_below_a_merge_once():
+    s = akayu.Stream()
+    node = s
+    for _ in range(16):  # stacked diamonds: 2**16 paths to the bottom
+        node = akayu.union(node.map(lambda x: x), node.map(lambda x: x))
+    node.sink(lambda x: None)
+    text = str(s.emit_profiled(1))
+    assert "(shown above)" in text
+    assert len(text.splitlines()) < 400

@@ -23,19 +23,99 @@ use pyo3::prelude::*;
 /// A unit of work, run on a worker (or its submitter) with the GIL held.
 pub(crate) type Job = Box<dyn FnOnce(Python<'_>) + Send>;
 
+/// Stacks, as (lowest, highest) address, of threads waiting for a task.
+type Stacks = Arc<[(usize, usize)]>;
+
+/// The threads waiting for a task: the one that submitted it, and those
+/// waiting in turn for that thread's own task (nested par()/prefetch()),
+/// each by its stack.
+#[derive(Clone, Default)]
+struct Waiting {
+    submitter: (usize, usize),
+    /// None unless the submitter itself runs a task for another thread.
+    outer: Option<Stacks>,
+}
+
+impl Waiting {
+    fn contains(&self, address: usize) -> bool {
+        let within = |&(low, high): &(usize, usize)| low <= address && address < high;
+        within(&self.submitter) || self.outer.as_deref().is_some_and(|o| o.iter().any(within))
+    }
+}
+
+thread_local! {
+    /// While a worker runs a task: the threads waiting for it.
+    static RUNNING_FOR: std::cell::RefCell<Option<Waiting>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Whether `address` is on the stack of a thread that waits for the task
+/// this thread is running (see `Emitting::check_not_waited_on`).
+pub(crate) fn waits_for_this_thread(address: usize) -> bool {
+    RUNNING_FOR.with(|r| r.borrow().as_ref().is_some_and(|w| w.contains(address)))
+}
+
 /// A queued job that runs at most once.
-pub(crate) struct Task(Mutex<Option<Job>>);
+pub(crate) struct Task {
+    job: Mutex<Option<Job>>,
+    waiting: Waiting,
+}
 
 impl Task {
     fn claim(&self) -> Option<Job> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner).take()
+        self.job
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
     }
 
-    /// Run the job here if no worker has started it.
+    fn is_claimed(&self) -> bool {
+        self.job
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
+    }
+
+    /// Run the job here, on the thread that submitted it, if no worker has
+    /// started it.
     pub(crate) fn run_if_unclaimed(&self, py: Python) {
         if let Some(job) = self.claim() {
             job(py);
         }
+    }
+
+    /// Run the job on a worker, if its submitter hasn't, with the threads
+    /// waiting for it on record.
+    fn run_for_submitter(&self, py: Python) {
+        /// Puts back what the worker was running for before.
+        struct Restore(Option<Waiting>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let outer = self.0.take();
+                RUNNING_FOR.with(|r| *r.borrow_mut() = outer);
+            }
+        }
+        if let Some(job) = self.claim() {
+            let outer = RUNNING_FOR.with(|r| r.borrow_mut().replace(self.waiting.clone()));
+            let _restore = Restore(outer);
+            job(py);
+        }
+    }
+}
+
+/// Who waits for a task submitted now, from this thread.
+fn waiting_for_new_task() -> Waiting {
+    let outer = RUNNING_FOR.with(|r| {
+        r.borrow().as_ref().map(|w| {
+            // This thread runs a task: its waiters wait for this one too.
+            let mut stacks = vec![w.submitter];
+            stacks.extend(w.outer.as_deref().unwrap_or_default());
+            Stacks::from(stacks)
+        })
+    });
+    Waiting {
+        submitter: crate::stack::range(),
+        outer,
     }
 }
 
@@ -131,7 +211,11 @@ pub(crate) fn _shutdown_pool(py: Python) {
 
 /// Queue `job`, starting a worker if none is idle and the pool isn't full.
 pub(crate) fn submit(job: Job) -> Arc<Task> {
-    let task = Arc::new(Task(Mutex::new(Some(job))));
+    let waiting = waiting_for_new_task();
+    let task = Arc::new(Task {
+        job: Mutex::new(Some(job)),
+        waiting,
+    });
     let pool = pool();
     let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
     q.tasks.push_back(Arc::clone(&task));
@@ -164,6 +248,15 @@ fn worker(pool: &Pool) {
                     if !q.shutdown
                         && let Some(task) = q.tasks.pop_front()
                     {
+                        // A task its submitter already ran holds no Python
+                        // objects: drop it here, without the GIL. Taking the
+                        // GIL for each, one at a time, let them pile up while
+                        // threads kept submitting. (An unclaimed one is still
+                        // claimed only once the GIL is back, so its submitter
+                        // can run it meanwhile, which is cheaper.)
+                        if task.is_claimed() {
+                            continue;
+                        }
                         q.idle -= 1;
                         q.running += 1;
                         return task;
@@ -174,7 +267,7 @@ fn worker(pool: &Pool) {
                         .unwrap_or_else(PoisonError::into_inner);
                 }
             });
-            task.run_if_unclaimed(py);
+            task.run_for_submitter(py);
             let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
             q.running -= 1;
             if q.running == 0 {

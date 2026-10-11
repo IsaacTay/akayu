@@ -257,7 +257,24 @@ struct Analysis {
     code: Py<PyAny>,
 }
 
+thread_local! {
+    /// A KeyboardInterrupt (or another exception that isn't an `Exception`)
+    /// raised while the analyzer ran. Analysis answers "nothing to optimize"
+    /// from then on, so compile() finishes quickly with the functions it
+    /// hasn't analysed called as they are, and then raises it.
+    static INTERRUPTED: std::cell::RefCell<Option<PyErr>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The interrupt the analyzer was stopped by, if any (see `INTERRUPTED`).
+pub(crate) fn take_interrupt() -> Option<PyErr> {
+    INTERRUPTED.with(|i| i.borrow_mut().take())
+}
+
 fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> {
+    if INTERRUPTED.with(|i| i.borrow().is_some()) {
+        return None;
+    }
     // SAFETY: GIL held; a type check, then a borrowed field of a live
     // function, made a strong reference before any Python code runs.
     let code = unsafe {
@@ -280,10 +297,19 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
             code: code.unbind(),
         });
     }
-    let answer = get_analyze_for_compile()
+    let answer = match get_analyze_for_compile()
         .ok()?
         .call1(py, (func, accumulate))
-        .ok()?;
+    {
+        Ok(answer) => answer,
+        Err(e) => {
+            // An analysis that fails is no analysis; a Ctrl+C is the user's.
+            if !e.is_instance_of::<pyo3::exceptions::PyException>(py) {
+                INTERRUPTED.with(|i| *i.borrow_mut() = Some(e));
+            }
+            return None;
+        }
+    };
     let (result, code_only, is_lambda): (Py<PyAny>, bool, bool) = answer.extract(py).ok()?;
     let result = (!result.is_none(py)).then_some(result);
     if code_only && let Ok(weak) = PyWeakrefReference::new(&code) {
