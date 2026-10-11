@@ -52,6 +52,11 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
             ops.iter().try_for_each(|op| visit_builtin(op, visit))
         }
         BuiltinOp::Numeric(_, generic) => visit_builtin(generic, visit),
+        BuiltinOp::Eager(eager) => {
+            visit.call(&eager.func)?;
+            visit.call(&eager.code)?;
+            visit_builtin(&eager.op, visit)
+        }
         BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
             visit_builtin(a, visit)?;
             visit_builtin(b, visit)

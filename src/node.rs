@@ -111,6 +111,27 @@ pub struct ExtractBetweenState {
 
 /// A single step in a compiled chain, holding the extracted NodeLogic
 /// and per-node metadata needed for execution and profiling.
+/// An uncompiled node's native op (see `builtin::eager_op`): used while its
+/// function still runs the code it was made from (IPython's autoreload, for
+/// one, replaces a function's code in place); otherwise the function is
+/// called.
+pub struct EagerOp {
+    pub func: Py<PyAny>,
+    pub code: Py<PyAny>,
+    pub op: std::sync::Arc<BuiltinOp>,
+}
+
+impl EagerOp {
+    /// Whether the function still runs the code the op was made from.
+    #[inline]
+    pub fn current(&self) -> bool {
+        // SAFETY: GIL held by every caller; an EagerOp is only made for a
+        // plain function, and a function's type can't change.
+        let code = unsafe { pyo3::ffi::PyFunction_GetCode(self.func.as_ptr()) };
+        std::ptr::eq(code, self.code.as_ptr())
+    }
+}
+
 /// `x.name(*args)` with constant arguments (at most two).
 pub struct MethodCall {
     pub name: Py<PyString>,
@@ -138,7 +159,7 @@ pub struct ChainNode {
     pub emit_target: Option<Py<crate::Stream>>,
     /// Set by compile() on the first step of a run of numeric steps, which
     /// then execute together on unboxed values (see `numeric`).
-    pub numeric_run: Option<Box<crate::numeric::NumRun>>,
+    pub numeric_run: Option<std::sync::Arc<crate::numeric::NumRun>>,
 }
 
 /// Hint for builtin function fast-paths.
@@ -198,6 +219,8 @@ pub enum BuiltinOp {
     NotContains(Py<PyAny>),
     /// x.method(), x.method(arg), x.method(arg1, arg2)
     MethodCall(Box<MethodCall>),
+    /// An uncompiled node's op, guarded by its function's code (`EagerOp`)
+    Eager(EagerOp),
     /// x[start:stop] — uses PySlice_New + PyObject_GetItem
     Slice(Py<PyAny>, Py<PyAny>),
     /// (op1(x), op2(x), ...) — apply each op to x, collect into tuple

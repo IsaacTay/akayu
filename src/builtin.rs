@@ -15,7 +15,7 @@ use crate::helpers::{
     get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
     get_operator_truth,
 };
-use crate::node::{BinaryOp, BuiltinOp, CompareOp, MethodCall, NodeLogic};
+use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic};
 
 /// Parse a comparison op string from the Python analyzer into a `CompareOp`.
 fn parse_compare_op(s: &str) -> Option<CompareOp> {
@@ -209,7 +209,9 @@ fn analyze_bytecode(py: Python, func: &Py<PyAny>) -> Option<Py<PyAny>> {
 /// every function with that code without calling into Python. Entries hold a
 /// weak reference to their code, so the code still dies with its functions,
 /// and a dead one means its address may belong to another object now.
-type CodeOnly = crate::helpers::PtrMap<(usize, bool), (Py<PyWeakrefReference>, Option<Py<PyAny>>)>;
+type CodeOnly = crate::helpers::PtrMap<(usize, bool), CodeOnlyEntry>;
+/// (weak reference to the code, result, is_lambda)
+type CodeOnlyEntry = (Py<PyWeakrefReference>, Option<Py<PyAny>>, bool);
 static CODE_ONLY: LazyLock<Mutex<CodeOnly>> = LazyLock::new(Mutex::default);
 /// Beyond this many live code objects, results are no longer cached here.
 const CODE_ONLY_MAX: usize = 1024;
@@ -218,6 +220,44 @@ const CODE_ONLY_MAX: usize = 1024;
 /// plain Python function. None for anything else: builtins have no bytecode,
 /// and a bound method's code takes `self` first, not the item.
 fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py<PyAny>> {
+    analysis(py, func, accumulate)?.result
+}
+
+/// The native op an uncompiled map or filter node can use from the start:
+/// for a lambda whose analysis depends only on its code, there is nothing
+/// compile() would snapshot. Only lambdas: a `def` function's body would no
+/// longer run, which coverage and breakpoints would notice; a lambda's line
+/// runs anyway, when the graph is built.
+pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> {
+    let (NodeLogic::Map { func } | NodeLogic::Filter { predicate: func }) = logic else {
+        return None;
+    };
+    let Analysis {
+        result: Some(result),
+        code_only: true,
+        is_lambda: true,
+        code,
+    } = analysis(py, func, false)?
+    else {
+        return None;
+    };
+    Some(Arc::new(BuiltinOp::Eager(EagerOp {
+        func: func.clone_ref(py),
+        code,
+        op: parse_cached(py, &result)?,
+    })))
+}
+
+/// What `analyze_function` found for a function.
+struct Analysis {
+    result: Option<Py<PyAny>>,
+    /// The result depends only on the code object.
+    code_only: bool,
+    is_lambda: bool,
+    code: Py<PyAny>,
+}
+
+fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> {
     // SAFETY: GIL held; a type check, then a borrowed field of a live
     // function, made a strong reference before any Python code runs.
     let code = unsafe {
@@ -227,22 +267,31 @@ fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py
         Bound::from_borrowed_ptr(py, pyo3::ffi::PyFunction_GetCode(func.as_ptr()))
     };
     let key = (code.as_ptr() as usize, accumulate);
-    if let Some((weak, result)) = CODE_ONLY
+    if let Some((weak, result, is_lambda)) = CODE_ONLY
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get(&key)
         && weak.bind(py).upgrade().is_some()
     {
-        return result.as_ref().map(|r| r.clone_ref(py));
+        return Some(Analysis {
+            result: result.as_ref().map(|r| r.clone_ref(py)),
+            code_only: true,
+            is_lambda: *is_lambda,
+            code: code.unbind(),
+        });
     }
     let answer = get_analyze_for_compile()
         .ok()?
         .call1(py, (func, accumulate))
         .ok()?;
-    let (result, code_only): (Py<PyAny>, bool) = answer.extract(py).ok()?;
+    let (result, code_only, is_lambda): (Py<PyAny>, bool, bool) = answer.extract(py).ok()?;
     let result = (!result.is_none(py)).then_some(result);
     if code_only && let Ok(weak) = PyWeakrefReference::new(&code) {
-        let entry = (weak.unbind(), result.as_ref().map(|r| r.clone_ref(py)));
+        let entry = (
+            weak.unbind(),
+            result.as_ref().map(|r| r.clone_ref(py)),
+            is_lambda,
+        );
         let freed = {
             let mut cache = CODE_ONLY.lock().unwrap_or_else(PoisonError::into_inner);
             let mut dead = CodeOnly::default();
@@ -250,7 +299,7 @@ fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py
                 let live;
                 (live, dead) = std::mem::take(&mut *cache)
                     .into_iter()
-                    .partition(|(_, (weak, _))| weak.bind(py).upgrade().is_some());
+                    .partition(|(_, (weak, ..))| weak.bind(py).upgrade().is_some());
                 *cache = live;
             }
             let replaced = (cache.len() < CODE_ONLY_MAX).then(|| cache.insert(key, entry));
@@ -259,7 +308,12 @@ fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py
         // Freed outside the lock: freeing can run Python code.
         drop(freed);
     }
-    result
+    Some(Analysis {
+        result,
+        code_only,
+        is_lambda,
+        code: code.unbind(),
+    })
 }
 
 /// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.

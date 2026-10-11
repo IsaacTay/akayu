@@ -699,7 +699,7 @@ def _analyze_lambda(func):
 
 
 def _analyze_for_compile(func, accumulate):
-    """compile()'s analysis of a plain function: (result, code_only).
+    """compile()'s analysis of a plain function: (result, code_only, is_lambda).
 
     code_only: the result depends on nothing but func.__code__ (no closure,
     default or global value was read), so compile() reuses it for every
@@ -709,8 +709,9 @@ def _analyze_for_compile(func, accumulate):
         result, cache = _analyze_accumulate(func), _accumulate_cache
     else:
         result, cache = _analyze_lambda(func), _analysis_cache
-    entries = _cached_results(func.__code__, cache)
-    return result, any(not deps and r is result for deps, r in entries)
+    code = func.__code__
+    code_only = any(not deps and r is result for deps, r in _cached_results(code, cache))
+    return result, code_only, code.co_name == "<lambda>"
 
 
 def _cached_results(code, cache=_analysis_cache):

@@ -47,6 +47,7 @@ impl Stream {
             && !matches!(&logic, NodeLogic::Filter { .. }))
             || matches!(&logic, NodeLogic::Chain { .. });
         let compiled_filter_fast = matches!(&logic, NodeLogic::Filter { .. });
+        let builtin_op = crate::builtin::eager_op(py, &logic);
         Py::new(
             py,
             Self {
@@ -58,7 +59,7 @@ impl Stream {
                 needs_lock: false,
                 compiled: false,
                 source_location,
-                builtin_op: None,
+                builtin_op,
                 cached_vectorcall: None,
                 compiled_chainable,
                 compiled_filter_fast,

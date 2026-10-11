@@ -2,7 +2,10 @@
 
 A node used to cost ~565 bytes: a Python RLock each, a heap allocation per
 parent and per downstream edge, and a 64-byte inline NodeLogic sized by its
-rarest variants. These bounds leave some headroom over today's ~310 bytes.
+rarest variants. Today: ~335 bytes uncompiled (a lambda node keeps its native
+op), ~170 compiled (fused members are freed; op trees and numeric runs are
+shared between graphs). The bounds leave a little headroom: a per-graph copy
+of a numeric run, for one, cost ~110 bytes per compiled node.
 """
 
 import gc
@@ -35,11 +38,11 @@ def _rss_per_node(compile_graphs):
 
 
 def test_memory_per_node():
-    assert _rss_per_node(compile_graphs=False) < 360
+    assert _rss_per_node(compile_graphs=False) < 355
 
 
 def test_memory_per_compiled_node():
-    assert _rss_per_node(compile_graphs=True) < 340
+    assert _rss_per_node(compile_graphs=True) < 220
 
 
 def test_compile_frees_fused_chain_members():
