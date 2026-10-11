@@ -35,17 +35,14 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         | BuiltinOp::Compare(_, obj)
         | BuiltinOp::Contains(obj)
         | BuiltinOp::NotContains(obj) => visit.call(obj),
-        BuiltinOp::AttrGetter(name) | BuiltinOp::HasAttr(name) | BuiltinOp::MethodCall(name) => {
-            visit.call(name)
-        }
-        BuiltinOp::MethodCall1(name, arg) => {
-            visit.call(name)?;
-            visit.call(arg)
-        }
-        BuiltinOp::MethodCall2(name, arg1, arg2) => {
-            visit.call(name)?;
-            visit.call(arg1)?;
-            visit.call(arg2)
+        BuiltinOp::AttrGetter(name) | BuiltinOp::HasAttr(name) => visit.call(name),
+        BuiltinOp::MethodCall(call) => {
+            visit.call(&call.name)?;
+            call.args.iter().try_for_each(|arg| visit.call(arg))?;
+            call.direct.iter().try_for_each(|(tp, method)| {
+                visit.call(tp)?;
+                visit.call(method)
+            })
         }
         BuiltinOp::Slice(start, stop) => {
             visit.call(start)?;

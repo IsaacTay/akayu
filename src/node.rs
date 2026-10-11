@@ -1,7 +1,7 @@
 //! Node logic variants for stream processing.
 
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyString, PyType};
 use std::collections::VecDeque;
 
 /// Defines the type of operation a stream node performs.
@@ -111,6 +111,16 @@ pub struct ExtractBetweenState {
 
 /// A single step in a compiled chain, holding the extracted NodeLogic
 /// and per-node metadata needed for execution and profiling.
+/// `x.name(*args)` with constant arguments (at most two).
+pub struct MethodCall {
+    pub name: Py<PyString>,
+    pub args: Box<[Py<PyAny>]>,
+    /// The method on each builtin type that defines it (str, dict, ...),
+    /// resolved by compile(). Builtin types can't be changed, so an item of
+    /// exactly one of them calls its C method directly, without a lookup.
+    pub direct: Box<[(Py<PyType>, Py<PyAny>)]>,
+}
+
 pub struct ChainNode {
     pub logic: NodeLogic,
     pub name: std::sync::Arc<str>,
@@ -186,12 +196,8 @@ pub enum BuiltinOp {
     Contains(Py<PyAny>),
     /// x not in collection — uses PySequence_Contains + invert
     NotContains(Py<PyAny>),
-    /// x.method() — zero-arg method call
-    MethodCall(Py<PyString>),
-    /// x.method(arg) — single-arg method call
-    MethodCall1(Py<PyString>, Py<PyAny>),
-    /// x.method(arg1, arg2) — two-arg method call
-    MethodCall2(Py<PyString>, Py<PyAny>, Py<PyAny>),
+    /// x.method(), x.method(arg), x.method(arg1, arg2)
+    MethodCall(Box<MethodCall>),
     /// x[start:stop] — uses PySlice_New + PyObject_GetItem
     Slice(Py<PyAny>, Py<PyAny>),
     /// (op1(x), op2(x), ...) — apply each op to x, collect into tuple

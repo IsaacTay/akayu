@@ -53,6 +53,8 @@ independent of machine load:
 - `compile()` runs arithmetic and comparisons on ints and floats unboxed, keeping the item a
   machine number across consecutive steps: 30-65% less per item for numeric map/filter
   pipelines (ten `x + 1` maps: 5,100 -> 1,770 per item; in batches 3,580 -> 1,030).
+- `compile()` calls methods of builtin types directly (`x.strip()`, `x.get("k", 0)`,
+  `x.startswith("a")`): 165-185 fewer instructions per call, 14-27% less per item in batches.
 - `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary
   operator), `max(acc, x)`, `min(acc, x)`: 27% less per item, 50% less in batches.
 - `compile()` turns `sink(lst.append)` on a list into a direct append (2-5% per item), and when

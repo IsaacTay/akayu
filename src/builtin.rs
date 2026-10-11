@@ -1,7 +1,10 @@
 //! Builtin callable analysis and fast-path detection.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyString, PyTuple, PyWeakrefMethods, PyWeakrefReference};
+use pyo3::types::{
+    PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple, PyType,
+    PyWeakrefMethods, PyWeakrefReference,
+};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crate::Stream;
@@ -12,7 +15,7 @@ use crate::helpers::{
     get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
     get_operator_truth,
 };
-use crate::node::{BinaryOp, BuiltinOp, CompareOp, NodeLogic};
+use crate::node::{BinaryOp, BuiltinOp, CompareOp, MethodCall, NodeLogic};
 
 /// Parse a comparison op string from the Python analyzer into a `CompareOp`.
 fn parse_compare_op(s: &str) -> Option<CompareOp> {
@@ -39,6 +42,41 @@ fn parse_binary_op(s: &str) -> Option<BinaryOp> {
         "**" => Some(BinaryOp::Pow),
         _ => None,
     }
+}
+
+/// The C methods named `name` that builtin types define themselves (see
+/// `MethodCall::direct`), most common receivers first.
+fn builtin_methods(py: Python, name: &Bound<'_, PyString>) -> Box<[(Py<PyType>, Py<PyAny>)]> {
+    let types = [
+        py.get_type::<PyString>(),
+        py.get_type::<PyDict>(),
+        py.get_type::<PyBytes>(),
+        py.get_type::<PyList>(),
+        py.get_type::<PyTuple>(),
+        py.get_type::<PySet>(),
+        py.get_type::<PyFrozenSet>(),
+        py.get_type::<PyInt>(),
+        py.get_type::<PyFloat>(),
+    ];
+    types
+        .into_iter()
+        .filter_map(|tp| {
+            // The type's own namespace: inherited methods take the lookup.
+            let method = tp
+                .getattr(pyo3::intern!(py, "__dict__"))
+                .ok()?
+                .get_item(name)
+                .ok()?;
+            // SAFETY: GIL held; a type check on a live object.
+            let is_c_method = unsafe {
+                std::ptr::eq(
+                    pyo3::ffi::Py_TYPE(method.as_ptr()),
+                    &raw mut pyo3::ffi::PyMethodDescr_Type,
+                )
+            };
+            is_c_method.then(|| (tp.unbind(), method.unbind()))
+        })
+        .collect()
 }
 
 /// Recursively parse the tuple returned by `_analyze_lambda()` into a `BuiltinOp`.
@@ -96,20 +134,21 @@ fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp>
             let coll = tuple.get_item(1).ok()?.unbind();
             Some(BuiltinOp::NotContains(coll))
         }
-        "method0" => {
-            let name_str: Py<PyString> = tuple.get_item(1).ok()?.extract().ok()?;
-            Some(BuiltinOp::MethodCall(name_str))
-        }
-        "method1" => {
-            let name_str: Py<PyString> = tuple.get_item(1).ok()?.extract().ok()?;
-            let arg = tuple.get_item(2).ok()?.unbind();
-            Some(BuiltinOp::MethodCall1(name_str, arg))
-        }
-        "method2" => {
-            let name_str: Py<PyString> = tuple.get_item(1).ok()?.extract().ok()?;
-            let arg1 = tuple.get_item(2).ok()?.unbind();
-            let arg2 = tuple.get_item(3).ok()?.unbind();
-            Some(BuiltinOp::MethodCall2(name_str, arg1, arg2))
+        "method0" | "method1" | "method2" => {
+            let name = tuple.get_item(1).ok()?.cast_into::<PyString>().ok()?;
+            let args = (2..tuple.len())
+                .map(|i| tuple.get_item(i).map(Bound::unbind))
+                .collect::<PyResult<Box<[_]>>>()
+                .ok()?;
+            if args.len() > 2 {
+                return None;
+            }
+            let direct = builtin_methods(py, &name);
+            Some(BuiltinOp::MethodCall(Box::new(MethodCall {
+                name: name.unbind(),
+                args,
+                direct,
+            })))
         }
         "type" => Some(BuiltinOp::Type),
         "tuple" => Some(BuiltinOp::Tuple),
