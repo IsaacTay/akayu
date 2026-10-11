@@ -78,7 +78,7 @@ independent of machine load:
   it fuses into chains unless you hold them; `emit_batch()` map/filter/accumulate stages reuse one buffer instead of
   allocating one per stage.
 - Wall clock, `tests/bench_complex.py` on the same machine: compiled pipelines are 3.3x - 16.3x
-  faster per item than before this work, and 29x - 63x faster than streamz.
+  faster per item than before this work, and 28x - 142x faster than streamz.
 - `to_text_file()` writes each line as one append with the GIL released, so other threads keep
   running during the file I/O and concurrent writers never interleave within a line.
 

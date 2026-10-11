@@ -10,10 +10,10 @@ described under [Benchmark Details](#benchmark-details).
 
 | Topology Type | Scenario                    | Speedup over streamz |
 | ------------- | --------------------------- | -------------------- |
-| Deep Chains   | 10 chained maps             | **~58x**             |
-| Branching     | Fan-out, diamond            | **~34x - 45x**       |
-| Merging       | Union, zip, combine_latest  | **~32x - 63x**       |
-| Complex DAG   | Split, flatten, union mixed | **~31x**             |
+| Deep Chains   | 10 chained maps             | **~142x**            |
+| Branching     | Fan-out, diamond            | **~44x - 54x**       |
+| Merging       | Union, zip, combine_latest  | **~32x - 61x**       |
+| Complex DAG   | Split, flatten, union mixed | **~37x**             |
 
 ## Complex Flow Topologies (500k items)
 
@@ -23,23 +23,25 @@ program.
 
 | Topology                                        | akayu (ms) | akayu `emit_batch` (ms) | streamz (ms) | Pure Python (ms) | vs streamz     |
 | ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | -------------- |
-| [Deep pipeline (10 maps)](#deep-pipeline)       |        319 |                     255 |       18,656 |              253 | **58x faster** |
-| [Diamond (split → union)](#diamond)             |        215 |                     198 |        9,778 |               80 | **45x faster** |
-| [Fan-out (5 branches)](#fan-out)                |        516 |                     508 |       17,509 |              262 | **34x faster** |
-| [Complex DAG](#complex-dag)                     |        453 |                     416 |       14,142 |              107 | **31x faster** |
-| [Multi-union (4 sources)](#multi-union)         |        122 |                       - |        7,654 |               45 | **63x faster** |
-| [Accumulate (3 branches)](#accumulate-branches) |        307 |                       - |        9,013 |              122 | **29x faster** |
-| [Zip (3 sources)](#zip)                         |        203 |                       - |        9,202 |               50 | **45x faster** |
-| [Combine latest (3 sources)](#combine-latest)   |        132 |                       - |        4,232 |               50 | **32x faster** |
+| [Deep pipeline (10 maps)](#deep-pipeline)       |        137 |                     100 |       19,463 |              255 | **142x faster** |
+| [Diamond (split → union)](#diamond)             |        224 |                     207 |        9,726 |               79 | **44x faster**  |
+| [Fan-out (5 branches)](#fan-out)                |        323 |                     309 |       17,422 |              263 | **54x faster**  |
+| [Complex DAG](#complex-dag)                     |        383 |                     336 |       14,126 |              107 | **37x faster**  |
+| [Multi-union (4 sources)](#multi-union)         |        126 |                       - |        7,660 |               47 | **61x faster**  |
+| [Accumulate (3 branches)](#accumulate-branches) |        315 |                       - |        8,964 |              122 | **28x faster**  |
+| [Zip (3 sources)](#zip)                         |        203 |                       - |        9,192 |               53 | **45x faster**  |
+| [Combine latest (3 sources)](#combine-latest)   |        134 |                       - |        4,259 |               51 | **32x faster**  |
 
 **Observations:**
 
-- akayu is 29x - 63x faster than streamz on every topology.
-- Most of akayu's remaining time is CPython running the pipeline's own functions: measured in
-  instructions, akayu's own code is about 17% of a plain pipeline. The gap to hand-written Python
-  is mostly the function calls a hand-written loop doesn't make.
-- `emit_batch()` helps most on long linear chains (deep pipeline: 319 -> 255 ms). Below a
-  fan-out, items still go through the branches one at a time, so batching gains little there.
+- akayu is 28x - 142x faster than streamz on every topology.
+- The deep pipeline beats the hand-written loop: its ten `x + 1` steps run on machine integers,
+  converted back to a Python int once per item, while the loop makes a new int at every step.
+- Elsewhere the gap to hand-written Python is mostly the function calls and per-node work a
+  hand-written loop doesn't do.
+- `emit_batch()` helps most on long linear chains (deep pipeline: 137 -> 100 ms). Below a
+  fan-out, items still go through the branches one at a time unless `compile()` proves the
+  branches independent, so batching gains little there.
 
 ## Running Benchmarks
 

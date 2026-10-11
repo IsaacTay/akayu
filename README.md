@@ -42,10 +42,10 @@ Compiled pipelines against streamz, 500,000 items:
 
 | Topology Type | Scenario                    | Speedup over streamz |
 | ------------- | --------------------------- | -------------------- |
-| Deep Chains   | 10 chained maps             | **~58x**             |
-| Branching     | Fan-out, diamond            | **~34x - 45x**       |
-| Merging       | Union, zip, combine_latest  | **~32x - 63x**       |
-| Complex DAG   | Split, flatten, union mixed | **~31x**             |
+| Deep Chains   | 10 chained maps             | **~142x**            |
+| Branching     | Fan-out, diamond            | **~44x - 54x**       |
+| Merging       | Union, zip, combine_latest  | **~32x - 61x**       |
+| Complex DAG   | Split, flatten, union mixed | **~37x**             |
 
 See the [Benchmarks](https://isaactay.github.io/akayu/benchmarks/) page for detailed performance comparisons.
 
