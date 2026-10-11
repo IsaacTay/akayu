@@ -1,7 +1,7 @@
 //! Topology optimization (fusion, prefetch marking, chain compilation)
 
+use crate::helpers::{PtrMap as HashMap, PtrSet as HashSet};
 use pyo3::prelude::*;
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::builtin::{
@@ -52,7 +52,7 @@ impl Stream {
         if matches!(self.logic, NodeLogic::Parallel) || self.frozen {
             return;
         }
-        let mut seen = HashSet::from([source_py_ptr]);
+        let mut seen = HashSet::from_iter([source_py_ptr]);
         let mut nodes: Vec<Py<Self>> = Vec::new();
         let mut stack: Vec<Py<Self>> = self
             .downstreams
@@ -118,7 +118,7 @@ impl Stream {
     /// Collect all nodes reachable from this node's downstreams.
     fn collect_all_nodes(&self, py: Python) -> Vec<Py<Self>> {
         let mut all_nodes: Vec<Py<Self>> = Vec::new();
-        let mut visited: HashSet<usize> = HashSet::new();
+        let mut visited: HashSet<usize> = HashSet::default();
         let mut to_visit: Vec<Py<Self>> =
             self.downstreams.iter().map(|d| d.clone_ref(py)).collect();
 
@@ -231,11 +231,11 @@ impl Stream {
             }
 
             // Check if branches actually converge anywhere
-            let mut node_branches: HashMap<usize, HashSet<usize>> = HashMap::new();
-            let mut node_refs: HashMap<usize, Py<Self>> = HashMap::new();
+            let mut node_branches: HashMap<usize, HashSet<usize>> = HashMap::default();
+            let mut node_refs: HashMap<usize, Py<Self>> = HashMap::default();
 
             for (branch_idx, branch_py) in branches.iter().enumerate() {
-                let mut visited: HashSet<usize> = HashSet::new();
+                let mut visited: HashSet<usize> = HashSet::default();
                 let mut stack: Vec<Py<Self>> = vec![branch_py.clone_ref(py)];
 
                 while let Some(node_py) = stack.pop() {
@@ -758,7 +758,7 @@ impl Stream {
 
 /// See `Stream::mark_independent_fanouts`.
 fn independent_branches(py: Python, edges: &[Downstream]) -> bool {
-    let mut lists = HashSet::new();
+    let mut lists = HashSet::default();
     edges.len() >= 2
         && edges
             .iter()

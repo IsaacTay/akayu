@@ -44,8 +44,7 @@ define_py_helper!(OPERATOR_TRUTH, get_operator_truth);
 define_py_helper!(OPERATOR_ITEMGETTER, get_operator_itemgetter);
 define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
-define_py_helper!(ANALYZE_LAMBDA, get_analyze_lambda);
-define_py_helper!(ANALYZE_ACCUMULATE, get_analyze_accumulate);
+define_py_helper!(ANALYZE_FOR_COMPILE, get_analyze_for_compile);
 
 pub(crate) fn resolve_stream_name(
     stream_name: Option<String>,
@@ -441,10 +440,8 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let reject_async = helpers_module.getattr("_reject_async")?;
     let _ = REJECT_ASYNC.set(reject_async.unbind());
 
-    let analyze_lambda = helpers_module.getattr("_analyze_lambda")?;
-    let _ = ANALYZE_LAMBDA.set(analyze_lambda.unbind());
-    let analyze_accumulate = helpers_module.getattr("_analyze_accumulate")?;
-    let _ = ANALYZE_ACCUMULATE.set(analyze_accumulate.unbind());
+    let analyze_for_compile = helpers_module.getattr("_analyze_for_compile")?;
+    let _ = ANALYZE_FOR_COMPILE.set(analyze_for_compile.unbind());
 
     // Cache builtin references for fast-path detection
     let builtins = py.import("builtins")?;
@@ -472,3 +469,30 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     Ok(())
 }
+
+/// Hasher for pointer and address keys (compile()'s graph walks and caches):
+/// a multiply instead of SipHash. Only for keys no attacker chooses.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.write_u64(u64::from(b));
+        }
+    }
+    fn write_u64(&mut self, n: u64) {
+        self.0 = (self.0.rotate_left(5) ^ n).wrapping_mul(0xf135_7aea_2e62_a9c5);
+    }
+    fn write_usize(&mut self, n: usize) {
+        self.write_u64(n as u64);
+    }
+    fn finish(&self) -> u64 {
+        // The multiply leaves the entropy high; hash tables index by low bits.
+        self.0.rotate_left(26)
+    }
+}
+
+pub(crate) type PtrBuild = std::hash::BuildHasherDefault<PtrHasher>;
+pub(crate) type PtrMap<K, V> = std::collections::HashMap<K, V, PtrBuild>;
+pub(crate) type PtrSet<K> = std::collections::HashSet<K, PtrBuild>;

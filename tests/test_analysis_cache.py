@@ -92,3 +92,90 @@ def test_loop_captured_defaults_stay_per_branch():
             s.compile()
         s.emit(100)
         assert out == [100, 101, 102, 103, 104]
+
+
+def accumulate(func, *items):
+    s, out = akayu.Stream(), []
+    s.accumulate(func, 0).sink(out.append)
+    s.compile()
+    for x in items:
+        s.emit(x)
+    return out
+
+
+def test_module_globals_shadow_builtins():
+    """A module may define its own `len` or `max`; compile() must call it,
+    as Python does, not the builtin of that name."""
+    ns = {"len": lambda x: "mine", "max": lambda a, b: -1}
+    exec("f = lambda x: len(x)\ng = lambda acc, x: max(acc, x)", ns)
+    assert run(ns["f"], [1, 2]) == ["mine"]
+    assert accumulate(ns["g"], 5, 7) == [-1, -1]
+
+
+def test_replaced_builtins_are_not_the_real_ones():
+    ns = {"__builtins__": {"len": lambda x: "theirs"}}
+    exec("f = lambda x: len(x)", ns)
+    assert run(ns["f"], [1, 2]) == ["theirs"]
+
+
+def test_bound_methods_are_not_analysed_as_functions():
+    """A bound method's code takes `self` first: analysed as a plain function,
+    `self.factor` became the item's attribute."""
+
+    class Scaler:
+        factor = 10
+
+        def scale(self, x=3):
+            return self.factor
+
+        def total(self, acc, x=0):
+            return self.factor + acc
+
+    obj = Scaler()
+    assert run(obj.scale, 5) == [10]
+    assert accumulate(obj.total, 5, 6) == [10, 20]
+
+
+def test_accumulate_analysis_is_cached_per_binding():
+    def handler(fn):
+        return accumulate(fn, 3, 9, 4)
+
+    plain = {}
+    shadowed = {"max": lambda a, b: a - b}
+    for ns in (plain, shadowed, plain):
+        exec("f = lambda acc, x: max(acc, x)", ns)
+    assert handler(plain["f"]) == [3, 9, 9]
+    assert handler(shadowed["f"]) == [-3, -12, -16]
+
+
+def test_a_reassigned_code_object_is_analysed_again():
+    f = lambda x: x + 1  # noqa: E731
+    assert run(f, 1) == [2]
+    f.__code__ = (lambda x: x * 10).__code__
+    assert run(f, 1) == [10]
+
+
+def test_code_only_results_skip_the_python_analysis():
+    """A result that depends only on the code (no closure, default or global
+    value) is reused by compile() without calling the Python analyzer."""
+    import sys
+
+    def build():
+        s = akayu.Stream()
+        s.map(lambda x: x * 2 + 1).filter(lambda x: x % 3 == 0).accumulate(lambda a, x: a + x, 0).sink([].append)
+        return s
+
+    build().compile()
+    calls = []
+
+    def profile(frame, event, arg):
+        if event == "call":
+            calls.append(frame.f_code.co_name)
+
+    s = build()
+    sys.setprofile(profile)
+    try:
+        s.compile()
+    finally:
+        sys.setprofile(None)
+    assert not [c for c in calls if c.startswith("_analyze")], calls
