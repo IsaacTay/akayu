@@ -188,6 +188,10 @@ so no Python function call happens per item. Recognized shapes include:
 Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
 item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
 
+A method call on an item of a builtin type (`x.strip()` on a `str`, `x.get("k", 0)` on a `dict`)
+calls that type's C method directly: builtin types can't be changed, so `compile()` looks the
+method up once. Other items, including subclasses that may override it, look it up per call.
+
 Arithmetic and comparisons with numeric constants (`+ - * / // %` and `== != < > <= >=`) also
 run unboxed on ints and floats: an item is converted to a machine integer or float once, every
 such step in a row (`.map(lambda x: x * 2 + 1).filter(lambda x: x % 3 == 0)`) works on it

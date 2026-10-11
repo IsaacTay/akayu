@@ -9,7 +9,7 @@ use crate::Stream;
 use crate::helpers::{cached_vectorcall1, vectorcall1, vectorcall2, wrap_error};
 use crate::node::{
     BinaryOp, BuiltinOp, ChainNode, ChunkByState, CombineLatestState, ExtractBetweenState,
-    NodeLogic,
+    MethodCall, NodeLogic,
 };
 use crate::numeric::RunOutcome;
 use crate::pool::{self, Latch};
@@ -188,6 +188,36 @@ fn list_append(py: Python, list: &Py<PyAny>, x: &Py<PyAny>) -> PyResult<()> {
         return Err(PyErr::fetch(py));
     }
     Ok(())
+}
+
+/// `x.name(*args)`: an item of a builtin type compile() resolved the method
+/// for calls it directly, anything else looks it up by name.
+fn method_call(py: Python, call: &MethodCall, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let mut argv = [x.as_ptr(); 3];
+    for (slot, arg) in argv[1..].iter_mut().zip(&call.args) {
+        *slot = arg.as_ptr();
+    }
+    let nargs = 1 + call.args.len();
+    // SAFETY: GIL held; argv holds `x` and the call's live arguments; both
+    // calls return a new reference, or NULL with an exception set.
+    unsafe {
+        let tp = pyo3::ffi::Py_TYPE(x.as_ptr()).cast::<pyo3::ffi::PyObject>();
+        let result = match call.direct.iter().find(|(t, _)| t.as_ptr() == tp) {
+            Some((_, method)) => pyo3::ffi::PyObject_Vectorcall(
+                method.as_ptr(),
+                argv.as_ptr(),
+                nargs,
+                std::ptr::null_mut(),
+            ),
+            None => pyo3::ffi::PyObject_VectorcallMethod(
+                call.name.as_ptr(),
+                argv.as_ptr(),
+                nargs,
+                std::ptr::null_mut(),
+            ),
+        };
+        Bound::from_owned_ptr_or_err(py, result).map(Bound::unbind)
+    }
 }
 
 /// `func(*x)`. A tuple is passed through as the argument tuple; anything else
@@ -385,13 +415,7 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
             }
             Ok(PyBool::new(py, r == 0).to_owned().into_any().unbind())
         }
-        BuiltinOp::MethodCall(method_name) => Ok(x.bind(py).call_method0(method_name)?.unbind()),
-        BuiltinOp::MethodCall1(method_name, arg) => {
-            Ok(x.bind(py).call_method1(method_name, (arg,))?.unbind())
-        }
-        BuiltinOp::MethodCall2(method_name, arg1, arg2) => {
-            Ok(x.bind(py).call_method1(method_name, (arg1, arg2))?.unbind())
-        }
+        BuiltinOp::MethodCall(call) => method_call(py, call, x),
         BuiltinOp::Slice(start, stop) => unsafe {
             let slice = pyo3::ffi::PySlice_New(start.as_ptr(), stop.as_ptr(), std::ptr::null_mut());
             if slice.is_null() {
