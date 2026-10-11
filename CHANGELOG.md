@@ -51,8 +51,9 @@ independent of machine load:
 - `compile()` also optimizes lambdas with defaulted extra parameters, the `lambda x, k=k:`
   idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
 - `compile()` runs arithmetic and comparisons on ints and floats unboxed, keeping the item a
-  machine number across consecutive steps: 30-65% less per item for numeric map/filter
-  pipelines (ten `x + 1` maps: 5,100 -> 1,770 per item; in batches 3,580 -> 1,030).
+  machine number across consecutive steps: 28-75% less per item for numeric map/filter
+  pipelines, 64-86% in batches (ten `x + 1` maps: 5,100 -> 1,270 per item; in batches
+  3,580 -> 510).
 - Lambdas run natively without `compile()` when their native form depends only on their own
   code (`lambda x: x + 1`, `lambda x: x["k"]`, `lambda x: x.strip()`): 27-51% less per item
   in uncompiled pipelines. `def` functions and lambdas that read closure, default or global values
