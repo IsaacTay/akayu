@@ -407,7 +407,16 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<Arc<Built
                     .ok()
             });
         if let Some(name_str) = name {
-            return Some(Arc::new(BuiltinOp::AttrGetter(name_str.unbind())));
+            // attrgetter("a.b") follows the dots: one step per name.
+            let path = name_str.to_cow().ok()?;
+            let mut steps = path
+                .rsplit('.')
+                .map(|part| BuiltinOp::AttrGetter(PyString::intern(py, part).unbind()));
+            let last = steps.next()?;
+            let op = steps.fold(last, |rest, step| {
+                BuiltinOp::Chain(Box::new(step), Box::new(rest))
+            });
+            return Some(Arc::new(op));
         }
     }
     // Bytecode analysis is the caller's (once: it is a Python call).
@@ -597,13 +606,15 @@ pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Opti
     let bound = func.bind(py);
     // getattr_opt: plain functions have no __self__, and a raised-and-discarded
     // AttributeError per sink made this a large part of compile().
-    if let (Ok(Some(self_obj)), Ok(Some(func_obj))) = (
+    // Only an exact Stream's own (builtin) emit: a subclass may override
+    // emit(), and a Python function bound to a stream has a __func__.
+    if let (Ok(Some(self_obj)), Ok(None)) = (
         bound.getattr_opt(pyo3::intern!(py, "__self__")),
         bound.getattr_opt(pyo3::intern!(py, "__func__")),
-    ) && let Ok(name) = func_obj.getattr("__name__")
+    ) && let Ok(name) = bound.getattr(pyo3::intern!(py, "__name__"))
         && let Ok(name_str) = name.extract::<String>()
         && name_str == "emit"
-        && self_obj.is_instance_of::<Stream>()
+        && self_obj.is_exact_instance_of::<Stream>()
         && let Ok(target) = self_obj.extract::<Py<Stream>>()
     {
         // Verify target is a Source node
@@ -630,7 +641,8 @@ pub(crate) fn detect_emit_target_from_func(py: Python, func: &Py<PyAny>) -> Opti
         return None;
     }
     let obj = tuple.get_item(1).ok()?;
-    if !obj.is_instance_of::<Stream>() {
+    // A subclass may override emit().
+    if !obj.is_exact_instance_of::<Stream>() {
         return None;
     }
     let target: Py<Stream> = obj.extract().ok()?;
@@ -652,7 +664,8 @@ unsafe fn extract_vectorcall(
 ) -> Option<pyo3::ffi::vectorcallfunc> {
     unsafe {
         let tp = pyo3::ffi::Py_TYPE(callable);
-        if (*tp).tp_flags & pyo3::ffi::Py_TPFLAGS_HAVE_VECTORCALL == 0 {
+        // PyType_GetFlags, not the field: free-threaded builds make it atomic.
+        if pyo3::ffi::PyType_GetFlags(tp) & pyo3::ffi::Py_TPFLAGS_HAVE_VECTORCALL == 0 {
             return None;
         }
         let offset = (*tp).tp_vectorcall_offset;

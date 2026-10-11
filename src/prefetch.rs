@@ -19,7 +19,8 @@ pub(crate) enum PrefetchKind {
     Map,
     /// Keep the item when the predicate is true.
     Filter,
-    /// Call the function with a one-item list; every result goes on.
+    /// Call the function with a list: one item's, or a whole emit_batch()'s,
+    /// as batch_map() without prefetch() does. Every result goes on.
     BatchMap,
 }
 
@@ -59,6 +60,13 @@ impl Prefetcher {
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
         let mut out = Vec::new();
+        if matches!(self.kind, PrefetchKind::BatchMap) {
+            if !items.is_empty() {
+                let batch = PyList::new(py, items)?.into_any().unbind();
+                self.submit(py, batch, &mut out)?;
+            }
+            return Ok(out);
+        }
         for item in items {
             self.push(py, item, &mut out)?;
         }
@@ -80,12 +88,22 @@ impl Prefetcher {
     }
 
     fn push(&mut self, py: Python, item: Py<PyAny>, out: &mut Vec<Py<PyAny>>) -> PyResult<()> {
+        let arg = if matches!(self.kind, PrefetchKind::BatchMap) {
+            PyList::new(py, [item])?.into_any().unbind()
+        } else {
+            item
+        };
+        self.submit(py, arg, out)
+    }
+
+    /// Start the function on `arg` (an item, or a list for a batch function).
+    fn submit(&mut self, py: Python, arg: Py<PyAny>, out: &mut Vec<Py<PyAny>>) -> PyResult<()> {
         let slot = Slot::new();
         let (job_slot, func, kind) = (Arc::clone(&slot), self.func.clone_ref(py), self.kind);
         let ctx = pool::copy_context(py)?;
         let task = pool::submit(Box::new(move |py| {
             let result = pool::catch_panic(|| {
-                pool::run_in_context(py, &ctx, || apply(py, kind, &func, item))
+                pool::run_in_context(py, &ctx, || apply(py, kind, &func, arg))
             });
             job_slot.set(result);
         }));
@@ -117,8 +135,7 @@ fn apply(py: Python, kind: PrefetchKind, func: &Py<PyAny>, item: Py<PyAny>) -> P
             })
         }
         PrefetchKind::BatchMap => {
-            let batch = PyList::new(py, [item])?.into_any().unbind();
-            let results = vectorcall1(py, func, &batch)?;
+            let results = vectorcall1(py, func, &item)?;
             results
                 .bind(py)
                 .try_iter()?

@@ -657,6 +657,10 @@ def _analyze_postfix(instrs, func):
     """
     if len(instrs) >= 3 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[2] == ("CALL", 1):
         head = _analyze_simple(instrs[:3], func)  # len(x), str(x), ...
+        if head is None:
+            # A call that doesn't resolve (abs(x) from builtins) can't be
+            # left out: the steps after it apply to its result.
+            return None
         pos = 3
     elif instrs and instrs[0][0] == "LOAD_FAST":
         head, pos = None, 1
@@ -912,7 +916,12 @@ def _analyze_accumulate_code(func, code, ctx):
 
 def _reject_async(func, op):
     """Raise TypeError for async callables: akayu never awaits coroutines."""
-    if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
+    call = type(func).__call__ if callable(func) else None  # an object with async def __call__
+    if (
+        inspect.iscoroutinefunction(func)
+        or inspect.isasyncgenfunction(func)
+        or (not inspect.isroutine(func) and (inspect.iscoroutinefunction(call) or inspect.isasyncgenfunction(call)))
+    ):
         name = getattr(func, "__qualname__", None) or repr(func)
         raise TypeError(
             f"{op}() got async function {name!r}, but akayu does not run coroutines. "

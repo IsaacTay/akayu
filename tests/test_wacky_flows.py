@@ -3,6 +3,7 @@ silently lose data. Each test pins the behaviour it was fixed to; the ones
 that used to crash the interpreter run in a subprocess.
 """
 
+import operator
 import subprocess
 import sys
 import textwrap
@@ -662,3 +663,138 @@ def test_a_failing_truth_test_names_the_filter(compiled):
     with pytest.raises(RuntimeError, match="filter") as info:
         s.emit(item)
     assert isinstance(info.value.__cause__, ValueError)
+
+
+# --- Round 3: odd callables, API misuse, environments ---
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+@pytest.mark.parametrize(
+    ("src", "item"),
+    [("abs(x) + 1 + 2", -5), ("repr(x)[0][:2]", "ab"), ("sorted(x)[0][1]", [[3, 4], [1, 2]])],
+)
+def test_a_call_the_optimizer_cant_resolve_still_heads_the_chain(src, item, compiled):
+    # abs/repr/sorted aren't builtins compile() knows: the steps after them
+    # were run on the item itself.
+    f = eval(f"lambda x: {src}")
+    s, out = akayu.Stream(), []
+    s.map(f).sink(out.append)
+    if compiled:
+        s.compile()
+    s.emit(item)
+    assert out == [f(item)]
+
+
+@pytest.mark.parametrize("form", ["bound", "lambda"])
+def test_a_subclass_emit_override_runs_when_compiled(form):
+    class Scaled(akayu.Stream):
+        def emit(self, x):
+            super().emit(x * 10)
+
+    source, target, out = akayu.Stream(), Scaled(), []
+    target.sink(out.append)
+    source.sink(target.emit if form == "bound" else (lambda x: target.emit(x)))
+    source.compile()
+    source.emit(2)
+    assert out == [20]
+
+
+def test_a_dotted_attrgetter_compiled():
+    s, out = akayu.Stream(), []
+    s.map(operator.attrgetter("real.imag")).sink(out.append)
+    s.compile()
+    s.emit(3 + 4j)
+    assert out == [0.0]
+
+
+@pytest.mark.parametrize("sl", [slice(None, -1), slice(-2, None), slice(None, None, -1), slice(-1, None)])
+def test_keyed_multistream_slices_keep_their_keys(sl):
+    streams = {"a": akayu.Stream(), "b": akayu.Stream(), "c": akayu.Stream()}
+    sub = akayu.MultiStream(streams)[sl]
+    assert list(sub.keys()) == list(streams)[sl]
+    assert list(sub) == list(streams.values())[sl]
+
+
+@pytest.mark.parametrize("bad", ["foreign", "empty", "mixed"])
+def test_combine_latest_emit_on_must_name_an_input(bad):
+    a, b, other = akayu.Stream(), akayu.Stream(), akayu.Stream()
+    emit_on = {"foreign": other, "empty": [], "mixed": [a, other]}[bad]
+    with pytest.raises(ValueError, match="emit_on"):
+        akayu.combine_latest(a, b, emit_on=emit_on)
+    with pytest.raises(ValueError, match="emit_on"):
+        a.combine_latest(b, emit_on=emit_on)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_prefetched_batch_map_takes_the_whole_batch(compiled):
+    s, out = akayu.Stream(), []
+    s.prefetch(2).batch_map(lambda batch: [len(batch)]).sink(out.append)
+    if compiled:
+        s.compile()
+    s.emit_batch([1, 2, 3])
+    s.emit(4)
+    s.flush()
+    assert out == [3, 1]  # as batch_map() without prefetch()
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_returns_state_errors_name_the_node(compiled):
+    s = akayu.Stream()
+    s.accumulate(lambda acc, x: acc + x, 0, returns_state=True).sink(lambda x: None)
+    if compiled:
+        s.compile()
+    with pytest.raises(RuntimeError, match="accumulate") as info:
+        s.emit(1)
+    assert isinstance(info.value.__cause__, TypeError)
+    assert "(state, output)" in str(info.value.__cause__)
+
+
+def test_a_huge_prefetch_size_is_a_value_error():
+    with pytest.raises(ValueError, match="at least 1"):
+        akayu.Stream().prefetch(2**64)
+
+
+def test_an_object_with_async_call_is_refused():
+    class Fetcher:
+        async def __call__(self, x):
+            return x
+
+    with pytest.raises(TypeError, match="does not run coroutines"):
+        akayu.Stream().map(Fetcher())
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_chunk_by_flushed_from_its_own_sink(compiled):
+    # Compiled, the flush ran on the chunk_by while it was mid-update.
+    s, out = akayu.Stream(), []
+    c = s.map(lambda x: x).chunk_by(lambda x: x % 3 == 0)
+
+    def sink(chunk):
+        out.append(chunk)
+        try:
+            c.flush()
+        except RuntimeError as e:
+            out.append("refused" if "still processing" in str(innermost(e)) else str(e))
+
+    c.sink(sink)
+    if compiled:
+        s.compile()
+    for i in range(1, 7):
+        s.emit(i)
+    assert out == [(1, 2), "refused", (4, 5), "refused"]
+
+
+def test_import_without_package_metadata():
+    code, last = run_script("""
+        import importlib.metadata as md
+        def missing(name):
+            raise md.PackageNotFoundError(name)
+        md.version = missing
+        import akayu
+        print(akayu.__version__)
+    """)
+    assert (code, last) == (0, "unknown")
+
+
+def test_the_stream_type_names_its_module():
+    assert akayu.Stream.__module__ == "akayu"

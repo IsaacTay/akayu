@@ -17,8 +17,8 @@ pub enum StreamError {
     #[error("Stream '{0}' is already compiled")]
     AlreadyCompiled(String),
 
-    #[error("prefetch size must be at least 1, got {0}")]
-    InvalidPrefetchSize(i64),
+    #[error("prefetch size must be at least 1, and fit in a machine word; got {0}")]
+    InvalidPrefetchSize(String),
 
     #[error("union() requires at least one stream, got {0}")]
     UnionEmpty(usize),
@@ -46,7 +46,8 @@ pub enum StreamError {
 
     #[error(
         "Can't change the graph at a node that is processing an item: a callback is adding \
-         to the graph (or compiling it) mid-emit. Build the graph before emitting."
+         to the graph (or compiling it) mid-emit, or another thread is emitting through it. \
+         Build the graph before emitting."
     )]
     BusyNode,
 

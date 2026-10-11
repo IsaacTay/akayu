@@ -1,6 +1,7 @@
 import builtins as _builtins
 import threading as _threading
 import time as _time
+from importlib.metadata import PackageNotFoundError as _PackageNotFoundError
 from importlib.metadata import version as _version
 from pathlib import Path as _Path
 
@@ -21,7 +22,10 @@ from akayu.akayu import (
 
 Stream = _Stream
 
-__version__ = _version("akayu")
+try:
+    __version__ = _version("akayu")
+except _PackageNotFoundError:  # no package metadata: vendored, zipapp, PyInstaller
+    __version__ = "unknown"
 
 _UNSUPPORTED = frozenset(
     {
@@ -164,11 +168,8 @@ class MultiStream:
         result = self._streams[key]
         if isinstance(result, list):
             if self._keys is not None:
-                start = key.start if key.start is not None else 0
-                stop = key.stop if key.stop is not None else len(self._streams)
-                step = key.step if key.step is not None else 1
-                indices = list(range(start, stop, step))
-                sub_keys = tuple(self._keys[i] for i in indices)
+                # The same slice of the keys: negative and reversed slices too.
+                sub_keys = self._keys[key]
                 ms = MultiStream.__new__(MultiStream)
                 ms._streams = result
                 ms._keys = sub_keys

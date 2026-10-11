@@ -406,7 +406,9 @@ class Stream:
         """Start collecting profiling data for subsequent emit() calls.
 
         Call `stop_profiling()` to end the session and retrieve the report.
-        Profiling adds minimal overhead (~80ns per node per item).
+        Profiling adds minimal overhead (~80ns per node per item). It records
+        the emits of the thread that started it; emits from other threads
+        meanwhile are not counted.
 
         Raises:
             RuntimeError: If called on a non-source node or if profiling is already active.
@@ -430,7 +432,8 @@ class Stream:
             >>> print(p.report)
 
         Returns:
-            A context manager that profiles all emits within the block.
+            A context manager that profiles all emits within the block made
+            by the thread that entered it.
         """
         ...
 
@@ -582,7 +585,9 @@ class Stream:
         """Zip multiple streams together element-by-element.
 
         Emits tuples containing one element from each stream. Waits until
-        all streams have an element available before emitting.
+        all streams have an element available before emitting. Items wait in
+        an unbounded buffer: an input that runs ahead of the others keeps
+        its items in memory until they are paired.
 
         Args:
             *others: Other streams to zip with this one.

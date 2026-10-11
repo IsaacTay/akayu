@@ -315,6 +315,15 @@ are dropped.
 - `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` raised in a callback reach the caller as
   they are; any other exception is wrapped in a `RuntimeError` naming the node, with the original
   as its `__cause__`.
+- Locks belong to OS threads. Greenlets (gevent, eventlet) share one, so a greenlet emitting into
+  a source that another greenlet is mid-emit in looks like a re-entrant emit and raises. Give each
+  source a greenlet lock, or emit from one greenlet.
+- After `os.fork()`, a graph inherited from the parent is safe to use only if no other parent
+  thread was emitting into it at the time: a lock that thread held stays held in the child. Graphs
+  built in the child are always fine.
+- Free-threaded Python (3.13t, 3.14t): akayu declares that it needs the GIL, so importing it turns
+  the GIL back on (with a warning). On 3.13t, daemon threads still emitting when the interpreter
+  exits can abort the process; join them first, or use 3.14t.
 
 ### Performance Characteristics
 
@@ -336,7 +345,9 @@ Benchmark showing minimal overhead when combining:
 - Each `par()` branch and each prefetched call runs in a copy of the calling thread's `contextvars` context: values set before `emit()` are visible, and changes made inside don't leak back.
 - The last `par()` branch runs on the calling thread. A thread waiting for its branches or prefetched items runs any of them that no worker has started yet, so nesting `par()` deeper than the pool can't deadlock.
 - `par()` waits for every branch, then raises the error of the first failing branch (in the order the branches were added). A failed prefetched item raises once, from the `emit()` or `flush()` that reaches it; later items carry on.
-- Ctrl+C interrupts a thread that is waiting for branches or prefetched items.
+- Ctrl+C interrupts a thread that is waiting for branches or prefetched items. An `emit()`
+  interrupted while waiting for a prefetched result has already started its item: the next
+  `flush()` delivers it, so retrying the `emit()` would deliver it twice.
 
 ```python
 import contextvars

@@ -219,42 +219,10 @@ impl Stream {
         let source_location = capture_source_location(py);
         let total_sources = 1 + others.len();
 
-        let slf_ptr = slf.as_ptr();
-        let find_stream_index = |stream: &Py<Self>| -> Option<usize> {
-            if stream.as_ptr() == slf_ptr {
-                return Some(0);
-            }
-            for (i, other) in others.iter().enumerate() {
-                if stream.as_ptr() == other.as_ptr() {
-                    return Some(i + 1);
-                }
-            }
-            None
-        };
-
-        let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
-            let mut indices = Vec::new();
-
-            if let Ok(single_stream) = emit_on_obj.extract::<Py<Self>>(py) {
-                if let Some(idx) = find_stream_index(&single_stream) {
-                    indices.push(idx);
-                }
-            } else if let Ok(stream_list) = emit_on_obj.extract::<Vec<Py<Self>>>(py) {
-                for stream in &stream_list {
-                    if let Some(idx) = find_stream_index(stream) {
-                        indices.push(idx);
-                    }
-                }
-            } else {
-                return Err(pyo3::exceptions::PyTypeError::new_err(
-                    "emit_on must be a Stream or list of Streams",
-                ));
-            }
-
-            indices
-        } else {
-            Vec::new()
-        };
+        let inputs: Vec<_> = std::iter::once(slf.as_ptr())
+            .chain(others.iter().map(Py::as_ptr))
+            .collect();
+        let emit_on_indices = emit_on_positions(py, emit_on, &inputs)?;
 
         let node = Self::make_node(
             py,
@@ -303,7 +271,9 @@ impl Stream {
     /// Zip multiple streams together element-by-element.
     ///
     /// Emits tuples containing one element from each stream. Waits until
-    /// all streams have an element available before emitting.
+    /// all streams have an element available before emitting. Items wait in
+    /// an unbounded buffer: an input that runs ahead of the others keeps
+    /// its items in memory until they are paired.
     ///
     /// # Arguments
     ///
@@ -323,8 +293,9 @@ impl Stream {
     /// result = []
     /// zipped.sink(result.append)
     /// s1.emit(1)
-    /// s1.emit(2)  # waiting for s2...
-    /// s2.emit('a') # result contains [(1, 'a'), (2, 'a')]
+    /// s1.emit(2)   # waiting for s2...
+    /// s2.emit('a') # result contains [(1, 'a')]
+    /// s2.emit('b') # result contains [(1, 'a'), (2, 'b')]
     /// ```
     ///
     /// # Raises
@@ -542,35 +513,8 @@ pub fn combine_latest(
 
     let source_location = capture_source_location(py);
 
-    let emit_on_indices: Vec<usize> = if let Some(emit_on_obj) = emit_on {
-        let mut indices = Vec::new();
-
-        if let Ok(single_stream) = emit_on_obj.extract::<Py<Stream>>(py) {
-            for (i, s) in streams.iter().enumerate() {
-                if single_stream.as_ptr() == s.as_ptr() {
-                    indices.push(i);
-                    break;
-                }
-            }
-        } else if let Ok(stream_list) = emit_on_obj.extract::<Vec<Py<Stream>>>(py) {
-            for stream in &stream_list {
-                for (i, s) in streams.iter().enumerate() {
-                    if stream.as_ptr() == s.as_ptr() {
-                        indices.push(i);
-                        break;
-                    }
-                }
-            }
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "emit_on must be a Stream or list of Streams",
-            ));
-        }
-
-        indices
-    } else {
-        Vec::new()
-    };
+    let inputs: Vec<_> = streams.iter().map(Py::as_ptr).collect();
+    let emit_on_indices = emit_on_positions(py, emit_on, &inputs)?;
 
     let total_sources = streams.len();
     let node = Stream::make_node(
@@ -598,7 +542,8 @@ pub fn combine_latest(
 ///
 /// Creates a new stream that waits for one item from each input stream,
 /// then emits them as a tuple. Buffers items until all streams have
-/// contributed one value.
+/// contributed one value; the buffer is unbounded, so an input that runs
+/// ahead of the others keeps its items in memory until they are paired.
 ///
 /// # Arguments
 ///
@@ -672,4 +617,45 @@ pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     }
 
     Ok(node)
+}
+
+/// The positions among `inputs` of the streams `emit_on` names: a stream or
+/// a list of streams, each one of the inputs. None names no stream: emit on
+/// every input.
+fn emit_on_positions(
+    py: Python,
+    emit_on: Option<Py<PyAny>>,
+    inputs: &[*mut pyo3::ffi::PyObject],
+) -> PyResult<Vec<usize>> {
+    let Some(emit_on) = emit_on else {
+        return Ok(Vec::new());
+    };
+    let streams: Vec<Py<Stream>> = if let Ok(one) = emit_on.extract::<Py<Stream>>(py) {
+        vec![one]
+    } else if let Ok(list) = emit_on.extract::<Vec<Py<Stream>>>(py) {
+        list
+    } else {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "emit_on must be a Stream or list of Streams",
+        ));
+    };
+    if streams.is_empty() {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "emit_on is empty: name the inputs that trigger output, or leave it out to emit \
+             on every input",
+        ));
+    }
+    streams
+        .iter()
+        .map(|stream| {
+            inputs
+                .iter()
+                .position(|input| *input == stream.as_ptr())
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(
+                        "emit_on names a stream that isn't one of combine_latest()'s inputs",
+                    )
+                })
+        })
+        .collect()
 }
