@@ -188,6 +188,14 @@ so no Python function call happens per item. Recognized shapes include:
 Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
 item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
 
+Arithmetic and comparisons with numeric constants (`+ - * / // %` and `== != < > <= >=`) also
+run unboxed on ints and floats: an item is converted to a machine integer or float once, every
+such step in a row (`.map(lambda x: x * 2 + 1).filter(lambda x: x % 3 == 0)`) works on it
+without allocating a Python number, and the result is converted back once. Results are exactly
+Python's; whatever the machine version can't do identically (bools, integers beyond 64 bits or
+overflowing them, division by zero, `**`, float `//` and `%`, int/float mixes beyond 2\*\*53)
+takes the ordinary path for that item.
+
 ## Proven Fast Paths
 
 Some checks are only needed when the graph could be used in a way `compile()` can rule out:

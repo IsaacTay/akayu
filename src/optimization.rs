@@ -410,8 +410,10 @@ impl Stream {
                 cached_vectorcall,
                 flush_target,
                 emit_target,
+                numeric_run: None,
             });
         }
+        annotate_numeric_runs(py, &mut steps);
 
         // Set head node's logic to Chain, downstreams to tail's downstreams,
         // and name it after its steps.
@@ -680,6 +682,7 @@ impl Stream {
                     cached_vectorcall,
                     flush_target,
                     emit_target,
+                    numeric_run: None,
                 });
             }
 
@@ -806,5 +809,32 @@ fn native_step(logic: &NodeLogic, op: Option<&BuiltinOp>, lists: &mut HashSet<us
         ) => true,
         (NodeLogic::Sink { .. }, Some(ListAppend(list))) => lists.insert(list.as_ptr() as usize),
         _ => false,
+    }
+}
+
+/// Mark runs of consecutive numeric map/filter steps in a fused chain, so they
+/// execute together on unboxed values.
+fn annotate_numeric_runs(py: Python, steps: &mut [ChainNode]) {
+    let mut i = 0;
+    while i < steps.len() {
+        let candidates = steps[i..].iter().map_while(|step| {
+            if step.flush_target.is_some() || step.emit_target.is_some() {
+                return None;
+            }
+            let is_filter = match step.logic {
+                NodeLogic::Map { .. } => false,
+                NodeLogic::Filter { .. } => true,
+                _ => return None,
+            };
+            Some((is_filter, step.builtin_op.as_deref()?))
+        });
+        match crate::numeric::NumRun::from_steps(py, candidates) {
+            Some(run) => {
+                let len = run.len();
+                steps[i].numeric_run = Some(Box::new(run));
+                i += len;
+            }
+            None => i += 1,
+        }
     }
 }

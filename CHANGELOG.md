@@ -50,6 +50,9 @@ independent of machine load:
   20-34% less per item for pipelines that use them.
 - `compile()` also optimizes lambdas with defaulted extra parameters, the `lambda x, k=k:`
   idiom for capturing a loop variable (a fan-out built in a loop: 21% faster).
+- `compile()` runs arithmetic and comparisons on ints and floats unboxed, keeping the item a
+  machine number across consecutive steps: 30-65% less per item for numeric map/filter
+  pipelines (ten `x + 1` maps: 5,100 -> 1,770 per item; in batches 3,580 -> 1,030).
 - `compile()` runs common accumulate functions natively: `acc + x`, `acc + 1` (any binary
   operator), `max(acc, x)`, `min(acc, x)`: 27% less per item, 50% less in batches.
 - `compile()` turns `sink(lst.append)` on a list into a direct append (2-5% per item), and when
