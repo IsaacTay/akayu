@@ -2,6 +2,7 @@ import builtins as _builtins
 import dis
 import inspect
 import weakref
+from types import FunctionType as _FunctionType
 
 _NOISE_OPCODES = frozenset(
     {
@@ -124,6 +125,8 @@ _KNOWN_BUILTINS = {
     "list": _builtins.list,
     "set": _builtins.set,
     "frozenset": _builtins.frozenset,
+    "max": _builtins.max,
+    "min": _builtins.min,
 }
 
 _UNRESOLVABLE = object()  # sentinel
@@ -148,7 +151,9 @@ def _resolve_value(instr, ctx):
     """Resolve a value from an instruction + the function under analysis,
     recording it as a dependency of the result."""
     value = _resolve(instr, ctx.func)
-    ctx.deps.append((instr, value))
+    # A constant is part of the code object: the same for every function.
+    if instr[0] != "LOAD_CONST":
+        ctx.deps.append((instr, value))
     return value
 
 
@@ -190,14 +195,18 @@ def _resolve(instr, func):
                     return _UNRESOLVABLE
         return _UNRESOLVABLE
     if op == "LOAD_GLOBAL":
+        # As the function sees the name: its module's globals first (a module
+        # may define its own `len`), then its builtins, of which only the
+        # known ones resolve.
         name = instr[1]
-        if name in _KNOWN_BUILTINS:
-            return _KNOWN_BUILTINS[name]
-        # Try resolving from func's globals for non-builtins (arbitrary callables)
         globs = getattr(func, "__globals__", None)
         if globs is not None and name in globs:
             return globs[name]
-        return _UNRESOLVABLE
+        known = _KNOWN_BUILTINS.get(name, _UNRESOLVABLE)
+        builtins = getattr(func, "__builtins__", None)
+        if isinstance(builtins, dict) and builtins.get(name) is not known:
+            return _UNRESOLVABLE
+        return known
     return _UNRESOLVABLE
 
 
@@ -638,14 +647,16 @@ _CO_ASYNC_GENERATOR = 0x200
 _CO_VARARGS = 0x04
 _CO_VARKEYWORDS = 0x08
 
-# _analyze_lambda results by code object, each with the values the analysis
-# resolved from closures and globals. Another function with the same code (a
+# _analyze_lambda results by code object (_analyze_accumulate's are in
+# _accumulate_cache), each with the values the analysis resolved from closures,
+# defaults and globals. Another function with the same code (a
 # request handler's fresh lambdas) reuses a result only if those resolve to the
 # very same objects. Keyed by id(code) for speed (a WeakKeyDictionary hashes and
 # compares code objects by value); each entry holds a weak reference that must
 # still point at the same code, since a freed object's id can be reused, and
 # whose callback removes the entry when the code dies.
 _analysis_cache = {}
+_accumulate_cache = {}
 # Results kept per code object: a closure over per-call values (a threshold, a
 # lookup table) adds one per distinct binding, so the oldest are dropped.
 _MAX_RESULTS_PER_CODE = 8
@@ -671,10 +682,11 @@ def _analyze_lambda(func):
       ("and", left_tuple, right_tuple), ("or", left_tuple, right_tuple),
       ("unwrap", resolved_callable)
     """
-    # Only plain Python functions carry bytecode to analyze
-    code = getattr(func, "__code__", None)
-    if code is None:
+    # Only plain Python functions: a bound method's code also has __code__,
+    # but its first parameter is `self`, not the item.
+    if type(func) is not _FunctionType:
         return None
+    code = func.__code__
     results = _cached_results(code)
     for deps, result in results:
         if _bindings_match(deps, func):
@@ -686,13 +698,28 @@ def _analyze_lambda(func):
     return result
 
 
-def _cached_results(code):
+def _analyze_for_compile(func, accumulate):
+    """compile()'s analysis of a plain function: (result, code_only).
+
+    code_only: the result depends on nothing but func.__code__ (no closure,
+    default or global value was read), so compile() reuses it for every
+    function with that code without calling here again.
+    """
+    if accumulate:
+        result, cache = _analyze_accumulate(func), _accumulate_cache
+    else:
+        result, cache = _analyze_lambda(func), _analysis_cache
+    entries = _cached_results(func.__code__, cache)
+    return result, any(not deps and r is result for deps, r in entries)
+
+
+def _cached_results(code, cache=_analysis_cache):
     """The cached (deps, result) list for `code`, created empty if needed."""
     key = id(code)
-    entry = _analysis_cache.get(key)
+    entry = cache.get(key)
     if entry is None or entry[0]() is not code:
-        entry = (weakref.ref(code, lambda _, key=key: _analysis_cache.pop(key, None)), [])
-        _analysis_cache[key] = entry
+        entry = (weakref.ref(code, lambda _, key=key: cache.pop(key, None)), [])
+        cache[key] = entry
     return entry[1]
 
 
@@ -771,10 +798,25 @@ def _analyze_accumulate(func):
     Returns ("acc_binop", op) for `acc <op> x`, ("acc_binop_const", op, value)
     for `acc <op> value`, ("acc_max",) / ("acc_min",) for `max(acc, x)` /
     `min(acc, x)`, or None. Like the map/filter analysis this runs at compile()
-    time and snapshots closure and global values.
+    time, snapshots closure and global values, and is cached per code object.
     """
-    code = getattr(func, "__code__", None)
-    if code is None or code.co_argcount != 2 or code.co_kwonlyargcount:
+    if type(func) is not _FunctionType:
+        return None
+    code = func.__code__
+    results = _cached_results(code, _accumulate_cache)
+    for deps, result in results:
+        if _bindings_match(deps, func):
+            return result
+    ctx = _Bindings(func)
+    result = _analyze_accumulate_code(func, code, ctx)
+    results.append((tuple(ctx.deps), result))
+    del results[:-_MAX_RESULTS_PER_CODE]
+    return result
+
+
+def _analyze_accumulate_code(func, code, ctx):
+    """Uncached body of _analyze_accumulate."""
+    if code.co_argcount != 2 or code.co_kwonlyargcount:
         return None
     if code.co_flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
         return None
@@ -796,15 +838,14 @@ def _analyze_accumulate(func):
             return ("acc_binop", instrs[2][1])
         return None
     if ops[0::2] == ["LOAD_FAST", "BINARY_OP"] and len(ops) == 3 and instrs[0][1] == acc:
-        value = _resolve(instrs[1], func)
+        value = _resolve_value(instrs[1], ctx)
         if value is not _UNRESOLVABLE and instrs[2][1] in _ACCUMULATE_OPS:
             return ("acc_binop_const", instrs[2][1], value)
         return None
     if ops == ["LOAD_GLOBAL", "LOAD_FAST", "LOAD_FAST", "CALL"] and instrs[3][1] == 2:
         if (instrs[1][1], instrs[2][1]) != (acc, item):
             return None
-        # The global as the function sees it: its module first, then builtins.
-        fn = func.__globals__.get(instrs[0][1], getattr(_builtins, instrs[0][1], None))
+        fn = _resolve_value(instrs[0], ctx)
         if fn is _builtins.max:
             return ("acc_max",)
         if fn is _builtins.min:

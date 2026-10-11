@@ -1,17 +1,16 @@
 //! Builtin callable analysis and fast-path detection.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyString, PyTuple};
-use std::collections::HashMap;
+use pyo3::types::{PyString, PyTuple, PyWeakrefMethods, PyWeakrefReference};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use crate::Stream;
 use crate::helpers::{
-    get_analyze_accumulate, get_analyze_lambda, get_builtin_bool, get_builtin_float,
-    get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
-    get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
-    get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
-    get_operator_itemgetter, get_operator_not, get_operator_truth,
+    get_analyze_for_compile, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
+    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list, get_builtin_print,
+    get_builtin_set, get_builtin_str, get_builtin_tuple, get_builtin_type, get_operator_attrgetter,
+    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
+    get_operator_truth,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, NodeLogic};
 
@@ -161,15 +160,67 @@ fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp>
     }
 }
 
-/// Run `_analyze_lambda()` on a callable's bytecode. Builtins have none, so
-/// they skip the Python call (`sink(out.append)` is the common sink).
+/// Run `_analyze_lambda()` on a plain function's bytecode.
 fn analyze_bytecode(py: Python, func: &Py<PyAny>) -> Option<Py<PyAny>> {
-    // SAFETY: GIL held; a type check on a live object.
-    if unsafe { pyo3::ffi::PyCFunction_Check(func.as_ptr()) } != 0 {
-        return None;
+    analyze_function(py, func, false)
+}
+
+/// compile()'s analysis results that depend only on a function's code object
+/// (no closure, default or global value), by (code, accumulate): reused for
+/// every function with that code without calling into Python. Entries hold a
+/// weak reference to their code, so the code still dies with its functions,
+/// and a dead one means its address may belong to another object now.
+type CodeOnly = crate::helpers::PtrMap<(usize, bool), (Py<PyWeakrefReference>, Option<Py<PyAny>>)>;
+static CODE_ONLY: LazyLock<Mutex<CodeOnly>> = LazyLock::new(Mutex::default);
+/// Beyond this many live code objects, results are no longer cached here.
+const CODE_ONLY_MAX: usize = 1024;
+
+/// `_analyze_lambda(func)` (or `_analyze_accumulate` with `accumulate`) for a
+/// plain Python function. None for anything else: builtins have no bytecode,
+/// and a bound method's code takes `self` first, not the item.
+fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py<PyAny>> {
+    // SAFETY: GIL held; a type check, then a borrowed field of a live
+    // function, made a strong reference before any Python code runs.
+    let code = unsafe {
+        if pyo3::ffi::PyFunction_Check(func.as_ptr()) == 0 {
+            return None;
+        }
+        Bound::from_borrowed_ptr(py, pyo3::ffi::PyFunction_GetCode(func.as_ptr()))
+    };
+    let key = (code.as_ptr() as usize, accumulate);
+    if let Some((weak, result)) = CODE_ONLY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        && weak.bind(py).upgrade().is_some()
+    {
+        return result.as_ref().map(|r| r.clone_ref(py));
     }
-    let result = get_analyze_lambda().ok()?.call1(py, (func,)).ok()?;
-    (!result.is_none(py)).then_some(result)
+    let answer = get_analyze_for_compile()
+        .ok()?
+        .call1(py, (func, accumulate))
+        .ok()?;
+    let (result, code_only): (Py<PyAny>, bool) = answer.extract(py).ok()?;
+    let result = (!result.is_none(py)).then_some(result);
+    if code_only && let Ok(weak) = PyWeakrefReference::new(&code) {
+        let entry = (weak.unbind(), result.as_ref().map(|r| r.clone_ref(py)));
+        let freed = {
+            let mut cache = CODE_ONLY.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut dead = CodeOnly::default();
+            if cache.len() >= CODE_ONLY_MAX / 4 {
+                let live;
+                (live, dead) = std::mem::take(&mut *cache)
+                    .into_iter()
+                    .partition(|(_, (weak, _))| weak.bind(py).upgrade().is_some());
+                *cache = live;
+            }
+            let replaced = (cache.len() < CODE_ONLY_MAX).then(|| cache.insert(key, entry));
+            (dead, replaced)
+        };
+        // Freed outside the lock: freeing can run Python code.
+        drop(freed);
+    }
+    result
 }
 
 /// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.
@@ -183,7 +234,7 @@ fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp
 /// share one immutable op tree instead of allocating their own. Entries hold
 /// their result, so a key can't be reused by another object; entries only
 /// this table still references are dropped when it grows.
-type ParsedOps = HashMap<usize, (Py<PyAny>, Arc<BuiltinOp>)>;
+type ParsedOps = crate::helpers::PtrMap<usize, (Py<PyAny>, Arc<BuiltinOp>)>;
 static PARSED: LazyLock<Mutex<ParsedOps>> = LazyLock::new(Mutex::default);
 
 fn parse_cached(py: Python, result: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
@@ -266,8 +317,8 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<Arc<Built
             return Some(Arc::new(BuiltinOp::AttrGetter(name_str.unbind())));
         }
     }
-    // Fallback: analyze lambda bytecode
-    analyze_lambda_fallback(py, func)
+    // Bytecode analysis is the caller's (once: it is a Python call).
+    None
 }
 
 /// Detect builtin fast-path for a Map function, also handling `("unwrap", callable)`.
@@ -368,11 +419,7 @@ pub(crate) fn detect_builtin_for_logic(
 /// Native form of an accumulate function: `acc <op> x`, `acc <op> const`,
 /// `max(acc, x)` or `min(acc, x)` (see `_analyze_accumulate`).
 fn detect_accumulate_builtin(py: Python, func: &Py<PyAny>) -> Option<BuiltinOp> {
-    // SAFETY: GIL held; a type check on a live object.
-    if unsafe { pyo3::ffi::PyFunction_Check(func.as_ptr()) } == 0 {
-        return None;
-    }
-    let result = get_analyze_accumulate().ok()?.call1(py, (func,)).ok()?;
+    let result = analyze_function(py, func, true)?;
     let tuple = result.bind(py).cast::<PyTuple>().ok()?;
     let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
     match tag.as_str() {

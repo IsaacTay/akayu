@@ -61,6 +61,10 @@ independent of machine load:
   item when splitting a stream into lists.
 - Building a graph costs 65-70% less, and `compile()` reuses bytecode analysis across fresh
   lambdas with the same code (a request handler building a pipeline per call).
+- `compile()` itself costs about half as much (a 4-node graph: 29,500 -> 14,000 instructions):
+  map functions were analysed twice, accumulate functions disassembled on every call, results
+  that depend only on the code no longer call into Python at all, and the graph walks hash
+  addresses with a multiply instead of SipHash.
 - 45% less memory per node (565 -> 309 bytes; compiled 518 -> 304); `compile()` frees the nodes
   it fuses into chains unless you hold them; `emit_batch()` map/filter/accumulate stages reuse one buffer instead of
   allocating one per stage.
@@ -74,6 +78,10 @@ independent of machine load:
 - Stream graphs are garbage-collected. Previously every graph leaked, along with every function,
   closure and buffered item it referenced.
 - After a function was freed, a new function at the same address could be optimized as the old one.
+- `compile()` called the builtin of a name that the function's module redefines (its own `len`
+  or `max`) instead of the module's function.
+- `compile()` analysed bound methods (`map(obj.method)`) as plain functions, with the item in
+  place of `self`, so the compiled graph could compute something else or raise.
 - `flush()` / `drain()` on a node fused into a chain by `compile()` dropped the data buffered below it.
 - `import akayu` no longer shadows a user module named `helpers`.
 - No more spurious `flush() called on ''` warnings after `compile()`.
