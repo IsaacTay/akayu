@@ -27,6 +27,7 @@ mod optimization;
 mod pool;
 mod prefetch;
 mod profiling;
+mod stack;
 
 // Re-exports
 pub use combinators::{combine_latest, union, zip};
@@ -120,6 +121,12 @@ pub struct Stream {
     /// Guard against re-entrant emit calls. True while this node is
     /// actively propagating from an emit(). Prevents cycles in the data graph.
     pub(crate) emitting: std::sync::atomic::AtomicBool,
+    /// Set while the compiled fast path updates this node (see
+    /// `update_compiled`), when `guard_reentry`.
+    pub(crate) busy: bool,
+    /// Set by compile() when more than one source feeds this node's graph:
+    /// only then can an item come back into a node mid-update.
+    pub(crate) guard_reentry: bool,
     /// Serializes emit()/flush() on this node and updates through `needs_lock` edges.
     pub(crate) lock: std::sync::Arc<lock::NodeLock>,
 }

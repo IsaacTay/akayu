@@ -45,7 +45,7 @@ impl Stream {
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(name = "par")]
     pub fn par(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
@@ -89,7 +89,7 @@ impl Stream {
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
     pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let self_py: Py<Self> = slf.clone().unbind();
@@ -131,7 +131,7 @@ impl Stream {
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (*others))]
     pub fn union(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        let mut this = slf.borrow_mut();
+        let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         for other in &others {
             if let Ok(other_ref) = other.try_borrow(py) {
@@ -208,7 +208,7 @@ impl Stream {
         emit_on: Option<Py<PyAny>>,
     ) -> PyResult<Py<Self>> {
         {
-            let this = slf.borrow();
+            let this = crate::helpers::graph_node(slf)?;
             check_not_compiled(this.compiled, &this.name)?;
         }
         for other in &others {
@@ -267,8 +267,13 @@ impl Stream {
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
-        slf.borrow_mut()
-            .add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
+        crate::helpers::graph_node_mut(slf)?.add_tag_node(
+            py,
+            0,
+            &node,
+            self_py.clone_ref(py),
+            &source_location,
+        )?;
         for (i, other) in others.iter().enumerate() {
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
@@ -281,7 +286,7 @@ impl Stream {
                     )?;
                 }
                 Err(_) => {
-                    slf.borrow_mut().add_tag_node(
+                    crate::helpers::graph_node_mut(slf)?.add_tag_node(
                         py,
                         i + 1,
                         &node,
@@ -328,7 +333,7 @@ impl Stream {
     #[pyo3(signature = (*others))]
     pub fn zip(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         {
-            let this = slf.borrow();
+            let this = crate::helpers::graph_node(slf)?;
             check_not_compiled(this.compiled, &this.name)?;
         }
         for other in &others {
@@ -349,8 +354,13 @@ impl Stream {
         )?;
 
         let self_py: Py<Self> = slf.clone().unbind();
-        slf.borrow_mut()
-            .add_tag_node(py, 0, &node, self_py.clone_ref(py), &source_location)?;
+        crate::helpers::graph_node_mut(slf)?.add_tag_node(
+            py,
+            0,
+            &node,
+            self_py.clone_ref(py),
+            &source_location,
+        )?;
         for (i, other) in others.iter().enumerate() {
             match other.try_borrow_mut(py) {
                 Ok(mut other_ref) => {
@@ -363,7 +373,7 @@ impl Stream {
                     )?;
                 }
                 Err(_) => {
-                    slf.borrow_mut().add_tag_node(
+                    crate::helpers::graph_node_mut(slf)?.add_tag_node(
                         py,
                         i + 1,
                         &node,

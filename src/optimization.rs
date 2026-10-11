@@ -115,6 +115,35 @@ impl Stream {
         }
     }
 
+    /// Whether a source other than this one feeds its connected graph (a
+    /// union, zip or combine_latest with another source). Only then can an
+    /// item come back into a node that is mid-update: through a callback
+    /// emitting into that other source (this one refuses a nested emit).
+    pub(crate) fn has_other_sources(&self, py: Python, source_py_ptr: usize) -> bool {
+        let mut seen: HashSet<usize> = HashSet::from_iter([source_py_ptr]);
+        let mut stack: Vec<Py<Self>> = self
+            .downstreams
+            .iter()
+            .map(|d| d.node.clone_ref(py))
+            .collect();
+        while let Some(node_py) = stack.pop() {
+            if !seen.insert(node_py.as_ptr() as usize) {
+                continue;
+            }
+            let Ok(node) = node_py.try_borrow(py) else {
+                return true; // in use right now: assume the worst
+            };
+            let parents = node.parents.lock().unwrap();
+            if parents.is_empty() {
+                return true;
+            }
+            stack.extend(parents.iter().map(|p| p.clone_ref(py)));
+            drop(parents);
+            stack.extend(node.downstreams.iter().map(|d| d.node.clone_ref(py)));
+        }
+        false
+    }
+
     /// Collect all nodes reachable from this node's downstreams.
     fn collect_all_nodes(&self, py: Python) -> Vec<Py<Self>> {
         let mut all_nodes: Vec<Py<Self>> = Vec::new();
@@ -284,12 +313,48 @@ impl Stream {
     /// A Source node with a single downstream that is itself a Source
     /// can be bypassed (union creates intermediate Source nodes).
     fn eliminate_source_passthroughs(&mut self, py: Python) {
-        // Recurse into downstreams first (bottom-up)
-        for downstream in &self.downstreams {
-            let mut child = downstream.borrow_mut(py);
-            child.eliminate_source_passthroughs(py);
+        // Bottom-up, each node once: an explicit post-order, not recursion
+        // (a graph tens of thousands of nodes deep would overflow the native
+        // stack, and stacked diamonds made the recursion revisit shared
+        // nodes exponentially often).
+        let mut order: Vec<Py<Self>> = Vec::new();
+        let mut seen: HashSet<usize> = HashSet::default();
+        let mut stack: Vec<(Py<Self>, bool)> = self
+            .downstreams
+            .iter()
+            .map(|d| (d.node.clone_ref(py), false))
+            .collect();
+        while let Some((node_py, below_done)) = stack.pop() {
+            if below_done {
+                order.push(node_py);
+                continue;
+            }
+            if !seen.insert(node_py.as_ptr() as usize) {
+                continue;
+            }
+            let Ok(node) = node_py.try_borrow(py) else {
+                continue;
+            };
+            let below: Vec<Py<Self>> = node
+                .downstreams
+                .iter()
+                .map(|d| d.node.clone_ref(py))
+                .collect();
+            drop(node);
+            stack.push((node_py, true));
+            stack.extend(below.into_iter().map(|d| (d, false)));
         }
+        for node_py in order {
+            if let Ok(mut node) = node_py.try_borrow_mut(py) {
+                node.bypass_source_passthrough(py);
+            }
+        }
+        self.bypass_source_passthrough(py);
+    }
 
+    /// A single downstream that is a Source with this node as its only parent
+    /// (union makes such intermediate sources) is bypassed.
+    fn bypass_source_passthrough(&mut self, py: Python) {
         if self.downstreams.len() != 1 {
             return;
         }
@@ -315,23 +380,33 @@ impl Stream {
     /// `NodeLogic::Chain` variants. Eliminates per-node borrow_mut/drop/propagate
     /// overhead during execution.
     pub(crate) fn build_compiled_chains(&mut self, py: Python) {
-        for downstream in &self.downstreams {
-            Self::build_chain_at(py, downstream);
+        // A worklist, not recursion: a graph tens of thousands of nodes deep
+        // would overflow the native stack. Popping the last pushed node keeps
+        // the depth-first order; each node starts a chain at most once (below
+        // stacked diamonds, revisiting merges was exponential).
+        let mut work: Vec<Py<Self>> = self
+            .downstreams
+            .iter()
+            .rev()
+            .map(|d| d.clone_ref(py))
+            .collect();
+        let mut seen: HashSet<usize> = HashSet::default();
+        while let Some(node) = work.pop() {
+            if !seen.insert(node.as_ptr() as usize) {
+                continue;
+            }
+            let next = Self::build_chain_at(py, &node);
+            work.extend(next.into_iter().rev());
         }
     }
 
-    fn build_chain_at(py: Python, start_py: &Py<Self>) {
+    /// Fuse the chain starting at `start_py`; returns the nodes to visit next.
+    fn build_chain_at(py: Python, start_py: &Py<Self>) -> Vec<Py<Self>> {
         // Check if this node is chainable
         {
             let node = start_py.borrow(py);
             if !node.logic.is_chainable() {
-                let downstreams: Vec<Py<Self>> =
-                    node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-                drop(node);
-                for ds in &downstreams {
-                    Self::build_chain_at(py, ds);
-                }
-                return;
+                return node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
             }
         }
 
@@ -368,13 +443,7 @@ impl Stream {
         // Skip chains of length 1 — no benefit
         if chain_node_refs.len() < 2 {
             let node = start_py.borrow(py);
-            let downstreams: Vec<Py<Self>> =
-                node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
-            drop(node);
-            for ds in &downstreams {
-                Self::build_chain_at(py, ds);
-            }
-            return;
+            return node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
         }
 
         // Get tail downstreams before we start mutating
@@ -443,10 +512,11 @@ impl Stream {
             }
         }
 
-        // Recurse into tail downstreams and any branches from branching nodes
-        for ds in &tail_downstreams {
-            Self::build_chain_at(py, ds);
-        }
+        // Then the tail's downstreams and any branches from branching nodes
+        tail_downstreams
+            .iter()
+            .map(|d| d.node.clone_ref(py))
+            .collect()
     }
 
     /// Single-pass detection of builtins, flush/emit targets, and vectorcall caching.
@@ -561,6 +631,19 @@ impl Stream {
                 }
             };
 
+            // The flushing sink must be the filter's only downstream: anything
+            // between them, or any other branch below the filter, would stop
+            // running once the pair is fused.
+            {
+                let filter_node = filter_py.borrow(py);
+                let only_sink = filter_node.downstreams.len() == 1
+                    && filter_node.downstreams[0].as_ptr() == sink_py.as_ptr();
+                drop(filter_node);
+                if !only_sink {
+                    continue;
+                }
+            }
+
             // Find the branch point: the Filter's parent that is also an ancestor of Collect
             // Constraint: Filter must be a direct downstream of branch point
             let branch_point_py: Option<Py<Self>>;
@@ -639,6 +722,21 @@ impl Stream {
             let buffer_path = match buffer_path {
                 Some(p) => p,
                 None => continue,
+            };
+            // The branch the branch point feeds first runs first: the buffer
+            // branch first puts a delimiter at the end of its chunk, the
+            // filter first at the start of the next one.
+            let position = |ptr: usize| {
+                branch_downstreams
+                    .iter()
+                    .position(|d| d.as_ptr() as usize == ptr)
+            };
+            let buffer_first = match (
+                position(buffer_path[0].as_ptr() as usize),
+                position(filter_ptr),
+            ) {
+                (Some(b), Some(f)) => b < f,
+                _ => continue,
             };
 
             // Verify all intermediate nodes in buffer_path (excluding Collect at end)
@@ -720,6 +818,12 @@ impl Stream {
                 (f.name.clone(), f.source_location.clone())
             };
 
+            // Items the collect holds already (compile() after some emits).
+            let collected = match &mut collect_py.borrow_mut(py).logic {
+                NodeLogic::Collect { buffer } => std::mem::take(buffer),
+                _ => Vec::new(),
+            };
+
             let chunk_node_py = if buffer_path.len() == 1 {
                 collect_py.clone_ref(py)
             } else {
@@ -729,9 +833,9 @@ impl Stream {
             {
                 let mut chunk_node = chunk_node_py.borrow_mut(py);
                 chunk_node.logic = NodeLogic::ChunkBy(Box::new(ChunkByState {
-                    buffer: Vec::new(),
+                    buffer: collected,
                     predicate,
-                    include_delimiter: true,
+                    order: crate::node::ChunkOrder::Fused { buffer_first },
                     pre_buffer_chain,
                 }));
                 chunk_node.name = format!("chunk_by[fused]({})", filter_name).into();
@@ -771,6 +875,10 @@ fn independent_branches(py: Python, edges: &[Downstream]) -> bool {
 }
 
 fn native_subtree(py: Python, node_py: &Py<Stream>, lists: &mut HashSet<usize>) -> bool {
+    // Too deep to walk: not proven, so no fast path.
+    if !crate::stack::has_room() {
+        return false;
+    }
     let Ok(node) = node_py.try_borrow(py) else {
         return false;
     };

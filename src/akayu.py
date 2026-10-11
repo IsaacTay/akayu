@@ -12,7 +12,6 @@ _NOISE_OPCODES = frozenset(
         "CACHE",
         "PUSH_NULL",
         "PRECALL",
-        "TO_BOOL",
         "NOT_TAKEN",  # 3.14: branch-prediction marker after conditional jumps
     }
 )
@@ -50,6 +49,7 @@ def _fast_extract(co):
     names = co.co_names
     varnames = co.co_varnames
     result = []
+    offsets = []
     j = 0
     n = len(raw)
     while j < n:
@@ -69,6 +69,7 @@ def _fast_extract(co):
             name = "LOAD_FAST_LOAD_FAST"
         elif name == "LOAD_SMALL_INT":  # the int is the oparg itself
             result.append(("LOAD_CONST", arg))
+            offsets.append(offset)
             continue
         # Resolve argval based on opcode
         if name == "LOAD_CONST":
@@ -96,7 +97,32 @@ def _fast_extract(co):
         else:
             av = arg
         result.append((name, av))
-    return result
+        offsets.append(offset)
+    return _finish_instructions(result, offsets)
+
+
+_JUMPS = ("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE")
+
+
+def _finish_instructions(instrs, offsets):
+    """Drop TO_BOOL where it only feeds a jump or `not` (elsewhere it is the
+    conversion `not not x` compiles to), and turn each jump's target byte
+    offset into a distance in instructions, which survives slicing."""
+    keep = [
+        i
+        for i, (op, _) in enumerate(instrs)
+        if not (op == "TO_BOOL" and i + 1 < len(instrs) and instrs[i + 1][0] in (*_JUMPS, "UNARY_NOT"))
+    ]
+    kept_offsets = [offsets[i] for i in keep]
+    out = []
+    for new, i in enumerate(keep):
+        op, av = instrs[i]
+        if op in _JUMPS:
+            # the first remaining instruction at or after the target
+            target = next((k for k, off in enumerate(kept_offsets) if off >= av), len(keep))
+            av = target - new
+        out.append((op, av))
+    return out
 
 
 _EXCEPTION_OPCODES = frozenset(
@@ -151,8 +177,10 @@ def _resolve_value(instr, ctx):
     """Resolve a value from an instruction + the function under analysis,
     recording it as a dependency of the result."""
     value = _resolve(instr, ctx.func)
-    # A constant is part of the code object: the same for every function.
-    if instr[0] != "LOAD_CONST":
+    # Only defaults, closure cells and globals differ between functions with
+    # the same code; a constant is part of the code, and anything else
+    # resolves the same (to _UNRESOLVABLE) for every function.
+    if instr[0] in ("LOAD_DEFAULT", "LOAD_DEREF", "LOAD_GLOBAL"):
         ctx.deps.append((instr, value))
     return value
 
@@ -228,11 +256,9 @@ def _clean_instructions(func):
             instrs = list(dis.get_instructions(func))
         except TypeError:
             return None
-        clean = [i for i in instrs if i.opname not in _NOISE_OPCODES]
-        while clean and clean[-1].opname == "RETURN_VALUE":
-            clean.pop()
+        clean = [i for i in instrs if i.opname not in _NOISE_OPCODES and i.opname != "RETURN_VALUE"]
         # Convert to tuple format for compatibility
-        return [(i.opname, i.argval) for i in clean]
+        return _finish_instructions([(i.opname, i.argval) for i in clean], [i.offset for i in clean])
 
 
 def _analyze_simple(instrs, func):
@@ -267,6 +293,10 @@ def _analyze_simple(instrs, func):
     # LOAD_FAST, UNARY_NOT
     if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "UNARY_NOT":
         return ("not",)
+
+    # lambda x: not not x (compiled to a bare TO_BOOL)
+    if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "TO_BOOL":
+        return ("bool",)
 
     # lambda x: <builtin>(x) — len, str, int, float, bool
     # LOAD_GLOBAL(name), LOAD_FAST, CALL 1
@@ -535,11 +565,12 @@ def _find_jump_split(instrs):
     best = None
     best_target = -1
     for i, instr in enumerate(instrs):
-        if instr[0] == "POP_JUMP_IF_FALSE" and instr[1] > best_target:
-            best_target = instr[1]
+        # Jump arguments are distances (see _finish_instructions).
+        if instr[0] == "POP_JUMP_IF_FALSE" and i + instr[1] > best_target:
+            best_target = i + instr[1]
             best = (i, True)  # `and` short-circuits on False
-        elif instr[0] == "POP_JUMP_IF_TRUE" and instr[1] > best_target:
-            best_target = instr[1]
+        elif instr[0] == "POP_JUMP_IF_TRUE" and i + instr[1] > best_target:
+            best_target = i + instr[1]
             best = (i, False)  # `or` short-circuits on True
     return best
 
@@ -570,11 +601,16 @@ def _analyze_compound(instrs, func):
 
     left_instrs = instrs[:copy_idx]
 
-    # Right side: everything after POP_TOP (which follows the jump)
+    # Right side: after POP_TOP (which follows the jump) up to the jump's
+    # target, where the and/or expression ends. Whatever follows applies to
+    # its result: `(a or b) * 10`, `not (a or b)`.
     pop_idx = jump_idx + 1
     if pop_idx >= len(instrs) or instrs[pop_idx][0] != "POP_TOP":
         return None
-    right_instrs = instrs[pop_idx + 1 :]
+    end = jump_idx + instrs[jump_idx][1]
+    if end <= pop_idx:
+        return None
+    right_instrs = instrs[pop_idx + 1 : end]
 
     # Recursively analyze each side
     left = _analyze_expr(left_instrs, func)
@@ -583,10 +619,14 @@ def _analyze_compound(instrs, func):
     if left is None or right is None:
         return None
 
-    if is_and:
-        return ("and", left, right)
-    else:
-        return ("or", left, right)
+    result = ("and" if is_and else "or", left, right)
+    if end < len(instrs):
+        steps = _postfix_steps(instrs[end:], func)
+        if steps is None:
+            return None
+        for step in steps:
+            result = ("chain", result, step)
+    return result
 
 
 def _analyze_expr(instrs, func):
@@ -622,22 +662,38 @@ def _analyze_postfix(instrs, func):
         head, pos = None, 1
     else:
         return None
-    steps = [head] if head is not None else []
-    while pos < len(instrs):
-        for size in range(min(5, len(instrs) - pos), 0, -1):
-            step = _analyze_simple([_ITEM, *instrs[pos : pos + size]], func)
-            if step is not None:
-                steps.append(step)
-                pos += size
-                break
-        else:
-            return None
+    rest = _postfix_steps(instrs[pos:], func)
+    if rest is None:
+        return None
+    steps = ([head] if head is not None else []) + rest
     if len(steps) < 2:
         return None
     result = steps[-1]
     for step in reversed(steps[:-1]):
         result = ("chain", step, result)
     return result
+
+
+def _postfix_steps(instrs, func):
+    """`instrs` as single steps, each applied to the previous result, or None.
+
+    A step that loads the item again (`(x.a, x.b)` after `x.a`) is not one:
+    it would read the previous result instead of the item.
+    """
+    steps, pos = [], 0
+    while pos < len(instrs):
+        for size in range(min(5, len(instrs) - pos), 0, -1):
+            chunk = instrs[pos : pos + size]
+            if any(op == "LOAD_FAST" for op, _ in chunk):
+                continue
+            step = _analyze_simple([_ITEM, *chunk], func)
+            if step is not None:
+                steps.append(step)
+                pos += size
+                break
+        else:
+            return None
+    return steps
 
 
 # Flags for bail-out checks

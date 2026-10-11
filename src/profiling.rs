@@ -225,7 +225,9 @@ pub fn build_report(
         queue_idx += 1;
 
         // Borrow the Py<Stream> to get the Rust struct pointer
-        let child = child_py.borrow(py);
+        let child = child_py
+            .try_borrow(py)
+            .map_err(|_| PyErr::from(crate::error::StreamError::BusyFlush))?;
         let child_ptr = std::ptr::from_ref(&*child) as usize;
 
         if let Some(&existing_idx) = ptr_to_idx.get(&child_ptr) {

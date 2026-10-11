@@ -106,6 +106,38 @@ independent of machine load:
   each waiting on inner branches queued behind the others); it now completes.
 - Nodes created by `zip()`, `union()`, `combine_latest()` and `MultiStream` report the user's
   source line (in errors and profiles) instead of a line inside akayu.
+- `batch_map()` under `emit()` passed on only the first of the results its function returned (also
+  after `prefetch()`, which raised `StopIteration` for none).
+- One `flush()` reached a node below a merge once per path: a `collect()` there emitted an extra
+  empty tuple per path.
+- `chunk_by()` kept an item whose predicate raised in its buffer.
+- `compile()` fused `collect()` plus `filter(p).sink(lambda _: c.flush())` wrongly: the delimiter
+  always ended the chunk whatever the branch order, items collected before `compile()` were
+  dropped, and so were other branches below the filter.
+- Deep graphs (thousands of nodes, long chains of sources feeding each other, threads with small
+  stacks such as musl's 128 KiB default) crashed the interpreter with a native stack overflow;
+  they raise `RecursionError`. `compile()` handles graphs of 100,000+ nodes, and no longer takes
+  exponential time on stacked diamonds.
+- Adding nodes, compiling or profiling from a callback mid-emit raised `PanicException` (which
+  `except Exception` doesn't catch) and could leave the source refusing every later `emit()`;
+  these are `RuntimeError`s now and the source recovers. `compile()` of a graph whose sink emits
+  into or flushes its own source panicked.
+- Compiled graphs: a feedback loop through `sink(lambda x: other.emit(x))` skipped the
+  re-entrancy check and recursed until it crashed, and an item coming back into a node still
+  processing another ran through aliased mutable state. Both raise, as in uncompiled graphs.
+- `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` raised in a callback came out as
+  `RuntimeError`: `except KeyboardInterrupt` didn't see them, and `sys.exit(3)` exited with 1.
+- `prefetch()`: a `flush()` that raised for a failed item dropped the good results before it;
+  `prefetch(-1)` raised `OverflowError` instead of `ValueError`.
+- `flush()` / `drain()` from another thread while others emitted raised "Already borrowed" (and
+  could lose prefetched items); they wait for the running emit.
+- The lambda optimizer computed something else for `(a or b) * 10`, `not (a or b)`, `not not x`,
+  and tuples whose later elements re-read the item after an attribute or method chain; its
+  comparisons turned any result into a bool and treated identical objects as equal (numpy arrays,
+  query builders, objects with their own `__eq__`).
+- Errors from `flatten()` (an item that isn't iterable), from iterating `batch_map()` results, and
+  from a predicate result whose `__bool__` raises name the node, like every other step.
+- A thread-pool worker started during interpreter shutdown could panic.
 
 ## 1.0.0
 

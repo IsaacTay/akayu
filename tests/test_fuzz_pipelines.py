@@ -138,9 +138,11 @@ def run_random_pipeline(seed):
             source.emit(val)
             # Also emit a tuple sometimes to help flatten succeed
             source.emit((val, val))
-        except TypeError:
-            # Expected if flatten receives a non-iterable int
-            pass
+        except RuntimeError as e:
+            # Expected if flatten receives a non-iterable int: the step's
+            # TypeError, wrapped with the node's name like any step's error
+            if not isinstance(e.__cause__, TypeError):
+                raise
         except Exception as e:
             print(f"Emit failed with {e}")
             raise e

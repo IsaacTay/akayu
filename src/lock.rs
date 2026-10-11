@@ -40,6 +40,11 @@ impl NodeLock {
     fn wait(&self, py: Python) {
         py.detach(|| self.0.lock());
     }
+
+    /// Whether the current thread holds it.
+    pub(crate) fn held_by_this_thread(&self) -> bool {
+        self.0.is_owned_by_current_thread()
+    }
 }
 
 /// Unlocks on drop, including on error paths. Not Send: it must unlock on the
@@ -86,12 +91,12 @@ impl Downstream {
     /// the lock and fails the borrow, raising instead of deadlocking.
     pub(crate) fn locked_update(&self, py: Python, val: Py<PyAny>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
-        self.node.try_borrow_mut(py)?.update(py, val)
+        crate::helpers::enter_node(&self.node, py)?.update(py, val)
     }
 
     pub(crate) fn locked_update_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
-        self.node.try_borrow_mut(py)?.update_batch(py, items)
+        crate::helpers::enter_node(&self.node, py)?.update_batch(py, items)
     }
 }
 
@@ -100,5 +105,31 @@ impl Deref for Downstream {
 
     fn deref(&self) -> &Py<Stream> {
         &self.node
+    }
+}
+
+/// Marks a source as emitting until dropped, even when a panic unwinds
+/// through the emit: a flag left set would reject every later emit().
+pub(crate) struct Emitting<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl<'a> Emitting<'a> {
+    /// Mark `flag`, or fail if the source is already emitting (an emit() from
+    /// inside its own graph).
+    /// The caller holds the source's lock, so a load and a store suffice.
+    pub(crate) fn enter(
+        flag: &'a std::sync::atomic::AtomicBool,
+        name: &str,
+    ) -> pyo3::PyResult<Self> {
+        if flag.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(crate::error::StreamError::ReentrantEmit(name.to_string()).into());
+        }
+        flag.store(true, std::sync::atomic::Ordering::Release);
+        Ok(Self(flag))
+    }
+}
+
+impl Drop for Emitting<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }

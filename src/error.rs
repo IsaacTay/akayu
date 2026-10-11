@@ -18,7 +18,7 @@ pub enum StreamError {
     AlreadyCompiled(String),
 
     #[error("prefetch size must be at least 1, got {0}")]
-    InvalidPrefetchSize(usize),
+    InvalidPrefetchSize(i64),
 
     #[error("union() requires at least one stream, got {0}")]
     UnionEmpty(usize),
@@ -43,6 +43,31 @@ pub enum StreamError {
          This creates a cycle in the data graph — restructure your pipeline to break the loop."
     )]
     ReentrantEmit(String),
+
+    #[error(
+        "Can't change the graph at a node that is processing an item: a callback is adding \
+         to the graph (or compiling it) mid-emit. Build the graph before emitting."
+    )]
+    BusyNode,
+
+    #[error(
+        "flush()/drain() reached a node that is still processing an item (a callback \
+         flushed mid-emit, or a profile was taken mid-emit). Call it after emit() returns."
+    )]
+    BusyFlush,
+
+    #[error(
+        "Re-entrant flush: flush() or drain() was called, from a callback, on a node this \
+         thread is already flushing. Restructure the pipeline so that flush targets are not \
+         ancestors of the flushing sink."
+    )]
+    ReentrantFlushCall,
+
+    #[error(
+        "An item re-entered a node that is still processing another: a callback emitted \
+         into a source whose graph leads back to it. Restructure the pipeline to break the loop."
+    )]
+    Reentered,
 
     #[error(
         "akayu module not properly initialized. \

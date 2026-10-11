@@ -238,6 +238,12 @@ pub(crate) fn wrap_error<T>(
     source_location: &str,
 ) -> PyResult<T> {
     res.map_err(|e| {
+        // KeyboardInterrupt, SystemExit, GeneratorExit: not a failed step but
+        // a request to stop, which `except KeyboardInterrupt` and sys.exit()
+        // codes must still see.
+        if !e.is_instance_of::<pyo3::exceptions::PyException>(py) {
+            return e;
+        }
         let is_akayu_err = e
             .get_type(py)
             .is_subclass_of::<pyo3::exceptions::PyRuntimeError>()
@@ -496,3 +502,78 @@ impl std::hash::Hasher for PtrHasher {
 pub(crate) type PtrBuild = std::hash::BuildHasherDefault<PtrHasher>;
 pub(crate) type PtrMap<K, V> = std::collections::HashMap<K, V, PtrBuild>;
 pub(crate) type PtrSet<K> = std::collections::HashSet<K, PtrBuild>;
+
+/// `slf` for changing the graph, or a clean error (not a panic) while it is
+/// processing an item: a callback building on it mid-emit.
+pub(crate) fn graph_node_mut<'py>(
+    slf: &Bound<'py, crate::Stream>,
+) -> PyResult<PyRefMut<'py, crate::Stream>> {
+    slf.try_borrow_mut()
+        .map_err(|_| crate::error::StreamError::BusyNode.into())
+}
+
+/// `slf` to read while building the graph (see `graph_node_mut`).
+pub(crate) fn graph_node<'py>(
+    slf: &Bound<'py, crate::Stream>,
+) -> PyResult<PyRef<'py, crate::Stream>> {
+    slf.try_borrow()
+        .map_err(|_| crate::error::StreamError::BusyNode.into())
+}
+
+thread_local! {
+    /// flush()/drain() calls this thread is inside (see `with_node_mut`).
+    static FLUSHING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` on `slf` for flush()/drain() called from Python, waiting for
+/// another thread that is emitting through it (a timer thread flushing while
+/// others emit) instead of failing on its borrow.
+///
+/// A source mid-emit is only shared-borrowed: its lock tells whether this
+/// thread holds it (a callback flushing it: an error) or another (wait for
+/// the emit to finish). A node borrowed for an update can't be asked; inside
+/// one of this thread's own flushes that is a re-entrant flush, otherwise
+/// another thread's brief update is waited for, within a limit.
+pub(crate) fn with_node_mut<R>(
+    slf: &Bound<'_, crate::Stream>,
+    py: Python,
+    f: impl FnOnce(&mut crate::Stream) -> PyResult<R>,
+) -> PyResult<R> {
+    use crate::error::StreamError;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let mut pause = std::time::Duration::from_micros(10);
+    loop {
+        if let Ok(mut node) = slf.try_borrow_mut() {
+            FLUSHING.with(|n| n.set(n.get() + 1));
+            let result = f(&mut node);
+            FLUSHING.with(|n| n.set(n.get() - 1));
+            return result;
+        }
+        if let Ok(node) = slf.try_borrow() {
+            let lock = std::sync::Arc::clone(&node.lock);
+            drop(node);
+            if lock.held_by_this_thread() {
+                return Err(StreamError::BusyFlush.into());
+            }
+            drop(lock.acquire(py));
+        } else if FLUSHING.with(std::cell::Cell::get) > 0 {
+            return Err(StreamError::ReentrantFlushCall.into());
+        } else if std::time::Instant::now() > deadline {
+            return Err(StreamError::BusyFlush.into());
+        }
+        py.detach(|| std::thread::sleep(pause));
+        pause = (pause * 2).min(std::time::Duration::from_millis(1));
+    }
+}
+
+/// A downstream node to hand an item to, or a clean error (not a panic) when
+/// it is still processing one: an item that came back to it through a
+/// callback's emit into another source.
+#[inline]
+pub(crate) fn enter_node<'py>(
+    node: &'py Py<crate::Stream>,
+    py: Python<'py>,
+) -> PyResult<PyRefMut<'py, crate::Stream>> {
+    node.try_borrow_mut(py)
+        .map_err(|_| crate::error::StreamError::Reentered.into())
+}

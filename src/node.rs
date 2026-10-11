@@ -88,11 +88,27 @@ pub struct CombineLatestState {
 pub struct ChunkByState {
     pub buffer: Vec<Py<PyAny>>,
     pub predicate: Py<PyAny>,
-    pub include_delimiter: bool,
+    pub order: ChunkOrder,
     /// Transforms applied to each item before buffering.
     /// Extracted from nodes between branch point and the original Collect.
     /// Empty when Collect was a direct downstream of the branch point.
     pub pre_buffer_chain: Vec<ChainNode>,
+}
+
+/// When a chunk_by node buffers an item relative to testing it.
+#[derive(Clone, Copy)]
+pub enum ChunkOrder {
+    /// `chunk_by()`: test, then buffer. A delimiter ends the chunk (kept in
+    /// it with include_delimiter), empty chunks are not emitted, and an item
+    /// whose test raises is not buffered.
+    Operator { include_delimiter: bool },
+    /// compile()'s fusion of `collect()` plus `filter(p).sink(collect.flush)`,
+    /// keeping the graph's branch order: with the collect branch first an
+    /// item is buffered, then tested (a delimiter ends its chunk); with the
+    /// filter first it is tested, the chunk goes downstream, then it is
+    /// buffered (a delimiter starts the next chunk). Like collect's flush,
+    /// every delimiter and flush() emits, even an empty tuple.
+    Fused { buffer_first: bool },
 }
 
 /// Extracts items between two delimiter predicates.

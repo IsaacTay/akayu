@@ -87,10 +87,11 @@ impl NumProgram {
         Some(Self(steps))
     }
 
-    /// Worth running on its own: one step saves nothing over the number
-    /// protocol (it still boxes once), so single steps only join runs.
+    /// Worth running on its own: one arithmetic step saves nothing over the
+    /// number protocol (it still boxes once), so it only joins runs; a
+    /// comparison makes no number at all.
     pub(crate) fn worth_alone(&self) -> bool {
-        self.0.len() >= 2
+        self.0.len() >= 2 || self.ends_with_compare()
     }
 
     fn ends_with_compare(&self) -> bool {
