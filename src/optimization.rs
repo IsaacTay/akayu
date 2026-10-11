@@ -17,10 +17,15 @@ impl Stream {
     ///
     /// This enables all optimizations including chain compilation, which is only safe
     /// when the topology is guaranteed not to change after optimization.
-    pub fn optimize_topology_full(&mut self, py: Python, source_py_ptr: usize) -> Vec<Py<Self>> {
+    pub fn optimize_topology_full(
+        &mut self,
+        py: Python,
+        source: &Bound<'_, Self>,
+    ) -> Vec<Py<Self>> {
+        let source_py_ptr = source.as_ptr() as usize;
         // Before fusion, so the nodes it absorbs get the shared lock too.
         self.share_graph_lock(py, source_py_ptr);
-        self.eliminate_source_passthroughs(py);
+        self.eliminate_source_passthroughs(py, source);
 
         let all_nodes = self.collect_all_nodes(py);
 
@@ -136,6 +141,17 @@ impl Stream {
             let parents = node.parents.lock().unwrap();
             if parents.is_empty() {
                 return true;
+            }
+            // Another source among the parents settles it: a merge of many
+            // sources would otherwise queue all of them, in every source's
+            // compile().
+            for parent in parents.iter() {
+                if !seen.contains(&(parent.as_ptr() as usize))
+                    && let Ok(parent) = parent.try_borrow(py)
+                    && parent.parents.lock().unwrap().is_empty()
+                {
+                    return true;
+                }
             }
             stack.extend(parents.iter().map(|p| p.clone_ref(py)));
             drop(parents);
@@ -312,7 +328,7 @@ impl Stream {
     /// Eliminate source passthrough nodes from the graph.
     /// A Source node with a single downstream that is itself a Source
     /// can be bypassed (union creates intermediate Source nodes).
-    fn eliminate_source_passthroughs(&mut self, py: Python) {
+    fn eliminate_source_passthroughs(&mut self, py: Python, source: &Bound<'_, Self>) {
         // Bottom-up, each node once: an explicit post-order, not recursion
         // (a graph tens of thousands of nodes deep would overflow the native
         // stack, and stacked diamonds made the recursion revisit shared
@@ -346,20 +362,22 @@ impl Stream {
         }
         for node_py in order {
             if let Ok(mut node) = node_py.try_borrow_mut(py) {
-                node.bypass_source_passthrough(py);
+                node.bypass_source_passthrough(py, &node_py);
             }
         }
-        self.bypass_source_passthrough(py);
+        self.bypass_source_passthrough(py, source.as_unbound());
     }
 
     /// A single downstream that is a Source with this node as its only parent
     /// (union makes such intermediate sources) is bypassed.
-    fn bypass_source_passthrough(&mut self, py: Python) {
-        if self.downstreams.len() != 1 {
+    fn bypass_source_passthrough(&mut self, py: Python, self_py: &Py<Self>) {
+        // par()'s single downstream is its one branch: a seq() there is what
+        // keeps the nodes after it sequential.
+        if self.downstreams.len() != 1 || matches!(self.logic, NodeLogic::Parallel) {
             return;
         }
 
-        let child_py = &self.downstreams[0];
+        let child_py = self.downstreams[0].node.clone_ref(py);
         let child = child_py.borrow(py);
 
         if matches!(child.logic, NodeLogic::Source) {
@@ -368,8 +386,22 @@ impl Stream {
             }
             let new_downstreams: Vec<Downstream> =
                 child.downstreams.iter().map(|d| d.clone_edge(py)).collect();
+            // The child's edges keep their locking (see build_chain_at).
+            let child_needs_lock = child.needs_lock;
             drop(child);
+            // Their parent is this node now: later passes (chunk_by fusion)
+            // trace parents back, and must not reach the bypassed node.
+            for edge in &new_downstreams {
+                if let Ok(grandchild) = edge.node.try_borrow(py) {
+                    for parent in grandchild.parents.lock().unwrap().iter_mut() {
+                        if parent.is(&child_py) {
+                            *parent = self_py.clone_ref(py);
+                        }
+                    }
+                }
+            }
             self.downstreams = new_downstreams.into();
+            self.needs_lock |= child_needs_lock;
         }
     }
 
@@ -451,6 +483,7 @@ impl Stream {
         let last = last_py.borrow(py);
         let tail_downstreams: Vec<Downstream> =
             last.downstreams.iter().map(|d| d.clone_edge(py)).collect();
+        let tail_needs_lock = last.needs_lock;
         drop(last);
 
         // Extract logic from each node into ChainNode structs
@@ -495,6 +528,9 @@ impl Stream {
             .into();
         head.logic = NodeLogic::Chain { steps };
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
+        // The edges are the tail's, and so is their locking: a tail feeding a
+        // merge (union, zip, ...) locks the shared node before updating it.
+        head.needs_lock |= tail_needs_lock;
         drop(head);
 
         // The nodes after the chain now hang off the head. Their parent link
@@ -804,13 +840,14 @@ impl Stream {
             };
 
             // Get Collect's downstreams
-            let collect_downstreams = {
+            let (collect_downstreams, collect_needs_lock) = {
                 let collect_node = collect_py.borrow(py);
-                collect_node
+                let downstreams = collect_node
                     .downstreams
                     .iter()
                     .map(|d| d.clone_edge(py))
-                    .collect::<Vec<_>>()
+                    .collect::<Vec<_>>();
+                (downstreams, collect_node.needs_lock)
             };
 
             let (filter_name, filter_source) = {
@@ -841,6 +878,8 @@ impl Stream {
                 chunk_node.name = format!("chunk_by[fused]({})", filter_name).into();
                 chunk_node.source_location = filter_source;
                 chunk_node.downstreams = collect_downstreams.into();
+                // The edges keep their locking (see build_chain_at).
+                chunk_node.needs_lock |= collect_needs_lock;
             }
 
             // If buffer_path had intermediate nodes, mark the Collect as orphaned

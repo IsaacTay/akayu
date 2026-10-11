@@ -162,6 +162,30 @@ independent of machine load:
   with an `async def __call__` is refused like an async function.
 - `import akayu` failed without package metadata (vendored copies, zipapps, PyInstaller).
 - The extension didn't build for free-threaded Python (3.13t, 3.14t).
+- Compiled graphs where `compile()` can't give the whole graph one lock (it has `par()` branches):
+  a union input fused into a chain of steps lost the lock on its edge into the union, so items
+  from two sources' threads could be in the union at once. Locks now survive fusion.
+- A `flush()` from one thread reaching a merge (union, zip, ...) while another source's emit was
+  below it failed with "still processing", and the emit could fail with "re-entered": a flush now
+  locks each node before entering it, as an emit through a merge does.
+- Ctrl+C while `compile()` (or building a node) analysed a function was swallowed: compile went on
+  to the end. It finishes without analysing the rest, then raises `KeyboardInterrupt`.
+- `compile()` removed a `seq()` directly below `par()`, so the branches after it ran in parallel
+  (and one ran after another had failed); and it panicked on the `collect()` + flush idiom below a
+  `seq()`.
+- A `par()` branch running on a pool thread that emitted into or flushed the source it ran under
+  deadlocked (on the calling thread's branch it raised); it raises.
+- With only one of several sources feeding a node compiled, an item could re-enter that node
+  mid-update through the compiled source; it is refused, as when none or all are compiled.
+- `emit_batch()` into `prefetch()` dropped the results that had finished before a failing item,
+  including those of earlier `emit()` calls.
+- Under sustained `par()`/`prefetch()` load, tasks the emitting thread had run itself stayed
+  queued until a worker took the GIL to drop each one: memory grew by ~45 bytes per item for as
+  long as items kept coming (92 MB after 2M `par()` emits).
+- Printing the profile of a compiled graph ~40,000 nodes deep crashed (native stack overflow), its
+  text grew with the square of the depth, and a node below a merge was printed once per path
+  (exponentially many times for stacked diamonds).
+- `compile()` of each of many sources feeding one merge took time quadratic in their number.
 
 ## 1.0.0
 

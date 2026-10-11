@@ -7,6 +7,7 @@
 
 use std::ops::Deref;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lock_api::RawReentrantMutex;
 use parking_lot::{RawMutex, RawThreadId};
@@ -33,6 +34,22 @@ impl NodeLock {
             self.wait(py);
         }
         NodeLockGuard(self, std::marker::PhantomData)
+    }
+
+    /// `acquire`, except that when another thread holds the lock, `check`
+    /// first decides whether waiting is safe (see
+    /// `Emitting::check_not_waited_on`).
+    #[inline]
+    pub(crate) fn acquire_checked(
+        &self,
+        py: Python,
+        check: impl FnOnce() -> PyResult<()>,
+    ) -> PyResult<NodeLockGuard<'_>> {
+        if !self.0.try_lock() {
+            check()?;
+            self.wait(py);
+        }
+        Ok(NodeLockGuard(self, std::marker::PhantomData))
     }
 
     #[cold]
@@ -140,12 +157,29 @@ impl Downstream {
     /// the lock and fails the borrow, raising instead of deadlocking.
     pub(crate) fn locked_update(&self, py: Python, val: Py<PyAny>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
-        crate::helpers::enter_node(&self.node, py)?.update(py, val)
+        crate::helpers::enter_node(&self.node, py)?.update_compiled(py, val)
     }
 
     pub(crate) fn locked_update_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let _guard = self.lock.acquire(py);
-        crate::helpers::enter_node(&self.node, py)?.update_batch(py, items)
+        crate::helpers::enter_node(&self.node, py)?.update_batch_compiled(py, items)
+    }
+
+    /// The child for a flush or drain reaching it: locked, then borrowed, in
+    /// the order an update through a locked edge takes, so that a flush and
+    /// another thread's emit take turns instead of meeting mid-way. (Below a
+    /// merge, the emit holds the child's lock, not the flushed source's.)
+    /// The borrow is released before the lock.
+    pub(crate) fn locked_for_flush<'py>(
+        &'py self,
+        py: Python<'py>,
+    ) -> PyResult<(PyRefMut<'py, Stream>, NodeLockGuard<'py>)> {
+        let guard = self.lock.acquire(py);
+        let node = self
+            .node
+            .try_borrow_mut(py)
+            .map_err(|_| PyErr::from(crate::error::StreamError::BusyFlush))?;
+        Ok((node, guard))
     }
 }
 
@@ -157,56 +191,95 @@ impl Deref for Downstream {
     }
 }
 
-/// What a source is doing, in its `emitting` field.
-pub(crate) const IDLE: u8 = 0;
-pub(crate) const EMITTING: u8 = 1;
-pub(crate) const FLUSHING: u8 = 2;
+/// What a source is doing, in its `emitting` field: IDLE, or an address on
+/// the stack of the thread emitting into it (which thread, for
+/// `check_not_waited_on`), with the low bit set while it is flushing.
+pub(crate) const IDLE: usize = 0;
+const FLUSHING: usize = 1;
+
+/// An address in the calling frame, standing for this thread: threads'
+/// stacks don't overlap. Aligned, so the low bit is free for FLUSHING.
+#[inline(always)]
+fn this_thread_mark() -> usize {
+    let marker = 0usize;
+    std::ptr::addr_of!(marker) as usize
+}
 
 /// Marks a source as emitting (or flushing) until dropped, even when a panic
 /// unwinds through it: a flag left set would reject every later emit().
-pub(crate) struct Emitting<'a>(&'a std::sync::atomic::AtomicU8);
+pub(crate) struct Emitting<'a>(&'a AtomicUsize);
 
 impl<'a> Emitting<'a> {
     /// Mark `flag` emitting, or fail if the source is already emitting or
     /// flushing (an emit() from inside its own graph, or from a callback of
     /// its own flush()).
     /// The caller holds the source's lock, so a load and a store suffice.
-    pub(crate) fn enter(flag: &'a std::sync::atomic::AtomicU8, name: &str) -> pyo3::PyResult<Self> {
-        let state = flag.load(std::sync::atomic::Ordering::Acquire);
+    #[inline(always)]
+    pub(crate) fn enter(flag: &'a AtomicUsize, name: &str) -> pyo3::PyResult<Self> {
+        let state = flag.load(Ordering::Acquire);
         if state != IDLE {
             return Err(refused(state, name));
         }
-        flag.store(EMITTING, std::sync::atomic::Ordering::Release);
+        flag.store(this_thread_mark(), Ordering::Release);
         Ok(Self(flag))
     }
 
     /// Mark `flag` flushing, for flush()/drain() of a source, or fail if a
     /// callback of the source's own emit() or flush() is calling it.
-    pub(crate) fn enter_flush(flag: &'a std::sync::atomic::AtomicU8) -> pyo3::PyResult<Self> {
-        use crate::error::StreamError;
-        match flag.load(std::sync::atomic::Ordering::Acquire) {
-            IDLE => {}
-            EMITTING => return Err(StreamError::BusyFlush.into()),
-            _ => return Err(StreamError::ReentrantFlushCall.into()),
+    pub(crate) fn enter_flush(flag: &'a AtomicUsize) -> pyo3::PyResult<Self> {
+        let state = flag.load(Ordering::Acquire);
+        if state != IDLE {
+            return Err(refused_flush(state));
         }
-        flag.store(FLUSHING, std::sync::atomic::Ordering::Release);
+        flag.store(this_thread_mark() | FLUSHING, Ordering::Release);
         Ok(Self(flag))
+    }
+
+    /// Before waiting for a source's lock: fail, as an emit() into it from
+    /// the emitting thread itself would, if the thread emitting into it (or
+    /// flushing it) is waiting for this one. That is a par() branch or a
+    /// prefetched call, run on a pool thread, emitting into or flushing the
+    /// source it runs under: the wait would never end.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn check_not_waited_on(
+        flag: &AtomicUsize,
+        refuse: impl FnOnce(usize) -> pyo3::PyErr,
+    ) -> pyo3::PyResult<()> {
+        let state = flag.load(Ordering::Acquire);
+        if state != IDLE && crate::pool::waits_for_this_thread(state & !FLUSHING) {
+            return Err(refuse(state));
+        }
+        Ok(())
     }
 }
 
+/// The error for an emit() into a source that is emitting or flushing.
 #[cold]
 #[inline(never)]
-fn refused(state: u8, name: &str) -> pyo3::PyErr {
+pub(crate) fn refused(state: usize, name: &str) -> pyo3::PyErr {
     use crate::error::StreamError;
-    if state == FLUSHING {
+    if state & FLUSHING != 0 {
         StreamError::EmitDuringFlush(name.to_string()).into()
     } else {
         StreamError::ReentrantEmit(name.to_string()).into()
     }
 }
 
+/// The error for a flush() of a source that is emitting or flushing.
+#[cold]
+#[inline(never)]
+pub(crate) fn refused_flush(state: usize) -> pyo3::PyErr {
+    use crate::error::StreamError;
+    if state & FLUSHING != 0 {
+        StreamError::ReentrantFlushCall.into()
+    } else {
+        StreamError::BusyFlush.into()
+    }
+}
+
 impl Drop for Emitting<'_> {
     fn drop(&mut self) {
-        self.0.store(IDLE, std::sync::atomic::Ordering::Release);
+        self.0.store(IDLE, Ordering::Release);
     }
 }

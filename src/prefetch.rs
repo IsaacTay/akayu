@@ -54,23 +54,28 @@ impl Prefetcher {
         Ok(out)
     }
 
+    /// Start `items`: the results finished meanwhile, and the error that
+    /// stopped the batch, if one did. Those results still go on, as a
+    /// flush's do: they may be earlier emits' items.
     pub(crate) fn update_batch(
         &mut self,
         py: Python,
         items: Vec<Py<PyAny>>,
-    ) -> PyResult<Vec<Py<PyAny>>> {
+    ) -> (Vec<Py<PyAny>>, Option<PyErr>) {
         let mut out = Vec::new();
-        if matches!(self.kind, PrefetchKind::BatchMap) {
-            if !items.is_empty() {
-                let batch = PyList::new(py, items)?.into_any().unbind();
-                self.submit(py, batch, &mut out)?;
+        let started = if matches!(self.kind, PrefetchKind::BatchMap) {
+            if items.is_empty() {
+                Ok(())
+            } else {
+                PyList::new(py, items)
+                    .and_then(|batch| self.submit(py, batch.into_any().unbind(), &mut out))
             }
-            return Ok(out);
-        }
-        for item in items {
-            self.push(py, item, &mut out)?;
-        }
-        Ok(out)
+        } else {
+            items
+                .into_iter()
+                .try_for_each(|item| self.push(py, item, &mut out))
+        };
+        (out, started.err())
     }
 
     /// Finish everything in flight, in order: the results up to the first

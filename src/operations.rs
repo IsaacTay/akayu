@@ -48,6 +48,9 @@ impl Stream {
             || matches!(&logic, NodeLogic::Chain { .. });
         let compiled_filter_fast = matches!(&logic, NodeLogic::Filter { .. });
         let builtin_op = crate::builtin::eager_op(py, &logic);
+        if let Some(interrupt) = crate::builtin::take_interrupt() {
+            return Err(interrupt);
+        }
         Py::new(
             py,
             Self {
@@ -67,7 +70,7 @@ impl Stream {
                 flush_target: None,
                 emit_target: None,
                 flushing: false,
-                emitting: std::sync::atomic::AtomicU8::new(crate::lock::IDLE),
+                emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
                 busy: false,
                 guard_reentry: false,
                 lock: NodeLock::new(),
@@ -88,7 +91,9 @@ impl Stream {
     /// and the flush waits for a running emit. A callback of the flush that
     /// emits into the source or flushes it again is refused.
     fn flush_source(&self, py: Python, drain: bool) -> PyResult<()> {
-        let _guard = self.lock.acquire(py);
+        let _guard = self.lock.acquire_checked(py, || {
+            crate::lock::Emitting::check_not_waited_on(&self.emitting, crate::lock::refused_flush)
+        })?;
         let _flushing = crate::lock::Emitting::enter_flush(&self.emitting)?;
         if !drain && self.downstreams.is_empty() {
             warn_noop_flush(py, &self.name);
@@ -96,9 +101,7 @@ impl Stream {
         let mut visited = crate::helpers::PtrSet::default();
         visited.insert(std::ptr::from_ref(self) as usize);
         for downstream in &self.downstreams {
-            let mut d = downstream
-                .try_borrow_mut(py)
-                .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+            let (mut d, _guard) = downstream.locked_for_flush(py)?;
             if drain {
                 d.drain_visit(py, &mut visited)?;
             } else {
@@ -217,9 +220,7 @@ impl Stream {
         );
         if should_propagate {
             for downstream in &self.downstreams {
-                let mut d = downstream
-                    .try_borrow_mut(py)
-                    .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+                let (mut d, _guard) = downstream.locked_for_flush(py)?;
                 d.flush_visit(py, false, visited)?;
             }
         }
@@ -289,9 +290,7 @@ impl Stream {
 
         // Always recurse into all downstreams
         for downstream in &self.downstreams {
-            let mut d = downstream
-                .try_borrow_mut(py)
-                .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+            let (mut d, _guard) = downstream.locked_for_flush(py)?;
             d.drain_visit(py, visited)?;
         }
         Ok(())
@@ -325,7 +324,7 @@ impl Stream {
             flush_target: None,
             emit_target: None,
             flushing: false,
-            emitting: std::sync::atomic::AtomicU8::new(crate::lock::IDLE),
+            emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
             busy: false,
             guard_reentry: false,
             lock: NodeLock::new(),
@@ -1214,7 +1213,11 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
-        let _guard = self.lock.acquire(py);
+        let _guard = self.lock.acquire_checked(py, || {
+            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
+                crate::lock::refused(state, &self.name)
+            })
+        })?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
@@ -1259,7 +1262,11 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
-        let _guard = self.lock.acquire(py);
+        let _guard = self.lock.acquire_checked(py, || {
+            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
+                crate::lock::refused(state, &self.name)
+            })
+        })?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
@@ -1318,7 +1325,7 @@ impl Stream {
             return Err(StreamError::AlreadyCompiled(this.name.to_string()).into());
         }
 
-        let all_nodes = this.optimize_topology_full(py, source_py_ptr);
+        let all_nodes = this.optimize_topology_full(py, slf);
 
         this.freeze_all(py, &all_nodes);
         this.mark_independent_fanouts(py, &all_nodes);
@@ -1342,6 +1349,11 @@ impl Stream {
         }
 
         drop(this);
+        // A Ctrl+C during the analysis: the graph is compiled (what wasn't
+        // analysed is called as is), and the interrupt goes on.
+        if let Some(interrupt) = crate::builtin::take_interrupt() {
+            return Err(interrupt);
+        }
         Ok(slf.clone().unbind())
     }
 
@@ -1437,7 +1449,11 @@ impl Stream {
         py: Python,
         x: Py<PyAny>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
-        let _guard = self.lock.acquire(py);
+        let _guard = self.lock.acquire_checked(py, || {
+            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
+                crate::lock::refused(state, &self.name)
+            })
+        })?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
@@ -1483,7 +1499,11 @@ impl Stream {
         py: Python,
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
-        let _guard = self.lock.acquire(py);
+        let _guard = self.lock.acquire_checked(py, || {
+            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
+                crate::lock::refused(state, &self.name)
+            })
+        })?;
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }

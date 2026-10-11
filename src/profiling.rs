@@ -467,7 +467,7 @@ impl ProfileReport {
         );
 
         // DFS tree print starting from root (index 0)
-        self.format_node(&mut out, 0, &[], true);
+        self.format_node(&mut out, 0);
 
         // Summary line
         let _ = write!(out, "\nFunction: {:.2}ms", func_ms);
@@ -491,35 +491,69 @@ impl ProfileReport {
         out
     }
 
-    fn format_node(
+    /// The tree below `root`, one line per node, depth first. Iterative (a
+    /// graph tens of thousands of nodes deep would overflow the native stack
+    /// in recursion); indentation stops growing after MAX_INDENT levels (the
+    /// text would grow with the square of the depth); and a node below a
+    /// merge, reached along several paths, has its subtree printed once.
+    fn format_node(&self, out: &mut String, root: usize) {
+        const MAX_INDENT: usize = 32;
+        let mut shown = vec![false; self.nodes.len()];
+        // (node, prefix parts: true = continuing branch, false = last; depth)
+        let mut stack: Vec<(usize, Vec<bool>, usize)> = vec![(root, Vec::new(), 0)];
+        while let Some((node_idx, prefix_parts, depth)) = stack.pop() {
+            let again = std::mem::replace(&mut shown[node_idx], true);
+            self.format_line(out, node_idx, &prefix_parts, depth > MAX_INDENT, again);
+            if again {
+                continue;
+            }
+            let children = &self.nodes[node_idx].children;
+            for (i, &child_idx) in children.iter().enumerate().rev() {
+                let mut child_prefix = prefix_parts.clone();
+                child_prefix.push(i + 1 != children.len());
+                if child_prefix.len() > MAX_INDENT {
+                    child_prefix.remove(0);
+                }
+                stack.push((child_idx, child_prefix, depth + 1));
+            }
+        }
+    }
+
+    fn format_line(
         &self,
         out: &mut String,
         node_idx: usize,
-        prefix_parts: &[bool], // true = continuing branch, false = last branch
-        is_root: bool,
+        prefix_parts: &[bool],
+        deeper: bool,
+        again: bool,
     ) {
         let node = &self.nodes[node_idx];
 
         // Build prefix
         let mut prefix = String::new();
-        if !is_root {
-            for &continues in prefix_parts
-                .iter()
-                .take(prefix_parts.len().saturating_sub(1))
-            {
-                if continues {
-                    prefix.push_str("\u{2502}   "); // │
-                } else {
-                    prefix.push_str("    ");
-                }
+        if deeper {
+            prefix.push('\u{2026}'); // …: more levels than shown
+        }
+        for &continues in prefix_parts
+            .iter()
+            .take(prefix_parts.len().saturating_sub(1))
+        {
+            if continues {
+                prefix.push_str("\u{2502}   "); // │
+            } else {
+                prefix.push_str("    ");
             }
-            if let Some(&continues) = prefix_parts.last() {
-                if continues {
-                    prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
-                } else {
-                    prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
-                }
+        }
+        if let Some(&continues) = prefix_parts.last() {
+            if continues {
+                prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
+            } else {
+                prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
             }
+        }
+        if again {
+            let _ = writeln!(out, "{prefix}{} (shown above)", node.name);
+            return;
         }
 
         // Build items display
@@ -553,15 +587,6 @@ impl ProfileReport {
                 "{name_with_prefix}{:pad$} {:>10}    {:.2}ms",
                 "", items_str, func_ms
             );
-        }
-
-        // Recurse into children
-        let n_children = node.children.len();
-        for (i, &child_idx) in node.children.iter().enumerate() {
-            let is_last = i == n_children - 1;
-            let mut child_prefix = prefix_parts.to_vec();
-            child_prefix.push(!is_last);
-            self.format_node(out, child_idx, &child_prefix, false);
         }
     }
 

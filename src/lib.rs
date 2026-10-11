@@ -120,7 +120,7 @@ pub struct Stream {
     pub(crate) flushing: bool,
     /// Guard against re-entrant emit calls. True while this node is
     /// actively propagating from an emit(). Prevents cycles in the data graph.
-    pub(crate) emitting: std::sync::atomic::AtomicU8,
+    pub(crate) emitting: std::sync::atomic::AtomicUsize,
     /// Set while the compiled fast path updates this node (see
     /// `update_compiled`), when `guard_reentry`.
     pub(crate) busy: bool,
