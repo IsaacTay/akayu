@@ -293,20 +293,25 @@ are dropped.
 
 ### Callbacks, Re-entrancy and Limits
 
-- `flush()` and `drain()` may be called from another thread (a timer flushing a `collect()`, say)
-  while other threads emit: they wait for a running emit to finish.
+- `flush()` and `drain()` may be called from another thread (a timer flushing a `collect()`, an
+  `atexit` handler) while other threads emit: they wait for a running emit to finish, and an
+  `emit()`, or an item reaching the node being flushed, waits for a running flush. In an
+  uncompiled graph, if that flush's callbacks emit into the source the waiting item came from,
+  the item fails with an error instead of deadlocking; `compile()` lets the two take turns.
 - A callback may emit into another source. Emitting into a source that is itself mid-emit (from
   its own graph, through a `sink(source.emit)` or a loop of sources) raises "Re-entrant emit
   detected", and an item that comes back into a node still processing another raises "An item
-  re-entered a node". To feed results back, collect them and emit them after `emit()` returns.
+  re-entered a node". Emitting into a source from a callback of its own `flush()` raises too. To
+  feed results back, collect them and emit them after `emit()` returns.
 - Adding nodes, compiling or stopping a profile from a callback, on the part of the graph that is
-  running, raises a `RuntimeError`; the graph keeps working afterwards.
+  running, raises a `RuntimeError`; the graph keeps working afterwards. The same goes for another
+  thread doing so while an item passes through: build the graph before threads emit into it.
 - Two threads whose callbacks emit into each other's sources, when those sources merge (`union`,
   `zip`, `combine_latest`), can deadlock in an uncompiled graph: each holds its own source's lock
   and waits for the other's. `compile()` gives the connected graph one lock, which avoids it.
 - Each node an item passes adds to the thread's native stack. A graph thousands of nodes deep, a
   long chain of sources feeding each other, or a thread with a small stack raises `RecursionError`
-  when the stack is nearly used up, rather than crashing.
+  when the stack is nearly used up, rather than crashing; so do `flush()` and `drain()`.
 - `KeyboardInterrupt`, `SystemExit` and `GeneratorExit` raised in a callback reach the caller as
   they are; any other exception is wrapped in a `RuntimeError` naming the node, with the original
   as its `__cause__`.

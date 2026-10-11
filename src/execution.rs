@@ -169,7 +169,9 @@ fn emit_into_target(
     target: &Py<crate::Stream>,
     items: impl IntoIterator<Item = Py<PyAny>>,
 ) -> PyResult<()> {
-    let t = target.borrow(py);
+    let t = target
+        .try_borrow(py)
+        .map_err(|_| PyErr::from(crate::error::StreamError::BusySource))?;
     let _guard = t.lock.acquire(py);
     // Marked emitting like target.emit() does: a feedback loop back into a
     // source that is mid-emit is rejected, not run as unbounded recursion.

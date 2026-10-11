@@ -116,8 +116,8 @@ independent of machine load:
   dropped, and so were other branches below the filter.
 - Deep graphs (thousands of nodes, long chains of sources feeding each other, threads with small
   stacks such as musl's 128 KiB default) crashed the interpreter with a native stack overflow;
-  they raise `RecursionError`. `compile()` handles graphs of 100,000+ nodes, and no longer takes
-  exponential time on stacked diamonds.
+  they raise `RecursionError`, as do `flush()` and `drain()` of such a graph. `compile()` handles
+  graphs of 100,000+ nodes, and no longer takes exponential time on stacked diamonds.
 - Adding nodes, compiling or profiling from a callback mid-emit raised `PanicException` (which
   `except Exception` doesn't catch) and could leave the source refusing every later `emit()`;
   these are `RuntimeError`s now and the source recovers. `compile()` of a graph whose sink emits
@@ -130,7 +130,12 @@ independent of machine load:
 - `prefetch()`: a `flush()` that raised for a failed item dropped the good results before it;
   `prefetch(-1)` raised `OverflowError` instead of `ValueError`.
 - `flush()` / `drain()` from another thread while others emitted raised "Already borrowed" (and
-  could lose prefetched items); they wait for the running emit.
+  could lose prefetched items), and hung for good when the emitting callbacks released the GIL
+  (`time.sleep()`, I/O), as an `atexit` flush with a daemon producer thread does; they wait for
+  the running emit. An `emit()` from another thread during a `flush()` raised "Already mutably
+  borrowed"; it waits for the flush. In uncompiled graphs, items reaching a `collect()` that a
+  timer thread was flushing failed as having "re-entered" it, losing nearly all of them; they wait
+  for the flush.
 - The lambda optimizer computed something else for `(a or b) * 10`, `not (a or b)`, `not not x`,
   and tuples whose later elements re-read the item after an attribute or method chain; its
   comparisons turned any result into a bool and treated identical objects as equal (numpy arrays,
