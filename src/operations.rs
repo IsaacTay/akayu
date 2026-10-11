@@ -67,12 +67,45 @@ impl Stream {
                 flush_target: None,
                 emit_target: None,
                 flushing: false,
-                emitting: std::sync::atomic::AtomicBool::new(false),
+                emitting: std::sync::atomic::AtomicU8::new(crate::lock::IDLE),
                 busy: false,
                 guard_reentry: false,
                 lock: NodeLock::new(),
             },
         )
+    }
+
+    /// `slf` borrowed shared, if it is a source (see `flush_source`).
+    fn as_source<'py>(slf: &Bound<'py, Self>) -> Option<PyRef<'py, Self>> {
+        slf.try_borrow()
+            .ok()
+            .filter(|node| matches!(node.logic, NodeLogic::Source))
+    }
+
+    /// flush()/drain() called on a source. A source buffers nothing, so this
+    /// takes only what emit() takes, its lock and a shared borrow: an emit()
+    /// on another thread waits for the lock instead of failing on a borrow,
+    /// and the flush waits for a running emit. A callback of the flush that
+    /// emits into the source or flushes it again is refused.
+    fn flush_source(&self, py: Python, drain: bool) -> PyResult<()> {
+        let _guard = self.lock.acquire(py);
+        let _flushing = crate::lock::Emitting::enter_flush(&self.emitting)?;
+        if !drain && self.downstreams.is_empty() {
+            warn_noop_flush(py, &self.name);
+        }
+        let mut visited = crate::helpers::PtrSet::default();
+        visited.insert(std::ptr::from_ref(self) as usize);
+        for downstream in &self.downstreams {
+            let mut d = downstream
+                .try_borrow_mut(py)
+                .map_err(|_| PyErr::from(StreamError::BusyFlush))?;
+            if drain {
+                d.drain_visit(py, &mut visited)?;
+            } else {
+                d.flush_visit(py, false, &mut visited)?;
+            }
+        }
+        Ok(())
     }
 
     /// Flush with the re-entrancy guard. `warn_if_noop` is true only for the
@@ -91,6 +124,7 @@ impl Stream {
         warn_if_noop: bool,
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
+        crate::stack::check()?;
         if !visited.insert(std::ptr::from_ref(self) as usize) {
             return Ok(());
         }
@@ -132,14 +166,7 @@ impl Stream {
             _ => false,
         };
         if warn_if_noop && !has_buffer && self.downstreams.is_empty() && !is_sink {
-            let msg = format!(
-                "flush() called on '{}' which has no buffer and no downstreams — \
-                 did you mean to call flush() on a collect() node?",
-                self.name
-            );
-            let warn_type = py.get_type::<pyo3::exceptions::PyUserWarning>();
-            let c_msg = std::ffi::CString::new(msg).unwrap();
-            let _ = PyErr::warn(py, warn_type.as_any(), &c_msg, 1);
+            warn_noop_flush(py, &self.name);
         }
         match &mut self.logic {
             NodeLogic::Collect { buffer } => {
@@ -201,6 +228,7 @@ impl Stream {
         py: Python,
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
+        crate::stack::check()?;
         if !visited.insert(std::ptr::from_ref(self) as usize) {
             return Ok(());
         }
@@ -290,7 +318,7 @@ impl Stream {
             flush_target: None,
             emit_target: None,
             flushing: false,
-            emitting: std::sync::atomic::AtomicBool::new(false),
+            emitting: std::sync::atomic::AtomicU8::new(crate::lock::IDLE),
             busy: false,
             guard_reentry: false,
             lock: NodeLock::new(),
@@ -953,6 +981,9 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        if let Some(source) = Self::as_source(slf) {
+            return source.flush_source(py, false);
+        }
         crate::helpers::with_node_mut(slf, py, |node| node.flush_guarded(py, true))
     }
 
@@ -992,6 +1023,9 @@ impl Stream {
         _args: Vec<Py<PyAny>>,
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
+        if let Some(source) = Self::as_source(slf) {
+            return source.flush_source(py, true);
+        }
         crate::helpers::with_node_mut(slf, py, |node| {
             node.drain_visit(py, &mut crate::helpers::PtrSet::default())
         })
@@ -1377,13 +1411,15 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node.
     pub fn emit_profiled(
-        &mut self,
+        &self,
         py: Python,
         x: Py<PyAny>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
+        let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
+        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
         let result = self.propagate(py, x);
@@ -1421,13 +1457,15 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node.
     pub fn emit_batch_profiled(
-        &mut self,
+        &self,
         py: Python,
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
+        let _guard = self.lock.acquire(py);
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
         }
+        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
         let result = self.propagate_batch(py, items);
@@ -1506,4 +1544,16 @@ impl Stream {
         Stream::sink(&self_py.into_bound(py), py, add, args, None, None)?;
         Ok(set.unbind())
     }
+}
+
+/// Warn about a flush() that can't do anything: a node with no buffer and no
+/// downstreams, that isn't a sink.
+fn warn_noop_flush(py: Python, name: &str) {
+    let msg = format!(
+        "flush() called on '{name}' which has no buffer and no downstreams — \
+         did you mean to call flush() on a collect() node?"
+    );
+    let warn_type = py.get_type::<pyo3::exceptions::PyUserWarning>();
+    let c_msg = std::ffi::CString::new(msg).unwrap();
+    let _ = PyErr::warn(py, warn_type.as_any(), &c_msg, 1);
 }

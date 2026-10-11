@@ -70,6 +70,27 @@ pub enum StreamError {
     Reentered,
 
     #[error(
+        "emit() was called on '{0}' from a callback of its own flush() or drain(). \
+         Emit after flush() returns."
+    )]
+    EmitDuringFlush(String),
+
+    #[error(
+        "emit() found its source busy: it is processing an item (a callback emitted into a \
+         source its own graph leads back to), or another thread is changing or compiling the \
+         graph."
+    )]
+    BusySource,
+
+    #[error(
+        "An item reached a node that another thread is flushing, and that flush is waiting for \
+         this thread: a callback of the flush emits into a source this thread is emitting into. \
+         compile() the graph (its one lock then lets the two take turns), or emit after the \
+         flush returns."
+    )]
+    FlushWaitCycle,
+
+    #[error(
         "akayu module not properly initialized. \
          This is an internal error — please report this issue at https://github.com/user/akayu/issues"
     )]

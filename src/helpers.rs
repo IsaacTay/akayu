@@ -8,6 +8,7 @@ use std::io::Write;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
 use crate::error::StreamError;
+use crate::lock::NodeLock;
 
 /// Defines a static Python helper reference and its getter function.
 macro_rules! define_py_helper {
@@ -525,39 +526,100 @@ thread_local! {
     static FLUSHING: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
-/// Run `f` on `slf` for flush()/drain() called from Python, waiting for
-/// another thread that is emitting through it (a timer thread flushing while
-/// others emit) instead of failing on its borrow.
+/// The nodes flush()/drain() calls from Python hold mutably: the node, the
+/// thread flushing it and the node's lock, which that thread holds throughout.
+/// A node borrowed mutably can't be read, so this is how an item reaching it,
+/// or another flush of it, learns to wait for the lock (another thread's
+/// flush) rather than fail (an item coming back into it).
+static FLUSHED: Mutex<Vec<(usize, std::thread::ThreadId, Arc<NodeLock>)>> = Mutex::new(Vec::new());
+
+/// Lists a node in `FLUSHED`, and counts it in `FLUSHING`, until dropped.
+struct Flushed(usize);
+
+impl Flushed {
+    fn new(node: usize, lock: &Arc<NodeLock>) -> Self {
+        let me = std::thread::current().id();
+        FLUSHED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((node, me, Arc::clone(lock)));
+        FLUSHING.with(|n| n.set(n.get() + 1));
+        Self(node)
+    }
+}
+
+impl Drop for Flushed {
+    fn drop(&mut self) {
+        FLUSHING.with(|n| n.set(n.get() - 1));
+        let me = std::thread::current().id();
+        let mut flushed = FLUSHED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = flushed
+            .iter()
+            .rposition(|(node, thread, _)| *node == self.0 && *thread == me)
+        {
+            flushed.swap_remove(i);
+        }
+    }
+}
+
+/// The thread flushing `node` and the node's lock, if a flush() called from
+/// Python holds it.
+fn flusher_of(node: usize) -> Option<(std::thread::ThreadId, Arc<NodeLock>)> {
+    FLUSHED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(n, _, _)| *n == node)
+        .map(|(_, thread, lock)| (*thread, Arc::clone(lock)))
+}
+
+/// How long to wait for a node borrowed by something that holds no lock to
+/// wait on: an item from another thread passing through it, or compile().
+const BUSY_WAIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Run `f` on `slf` for flush()/drain() called from Python on a node that
+/// isn't a source (sources: `Stream::flush_source`), waiting for another
+/// thread that is emitting through it or flushing it (a timer thread flushing
+/// while others emit) instead of failing on its borrow.
 ///
-/// A source mid-emit is only shared-borrowed: its lock tells whether this
-/// thread holds it (a callback flushing it: an error) or another (wait for
-/// the emit to finish). A node borrowed for an update can't be asked; inside
-/// one of this thread's own flushes that is a re-entrant flush, otherwise
-/// another thread's brief update is waited for, within a limit.
+/// The flush holds the node's lock throughout, as an update through a locked
+/// edge does. Whether this thread already holds the lock tells a callback
+/// flushing the node it runs in (an error) from another thread's emit (wait
+/// for it). A node borrowed for an update can't be asked; inside one of this
+/// thread's own flushes that is a re-entrant flush, otherwise another
+/// thread's brief update is waited for, within a limit.
 pub(crate) fn with_node_mut<R>(
     slf: &Bound<'_, crate::Stream>,
     py: Python,
     f: impl FnOnce(&mut crate::Stream) -> PyResult<R>,
 ) -> PyResult<R> {
-    use crate::error::StreamError;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    let id = slf.as_ptr() as usize;
+    let deadline = std::time::Instant::now() + BUSY_WAIT;
     let mut pause = std::time::Duration::from_micros(10);
     loop {
-        if let Ok(mut node) = slf.try_borrow_mut() {
-            FLUSHING.with(|n| n.set(n.get() + 1));
-            let result = f(&mut node);
-            FLUSHING.with(|n| n.set(n.get() - 1));
-            return result;
-        }
         if let Ok(node) = slf.try_borrow() {
-            let lock = std::sync::Arc::clone(&node.lock);
+            let lock = Arc::clone(&node.lock);
             drop(node);
-            if lock.held_by_this_thread() {
+            // This thread may hold it already: a callback flushing a node of
+            // the graph it runs in (a compiled graph has one lock). Otherwise
+            // waiting for the lock lets an emit on another thread finish.
+            let mine = lock.held_by_this_thread();
+            let _guard = lock.acquire(py);
+            if let Ok(mut node) = slf.try_borrow_mut() {
+                let _flushed = Flushed::new(id, &lock);
+                return f(&mut node);
+            }
+            if mine {
+                // This thread's emit is in it: a callback flushing the node it
+                // runs in.
                 return Err(StreamError::BusyFlush.into());
             }
-            drop(lock.acquire(py));
         } else if FLUSHING.with(std::cell::Cell::get) > 0 {
             return Err(StreamError::ReentrantFlushCall.into());
+        } else if let Some((_, lock)) = flusher_of(id) {
+            // Another thread is flushing it (this one would be in FLUSHING).
+            drop(lock.acquire(py));
+            continue;
         } else if std::time::Instant::now() > deadline {
             return Err(StreamError::BusyFlush.into());
         }
@@ -574,6 +636,47 @@ pub(crate) fn enter_node<'py>(
     node: &'py Py<crate::Stream>,
     py: Python<'py>,
 ) -> PyResult<PyRefMut<'py, crate::Stream>> {
-    node.try_borrow_mut(py)
-        .map_err(|_| crate::error::StreamError::Reentered.into())
+    loop {
+        if let Ok(node) = node.try_borrow_mut(py) {
+            return Ok(node);
+        }
+        wait_for_busy_node(node, py)?;
+    }
+}
+
+/// `enter_node` when the node is borrowed. A flush() of it on another thread
+/// (a timer flushing a collect() while this thread emits) holds its lock
+/// until done: wait for that, then try again. Anything else is an item
+/// coming back into it.
+#[cold]
+#[inline(never)]
+fn wait_for_busy_node(node: &Py<crate::Stream>, py: Python) -> PyResult<()> {
+    match flusher_of(node.as_ptr() as usize) {
+        Some((flusher, lock)) if flusher != std::thread::current().id() => {
+            wait_for_flush(py, flusher, &lock)
+        }
+        _ => Err(StreamError::Reentered.into()),
+    }
+}
+
+/// Wait for `flusher` to finish flushing a node, holding its `lock`. Its
+/// callbacks may in turn need a lock this thread holds (one emitting into
+/// the source this thread is emitting into): give up if the flusher stays
+/// blocked on a lock while this thread waits, rather than deadlock.
+fn wait_for_flush(py: Python, flusher: std::thread::ThreadId, lock: &NodeLock) -> PyResult<()> {
+    const SLICE: std::time::Duration = std::time::Duration::from_millis(2);
+    const STUCK: std::time::Duration = std::time::Duration::from_millis(50);
+    let mut blocked_since = None;
+    while lock.acquire_within(py, SLICE).is_none() {
+        if !crate::lock::is_blocked(flusher) {
+            blocked_since = None;
+        } else if blocked_since
+            .get_or_insert_with(std::time::Instant::now)
+            .elapsed()
+            > STUCK
+        {
+            return Err(StreamError::FlushWaitCycle.into());
+        }
+    }
+    Ok(())
 }

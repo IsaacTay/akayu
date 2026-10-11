@@ -7,6 +7,7 @@ import subprocess
 import sys
 import textwrap
 import threading
+import time
 
 import pytest
 
@@ -275,6 +276,188 @@ def test_flush_from_another_thread_waits_for_emits(compiled, kind):
     s.flush()
     assert errors == []
     assert sorted(out) == list(range(900))
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_flush_while_another_thread_emits_nonstop(compiled):
+    # The callback releases the GIL mid-item. flush() waited for the emit's
+    # lock, let go of it, and found the next emit had taken it: forever.
+    code, last = run_script(
+        f"""
+        import akayu, threading, time
+        s, out = akayu.Stream(), []
+        s.map(lambda x: (time.sleep(0), x)[1]).collect().sink(out.extend)
+        if {compiled}:
+            s.compile()
+        stop = threading.Event()
+        def forever():
+            i = 0
+            while not stop.is_set():
+                s.emit(i)
+                i += 1
+        t = threading.Thread(target=forever, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        s.flush()
+        stop.set()
+        t.join()
+        s.flush()
+        print(len(out) > 0 and out == list(range(len(out))))
+    """,
+        timeout=60,
+    )
+    assert (code, last) == (0, "True")
+
+
+def test_flush_at_exit_while_a_daemon_thread_emits():
+    code, last = run_script(
+        """
+        import akayu, atexit, threading, time
+        s = akayu.Stream()
+        s.map(lambda x: (time.sleep(0.001), x)[1]).collect().sink(lambda t: None)
+        def forever():
+            i = 0
+            while True:
+                s.emit(i)
+                i += 1
+        threading.Thread(target=forever, daemon=True).start()
+        atexit.register(lambda: (s.flush(), print("flushed")))
+        time.sleep(0.05)
+    """,
+        timeout=60,
+    )
+    assert (code, last) == (0, "flushed")
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_emit_from_another_thread_waits_for_a_flush(compiled):
+    s, got = akayu.Stream(), []
+    flushing = threading.Event()
+
+    def slow(t):
+        flushing.set()
+        time.sleep(0.2)
+        got.append(t)
+
+    s.map(lambda x: x).collect().sink(slow)
+    if compiled:
+        s.compile()
+    s.emit_batch([1, 2])
+    errors = []
+
+    def emitter():
+        flushing.wait()
+        try:
+            s.emit(3)  # used to raise "Already mutably borrowed"
+        except Exception as e:
+            errors.append(e)
+
+    t = threading.Thread(target=emitter)
+    t.start()
+    s.flush()
+    t.join()
+    s.flush()
+    assert errors == []
+    assert got == [(1, 2), (3,)]
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_timer_flushes_a_collect_while_a_thread_emits(compiled):
+    # Uncompiled, an item reaching the collect mid-flush failed as having
+    # "re-entered" it: nearly every item was lost.
+    s, out = akayu.Stream(), []
+    c = s.map(lambda x: x).collect()
+    c.sink(lambda t: (time.sleep(0.001), out.extend(t)))
+    if compiled:
+        s.compile()
+    errors = []
+
+    def emitter():
+        for i in range(1000):
+            try:
+                s.emit(i)
+            except Exception as e:
+                errors.append(e)
+            if i % 50 == 0:
+                time.sleep(0)
+
+    t = threading.Thread(target=emitter)
+    t.start()
+    while t.is_alive():
+        c.flush()
+    t.join()
+    c.flush()
+    assert errors == []
+    assert out == list(range(1000))
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_timer_flush_feeding_back_into_a_busy_source(compiled):
+    # The flush's callback emits into the source another thread is emitting
+    # into, while that thread waits for the flush: uncompiled, the waiting
+    # item fails instead of deadlocking; compiled, the two take turns.
+    code, last = run_script(
+        f"""
+        import akayu, threading, time
+        s, sizes = akayu.Stream(), []
+        c = s.filter(lambda x: x >= 0).collect()
+        c.sink(lambda t: (time.sleep(0.002), sizes.append(len(t)), t and s.emit(-1)))
+        if {compiled}:
+            s.compile()
+        errors = []
+        def emitter():
+            for i in range(1000):
+                try:
+                    s.emit(i)
+                except RuntimeError as e:
+                    while e.__cause__ is not None:
+                        e = e.__cause__
+                    errors.append(str(e))
+                if i % 50 == 0:
+                    time.sleep(0)
+        t = threading.Thread(target=emitter, daemon=True)
+        t.start()
+        while t.is_alive():
+            c.flush()
+        c.flush()
+        lost = len(errors)
+        named = all("another thread is flushing" in e for e in errors)
+        print(sum(sizes) + lost == 1000, named, lost if {compiled} else "-")
+    """,
+        timeout=60,
+    )
+    assert (code, last) == (0, "True True 0" if compiled else "True True -")
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_emit_into_a_source_from_its_own_flush(compiled):
+    s, got = akayu.Stream(), []
+    s.collect().sink(lambda t: (got.append(t), s.emit(0)))
+    if compiled:
+        s.compile()
+    s.emit(1)
+    with pytest.raises(RuntimeError) as info:
+        s.flush()
+    assert "callback of its own flush()" in str(innermost(info.value))
+    assert got == [(1,)]
+
+
+@pytest.mark.parametrize("entry", ["flush", "drain"])
+def test_flushing_a_very_deep_graph_raises_recursion_error(entry):
+    code, last = run_script(f"""
+        import akayu
+        s = akayu.Stream(); node = s
+        for _ in range(60000):
+            node = node.map(lambda x: x)
+        node.collect().sink(print)
+        try:
+            s.{entry}()
+        except BaseException as e:
+            while e.__cause__ is not None:
+                e = e.__cause__
+            print(type(e).__name__)
+    """)
+    assert (code, last) == (0, "RecursionError")
 
 
 # --- batch_map and prefetch ---
