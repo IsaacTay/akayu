@@ -76,7 +76,7 @@ impl StreamPtr {
 ///     >>> source.emit(5)
 ///     >>> result
 ///     [10]
-#[pyclass(subclass, weakref)]
+#[pyclass(subclass, weakref, module = "akayu")]
 #[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 pub struct Stream {
     pub(crate) logic: NodeLogic,
@@ -124,8 +124,9 @@ pub struct Stream {
     /// Set while the compiled fast path updates this node (see
     /// `update_compiled`), when `guard_reentry`.
     pub(crate) busy: bool,
-    /// Set by compile() when more than one source feeds this node's graph:
-    /// only then can an item come back into a node mid-update.
+    /// Set by compile() when more than one source feeds this node's graph
+    /// (only then can an item come back into a node mid-update), and on
+    /// nodes that run callbacks mid-update (one may flush the node).
     pub(crate) guard_reentry: bool,
     /// Serializes emit()/flush() on this node and updates through `needs_lock` edges.
     pub(crate) lock: std::sync::Arc<lock::NodeLock>,

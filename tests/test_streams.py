@@ -246,12 +246,18 @@ class TestBroadcasting:
         assert len(result) == 2
 
     def test_combine_latest_emit_on_broadcast(self):
+        # A single stream broadcast as an input can trigger every row.
         a = MultiStream(_sources(2))
-        b = MultiStream(_sources(2))
         single = Stream()
-        result = a.combine_latest(b, emit_on=single)
+        result = a.combine_latest(single, emit_on=single)
         assert isinstance(result, MultiStream)
         assert len(result) == 2
+        out = result.to_list()
+        a[0].emit(1)
+        a[1].emit(2)
+        assert out == [[], []]  # only `single` triggers
+        single.emit("s")
+        assert out == [[(1, "s")], [(2, "s")]]
 
 
 class TestModuleLevelFunctions:

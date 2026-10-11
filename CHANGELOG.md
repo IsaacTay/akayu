@@ -143,6 +143,25 @@ independent of machine load:
 - Errors from `flatten()` (an item that isn't iterable), from iterating `batch_map()` results, and
   from a predicate result whose `__bool__` raises name the node, like every other step.
 - A thread-pool worker started during interpreter shutdown could panic.
+- `compile()` dropped a call to a builtin it doesn't know (`abs`, `repr`, `sorted`) at the head of
+  a chain of steps: `lambda x: abs(x) + 1 + 2` computed `x + 1 + 2`.
+- Compiled graphs called a `Stream` subclass's target through the base `emit()` for
+  `sink(target.emit)` and `sink(lambda x: target.emit(x))`, skipping an override.
+- Compiled `map(operator.attrgetter("a.b"))` looked up an attribute named `"a.b"`.
+- `prefetch(n).batch_map(f)` called `f` once per item even under `emit_batch()`; it takes the
+  whole batch, as without `prefetch()`.
+- A `chunk_by()`, `chunks_between()` or prefetched node flushed from one of its own downstream
+  callbacks was flushed mid-update in compiled graphs; it is refused, as uncompiled.
+- `combine_latest(..., emit_on=...)` ignored streams that aren't inputs (and an empty list) and
+  emitted on every input; it raises `ValueError`.
+- Slicing a keyed `MultiStream` with negative or reversed slices paired streams with the wrong keys.
+- `accumulate(..., returns_state=True)` raised a bare conversion error for a function that doesn't
+  return a pair; the error names the node.
+- A thread that exited mid-profiling left every other thread checking for a profiling session.
+- `prefetch(2**64)` raised `OverflowError`; it is a `ValueError` like other invalid sizes. An object
+  with an `async def __call__` is refused like an async function.
+- `import akayu` failed without package metadata (vendored copies, zipapps, PyInstaller).
+- The extension didn't build for free-threaded Python (3.13t, 3.14t).
 
 ## 1.0.0
 

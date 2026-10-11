@@ -125,6 +125,10 @@ impl Stream {
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
         crate::stack::check()?;
+        if self.busy {
+            // Compiled, mid-update: a callback it ran is flushing it.
+            return Err(StreamError::BusyFlush.into());
+        }
         if !visited.insert(std::ptr::from_ref(self) as usize) {
             return Ok(());
         }
@@ -229,6 +233,9 @@ impl Stream {
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
         crate::stack::check()?;
+        if self.busy {
+            return Err(StreamError::BusyFlush.into());
+        }
         if !visited.insert(std::ptr::from_ref(self) as usize) {
             return Ok(());
         }
@@ -438,14 +445,15 @@ impl Stream {
     pub fn prefetch(
         slf: &Bound<'_, Self>,
         py: Python,
-        n: i64,
+        n: &Bound<'_, pyo3::types::PyInt>,
         stream_name: Option<String>,
     ) -> PyResult<Py<Self>> {
         let mut this = crate::helpers::graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
-        // Signed, so prefetch(-1) gets the same ValueError as prefetch(0).
-        let Ok(n @ 1..) = usize::try_from(n) else {
-            return Err(StreamError::InvalidPrefetchSize(n).into());
+        // Any int, so prefetch(-1) and prefetch(2**64) get the same
+        // ValueError as prefetch(0).
+        let Ok(n @ 1..) = n.extract::<usize>() else {
+            return Err(StreamError::InvalidPrefetchSize(n.to_string()).into());
         };
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, &format!("prefetch({})", n), None);
@@ -1314,9 +1322,20 @@ impl Stream {
 
         this.freeze_all(py, &all_nodes);
         this.mark_independent_fanouts(py, &all_nodes);
-        if this.has_other_sources(py, source_py_ptr) {
-            for node_py in &all_nodes {
-                if let Ok(mut node) = node_py.try_borrow_mut(py) {
+        let other_sources = this.has_other_sources(py, source_py_ptr);
+        for node_py in &all_nodes {
+            if let Ok(mut node) = node_py.try_borrow_mut(py) {
+                // A node that runs callbacks mid-update (it emits a chunk or
+                // a result as an item arrives) can be flushed by one of them:
+                // that is refused while it is busy, as the borrow refuses it
+                // uncompiled.
+                let calls_out_mid_update = matches!(
+                    node.logic,
+                    NodeLogic::ChunkBy(_)
+                        | NodeLogic::ExtractBetween(_)
+                        | NodeLogic::Prefetched { .. }
+                );
+                if other_sources || calls_out_mid_update {
                     node.guard_reentry = true;
                 }
             }
@@ -1329,7 +1348,9 @@ impl Stream {
     /// Start collecting profiling data for subsequent emit() calls.
     ///
     /// Call `stop_profiling()` to end the session and retrieve the report.
-    /// Profiling adds minimal overhead (~80ns per node per item).
+    /// Profiling adds minimal overhead (~80ns per node per item). It records
+    /// the emits of the thread that started it; emits from other threads
+    /// meanwhile are not counted.
     ///
     /// # Raises
     ///
@@ -1357,7 +1378,8 @@ impl Stream {
     ///
     /// Provides a convenient way to profile a block of emit calls.
     /// The profiler is a context manager that automatically starts
-    /// profiling on entry and stops on exit.
+    /// profiling on entry and stops on exit. Like `start_profiling()`, it
+    /// records the emits of the thread that entered it.
     ///
     /// # Returns
     ///

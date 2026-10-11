@@ -52,6 +52,16 @@ impl Default for ProfileState {
     }
 }
 
+impl Drop for ProfileState {
+    // A thread that exits mid-session (start_profiling() without
+    // stop_profiling()) must not leave every other thread checking for one.
+    fn drop(&mut self) {
+        if self.active {
+            ACTIVE_SESSIONS.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 thread_local! {
     static PROFILE: RefCell<ProfileState> = RefCell::new(ProfileState::default());
 }
@@ -164,7 +174,7 @@ struct ReportNode {
 ///
 /// Contains per-node timing and item flow data, preserving the graph
 /// structure for tree-view display.
-#[pyclass]
+#[pyclass(module = "akayu")]
 #[derive(Clone)]
 pub struct ProfileReport {
     nodes: Vec<ReportNode>,

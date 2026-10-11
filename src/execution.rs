@@ -182,6 +182,22 @@ fn emit_into_target(
     Ok(())
 }
 
+/// The (state, output) pair an accumulate function with `returns_state=True`
+/// returns.
+fn split_state(py: Python, result: Py<PyAny>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    result.extract(py).map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "accumulate(returns_state=True) needs the function to return a (state, output) \
+             pair, got {}",
+            result
+                .bind(py)
+                .get_type()
+                .name()
+                .map_or_else(|_| "?".into(), |n| n.to_string())
+        ))
+    })
+}
+
 /// The truth of a predicate's result. Released as a `Bound`: dropping a
 /// `Py` looks up pyo3's thread-local GIL count.
 #[inline(always)]
@@ -826,9 +842,10 @@ fn apply_logic_general(
             };
             let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
             let output = if *returns_state {
-                let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
-                *state = tuple.0;
-                tuple.1
+                let (new_state, output) =
+                    wrap_error(py, split_state(py, result), ctx.name, ctx.source_location)?;
+                *state = new_state;
+                output
             } else {
                 *state = result.clone_ref(py);
                 result
@@ -1024,9 +1041,10 @@ pub(crate) fn apply_logic_batch(
                     .unwrap_or_else(|| vectorcall2(py, func, state, x));
                 let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
                 if *returns_state {
-                    let tuple: (Py<PyAny>, Py<PyAny>) = result.extract(py)?;
-                    *state = tuple.0;
-                    *x = tuple.1;
+                    let (new_state, output) =
+                        wrap_error(py, split_state(py, result), ctx.name, ctx.source_location)?;
+                    *state = new_state;
+                    *x = output;
                 } else {
                     *state = result.clone_ref(py);
                     *x = result;
