@@ -61,6 +61,7 @@ enum Out {
 
 impl Out {
     /// Python truthiness: nonzero (a NaN is truthy).
+    #[inline(always)]
     fn truth(&self) -> bool {
         match *self {
             Out::Bool(b) => b,
@@ -115,6 +116,7 @@ impl NumProgram {
         Some(self.eval(unbox(x)?)?.truth())
     }
 
+    #[inline(always)]
     fn eval(&self, mut v: Num) -> Option<Out> {
         for step in &self.0 {
             match *step {
@@ -142,8 +144,24 @@ fn boxed(py: Python, v: Num) -> Option<Py<PyAny>> {
 }
 
 /// Consecutive map/filter steps of a fused chain that all have programs:
-/// the item stays unboxed from the first step to the last.
-pub struct NumRun(Vec<(bool, NumProgram)>);
+/// the item stays unboxed from the first step to the last. The map steps'
+/// operations are laid out flat, one loop iteration each.
+pub struct NumRun {
+    ops: Vec<RunOp>,
+    /// Chain steps the run covers.
+    steps: usize,
+}
+
+/// One operation of a run on the unboxed item.
+enum RunOp {
+    /// item = item <op> c
+    Arith(Arith, Num),
+    /// item = (item <op> c): only a run's last operation.
+    Cmp(Cmp, Num),
+    /// A filter step: its program runs on a copy of the item, which is
+    /// dropped unless the result is truthy.
+    Filter(NumProgram),
+}
 
 /// What a run did with one item.
 pub(crate) enum RunOutcome {
@@ -209,7 +227,7 @@ impl NumRun {
         py: Python,
         steps: impl Iterator<Item = (bool, &'a BuiltinOp)>,
     ) -> Option<Self> {
-        let mut run = Vec::new();
+        let (mut ops, mut covered) = (Vec::new(), 0);
         for (is_filter, op) in steps {
             let op = match op {
                 BuiltinOp::Numeric(_, generic) => generic,
@@ -218,17 +236,28 @@ impl NumRun {
             let Some(program) = NumProgram::from_op(py, op) else {
                 break;
             };
-            let yields_bool = !is_filter && program.ends_with_compare();
-            run.push((is_filter, program));
+            covered += 1;
+            if is_filter {
+                ops.push(RunOp::Filter(program));
+                continue;
+            }
+            let yields_bool = program.ends_with_compare();
+            ops.extend(program.0.into_iter().map(|step| match step {
+                Step::Arith(op, c) => RunOp::Arith(op, c),
+                Step::Cmp(op, c) => RunOp::Cmp(op, c),
+            }));
             if yields_bool {
                 break;
             }
         }
-        (run.len() >= 2).then_some(Self(run))
+        (covered >= 2).then_some(Self {
+            ops,
+            steps: covered,
+        })
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.0.len()
+        self.steps
     }
 
     /// Run `x` through every step. Out of line and taking the item, so that
@@ -245,13 +274,14 @@ impl NumRun {
 
     /// Some(Some(value)), Some(None) if filtered out, None for the ordinary
     /// steps.
+    #[inline(always)]
     fn apply(&self, py: Python, x: &Py<PyAny>) -> Option<Option<Py<PyAny>>> {
         let mut v = unbox(x)?;
-        for (is_filter, program) in &self.0 {
-            match (*is_filter, program.eval(v)?) {
-                (false, Out::Num(n)) => v = n,
-                (false, Out::Bool(b)) => {
-                    // Only a run's last step yields a bool (from_steps).
+        for op in &self.ops {
+            match op {
+                RunOp::Arith(op, c) => v = arith(v, *op, *c)?,
+                RunOp::Cmp(op, c) => {
+                    let b = compare(v, *op, *c)?;
                     return Some(Some(
                         pyo3::types::PyBool::new(py, b)
                             .to_owned()
@@ -259,8 +289,8 @@ impl NumRun {
                             .unbind(),
                     ));
                 }
-                (true, out) => {
-                    if !out.truth() {
+                RunOp::Filter(program) => {
+                    if !program.eval(v)?.truth() {
                         return Some(None);
                     }
                 }
@@ -326,6 +356,7 @@ fn collect(py: Python, op: &BuiltinOp, steps: &mut Vec<Step>) -> Option<()> {
     }
 }
 
+#[inline(always)]
 fn unbox(x: &Py<PyAny>) -> Option<Num> {
     let p = x.as_ptr();
     // SAFETY: GIL held by every caller; exact type checks on a live object.
@@ -343,6 +374,7 @@ fn unbox(x: &Py<PyAny>) -> Option<Num> {
 }
 
 /// Python's int -> float conversion (correctly rounded), as `i64 as f64` is.
+#[inline(always)]
 fn float(v: Num) -> f64 {
     match v {
         #[allow(clippy::cast_precision_loss)]
@@ -351,6 +383,7 @@ fn float(v: Num) -> f64 {
     }
 }
 
+#[inline(always)]
 fn arith(a: Num, op: Arith, b: Num) -> Option<Num> {
     if let (Num::Int(a), Num::Int(b)) = (a, b) {
         return Some(match op {
@@ -394,6 +427,7 @@ fn arith(a: Num, op: Arith, b: Num) -> Option<Num> {
     }))
 }
 
+#[inline(always)]
 fn compare(a: Num, op: Cmp, b: Num) -> Option<bool> {
     let ord = match (a, b) {
         (Num::Int(a), Num::Int(b)) => Some(a.cmp(&b)),
