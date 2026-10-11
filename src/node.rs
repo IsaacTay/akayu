@@ -126,6 +126,9 @@ pub struct ChainNode {
     /// If this is a Sink that calls .emit() on a Source node, store the target
     /// for direct Rust dispatch (bypasses Python vectorcall).
     pub emit_target: Option<Py<crate::Stream>>,
+    /// Set by compile() on the first step of a run of numeric steps, which
+    /// then execute together on unboxed values (see `numeric`).
+    pub numeric_run: Option<Box<crate::numeric::NumRun>>,
 }
 
 /// Hint for builtin function fast-paths.
@@ -213,6 +216,10 @@ pub enum BuiltinOp {
     AccumMax,
     /// min(state, x)
     AccumMin,
+
+    /// Arithmetic/comparison chain with an unboxed fast path for exact ints
+    /// and floats; the boxed op is the fallback (see `numeric`).
+    Numeric(Box<crate::numeric::NumProgram>, Box<BuiltinOp>),
 
     // --- sink(func) patterns ---
     /// sink(lst.append) on an exact list: PyList_Append, no method call

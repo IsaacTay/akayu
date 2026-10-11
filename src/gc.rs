@@ -54,6 +54,7 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         BuiltinOp::TupleConstruct(ops) | BuiltinOp::ListConstruct(ops) => {
             ops.iter().try_for_each(|op| visit_builtin(op, visit))
         }
+        BuiltinOp::Numeric(_, generic) => visit_builtin(generic, visit),
         BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
             visit_builtin(a, visit)?;
             visit_builtin(b, visit)

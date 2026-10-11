@@ -11,6 +11,7 @@ use crate::node::{
     BinaryOp, BuiltinOp, ChainNode, ChunkByState, CombineLatestState, ExtractBetweenState,
     NodeLogic,
 };
+use crate::numeric::RunOutcome;
 use crate::pool::{self, Latch};
 use crate::profiling;
 use std::sync::Arc;
@@ -357,6 +358,10 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
 
         // --- Phase 2 variants ---
         BuiltinOp::BinOp(bin_op, rhs) => binary_op(py, bin_op, x, rhs),
+        BuiltinOp::Numeric(program, generic) => match program.run(py, x) {
+            Some(v) => Ok(v),
+            None => apply_builtin(py, generic, x),
+        },
         BuiltinOp::Compare(cmp_op, rhs) => {
             let r = unsafe {
                 pyo3::ffi::PyObject_RichCompareBool(x.as_ptr(), rhs.as_ptr(), cmp_op.to_ffi())
@@ -573,8 +578,21 @@ fn apply_chain(
     profiling: bool,
 ) -> PyResult<StepResult> {
     let mut val = x;
-    for i in 0..steps.len() {
+    let mut i = 0;
+    while i < steps.len() {
+        if !profiling && let Some(run) = steps[i].numeric_run.as_deref() {
+            match run.run(py, val) {
+                RunOutcome::Value(v) => {
+                    val = v;
+                    i += run.len();
+                    continue;
+                }
+                RunOutcome::Filtered => return Ok(StepResult::Filtered),
+                RunOutcome::Fallback(v) => val = v, // the ordinary steps below
+            }
+        }
         let step = &mut steps[i];
+        i += 1;
         let step_ctx = NodeCtx {
             builtin_op: &step.builtin_op,
             cached_vc: &step.cached_vectorcall,
@@ -591,7 +609,7 @@ fn apply_chain(
             StepResult::Batch(items) => {
                 // Flatten mid-chain: switch remaining steps to batch mode
                 let mut batch = items;
-                for s in &mut steps[(i + 1)..] {
+                for s in &mut steps[i..] {
                     let s_ctx = NodeCtx {
                         builtin_op: &s.builtin_op,
                         cached_vc: &s.cached_vectorcall,
@@ -1005,7 +1023,20 @@ pub(crate) fn apply_logic_batch(
 
         NodeLogic::Chain { steps } => {
             let mut batch = items;
-            for step in steps.iter_mut() {
+            let mut i = 0;
+            while i < steps.len() {
+                if !profiling && let Some(run) = steps[i].numeric_run.as_deref() {
+                    match run.run_batch(py, batch) {
+                        Ok(out) => {
+                            batch = out;
+                            i += run.len();
+                            continue;
+                        }
+                        Err(untouched) => batch = untouched,
+                    }
+                }
+                let step = &mut steps[i];
+                i += 1;
                 let step_ctx = NodeCtx {
                     builtin_op: &step.builtin_op,
                     cached_vc: &step.cached_vectorcall,

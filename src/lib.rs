@@ -21,6 +21,7 @@ mod gc;
 mod helpers;
 mod lock;
 mod node;
+mod numeric;
 mod operations;
 mod optimization;
 mod pool;

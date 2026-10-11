@@ -192,7 +192,13 @@ fn parse_cached(py: Python, result: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     if let Some((_, op)) = parsed.get(&key) {
         return Some(Arc::clone(op));
     }
-    let op = Arc::new(parse_analysis_tuple(py, result.bind(py))?);
+    let op = parse_analysis_tuple(py, result.bind(py))?;
+    let op = Arc::new(match crate::numeric::NumProgram::from_op(py, &op) {
+        Some(program) if program.worth_alone() => {
+            BuiltinOp::Numeric(Box::new(program), Box::new(op))
+        }
+        _ => op,
+    });
     if parsed.len() >= 256 {
         parsed.retain(|_, (held, _)| held.get_refcnt(py) > 1);
     }
