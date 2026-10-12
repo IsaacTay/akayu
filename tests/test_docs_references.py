@@ -23,13 +23,14 @@ NESTED_RE = re.compile(r"^\s{4,}- `([\w.-]+\.(?:rs|py))`", re.MULTILINE)
 
 
 def _recipes():
-    text = (ROOT / "justfile").read_text()
-    return set(re.findall(r"^([a-z][\w-]*)(?:\s[^\n:=]*)?:(?!=)", text, re.MULTILINE))
+    text = (ROOT / "justfile").read_text(encoding="utf-8")
+    # A recipe line: its name, any parameters (`py="3.13"`), then `:` (not `:=`).
+    return set(re.findall(r"^([a-z][\w-]*)(?:\s[^\n:]*)?:(?!=)", text, re.MULTILINE))
 
 
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(ROOT)))
 def test_referenced_paths_exist(doc):
-    text = doc.read_text()
+    text = doc.read_text(encoding="utf-8")
     # Backticked paths, plus scripts named in python/pytest commands (code blocks).
     named = PATH_RE.findall(text) + [
         p
@@ -43,13 +44,13 @@ def test_referenced_paths_exist(doc):
 
 @pytest.mark.parametrize("doc", DOCS, ids=lambda p: str(p.relative_to(ROOT)))
 def test_referenced_recipes_exist(doc):
-    missing = sorted(set(JUST_RE.findall(doc.read_text())) - _recipes())
+    missing = sorted(set(JUST_RE.findall(doc.read_text(encoding="utf-8"))) - _recipes())
     assert not missing, f"{doc.name} references missing just recipes: {missing}"
 
 
 def test_contributing_file_map_matches_the_tree():
     """The nested src/ file list must name real files."""
-    text = (ROOT / "CONTRIBUTING.md").read_text()
+    text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     section = text[text.index("## Project Structure") : text.index("### Python Package Structure")]
     named = NESTED_RE.findall(section)
     assert named, "file map not found"
@@ -59,4 +60,4 @@ def test_contributing_file_map_matches_the_tree():
 
 def test_no_machine_specific_paths():
     for doc in DOCS:
-        assert "/mnt/" not in doc.read_text(), f"{doc.name} contains a machine-specific path"
+        assert "/mnt/" not in doc.read_text(encoding="utf-8"), f"{doc.name} contains a machine-specific path"

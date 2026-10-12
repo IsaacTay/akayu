@@ -7,6 +7,7 @@ user's line instead of akayu/__init__.py.
 """
 
 import inspect
+import re
 
 import pytest
 
@@ -60,5 +61,5 @@ def test_error_message_names_the_user_line():
     s = akayu.Stream()
     line = _line() + 1  # the next line
     s.map(lambda x: 1 // x).sink(lambda _: None)
-    with pytest.raises(RuntimeError, match=rf"defined at {HERE}:{line}"):
+    with pytest.raises(RuntimeError, match=rf"defined at {re.escape(HERE)}:{line}"):
         s.emit(0)
