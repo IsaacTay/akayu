@@ -94,45 +94,50 @@ build-wheels:
     @echo "Wheels built:"
     @ls -la dist/*.whl
 
-# Build all target wheels (host + aarch64) and upload each one to the
-# configured copyparty share. Each wheel uploads under its own native filename
-# so different arches coexist on the server (no clobbering).
-#
-# Auto-enters the aarch64 nix dev shell (`nix develop .#aarch64-linux`) if
-# maturin isn't on PATH already. The cross-build script handles staging the
-# cross gcc wrapper to bypass a known /nix/store path-resolution quirk on this
-# host.
+# Built on this host, no CI: manylinux x86_64 and aarch64 (glibc 2.17+), macOS
+# arm64 and x86_64, Windows x64. Enters the `wheels` dev shell (flake.nix) when
+# its tools aren't on PATH.
+# Build wheels for every platform (CPython 3.13 and 3.14) and an sdist into dist/
+wheels:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v cargo-xwin >/dev/null 2>&1 || ! command -v zig >/dev/null 2>&1; then
+        exec nix develop .#wheels --command just wheels
+    fi
+    # The dev shells' Python setup hooks pin the platform tag to the host's.
+    unset _PYTHON_HOST_PLATFORM PYTHONPATH PYO3_PYTHON
+    export CARGO_TARGET_DIR=target/wheels
+    mkdir -p dist
+    rm -f dist/*.whl dist/*.tar.gz
+    build() { maturin build --release --out dist "$@"; }
+    # Linux: zig links against glibc 2.17 symbols, so the wheels are manylinux2014.
+    build --zig --target x86_64-unknown-linux-gnu --compatibility manylinux_2_17 -i python3.13 python3.14
+    build --zig --target aarch64-unknown-linux-gnu --compatibility manylinux_2_17 -i python3.13 python3.14
+    # macOS: zig links without Apple's SDK (an extension module needs only libSystem).
+    build --zig --target aarch64-apple-darwin -i python3.13 python3.14
+    build --zig --target x86_64-apple-darwin -i python3.13 python3.14
+    # Windows: cargo-xwin; PyO3 generates the python3x.lib import libraries.
+    build --target x86_64-pc-windows-msvc -i python3.13 python3.14 --features pyo3/generate-import-lib
+    maturin sdist --out dist
+    echo ""
+    ls -la dist
+
+# Test dist/'s Windows x64 wheel on this host, under Wine (after `just wheels`)
+test-wheel-windows py="3.13":
+    scripts/test-wheel-windows.sh {{py}} {{quick_ignores}}
+
+# Test dist/'s aarch64 Linux wheel on this host, under qemu (after `just wheels`; slow)
+test-wheel-aarch64 py="3.13":
+    scripts/test-wheel-aarch64.sh {{py}} {{quick_ignores}}
+
+# Each wheel uploads under its own native filename, so different platforms
+# coexist on the server (no clobbering).
+# Build every platform's wheels (`just wheels`) and upload them to the copyparty share
 publish:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # If maturin isn't on PATH, re-exec into the aarch64 dev shell. `exec`
-    # replaces this process so we don't keep going in an under-equipped env.
-    if ! command -v maturin >/dev/null 2>&1; then
-        echo "maturin not on PATH — entering nix develop .#aarch64-linux ..."
-        exec env -u PATH nix develop .#aarch64-linux --command just publish
-    fi
-
-    # --- Build host (x86_64) wheel ---------------------------------------
-    # The aarch64 dev shell sets PYO3_CROSS_* + _PYTHON_HOST_PLATFORM, which
-    # would mislead maturin into tagging the host wheel as aarch64. Strip them
-    # for this build only.
-    env -u PYO3_CROSS_INCLUDE_DIR \
-        -u PYO3_CROSS_LIB_DIR \
-        -u PYO3_CROSS_PYTHON_VERSION \
-        -u PYO3_CROSS_PYTHON_IMPLEMENTATION \
-        -u _PYTHON_HOST_PLATFORM \
-        -u AKAYU_CROSS_GCC_WRAPPER \
-        -u AKAYU_CROSS_PYTHON \
-        -u CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER \
-        just build-wheels
-
-    # --- Build aarch64 wheel ---------------------------------------------
-    ./scripts/cross-build-aarch64.sh
-
-    echo ""
-    echo "All wheels built:"
-    ls -la dist/*.whl
+    just wheels
 
     # --- Upload every wheel ----------------------------------------------
     url="https://api-v2.precix.io/share/akayu_wheels/?replace"

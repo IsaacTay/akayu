@@ -113,6 +113,27 @@ If you encounter unexpected behavior after changing Rust code, you may have a st
 
 The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebuild when `pyproject.toml`, `Cargo.toml` or `src/**/*.rs` change, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.
 
+## Building Wheels
+
+`just wheels` builds every platform's wheels on this machine (no CI), for CPython 3.13 and 3.14, plus an sdist, into `dist/`:
+
+| Platform | How |
+|----------|-----|
+| Linux x86_64, aarch64 (manylinux2014, glibc 2.17+) | linked with zig against old glibc symbols, so no manylinux container is needed |
+| macOS arm64, x86_64 | linked with zig; an extension module needs only `libSystem`, so no Apple SDK is needed |
+| Windows x64 | `cargo-xwin` (clang-cl + lld-link), with PyO3 generating the `python3x.lib` import libraries |
+
+The tools come from the `wheels` dev shell in `flake.nix` (`nix develop .#wheels`), which `just wheels` enters by itself. On first use `cargo-xwin` downloads the MSVC C runtime and Windows SDK headers to `~/.cache/cargo-xwin`. `just publish` runs `just wheels` and uploads the wheels.
+
+The Windows and aarch64 wheels can be tested here too:
+
+| Command | Description |
+|---------|-------------|
+| `just test-wheel-windows [3.13\|3.14]` | the quick tests on the Windows wheel, under Wine with the embeddable CPython from python.org (the modules that import numpy are skipped: numpy calls a C runtime function Wine lacks) |
+| `just test-wheel-aarch64 [3.13\|3.14]` | the quick tests on the aarch64 wheel, with an aarch64 CPython under qemu user-mode emulation (slow) |
+
+The macOS wheels can't be run here; test them on a Mac.
+
 ## Running Tests
 
 The project includes a comprehensive test suite using `pytest`.
@@ -165,7 +186,7 @@ together with the quick tests and the documentation checks; run it before submit
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
 - `docs/`: the documentation site (`mkdocs.yml`); `just docs-check` runs its code blocks.
 - `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
-- `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, aarch64 cross-build).
+- `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, testing the Windows and aarch64 wheels under Wine and qemu).
 - `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
 
 ### Python Package Structure (maturin convention)

@@ -76,7 +76,7 @@ def test_compiling_a_very_deep_graph():
 def test_a_thread_with_a_small_stack():
     code, last = run_script("""
         import akayu, threading
-        threading.stack_size(64 * 1024)
+        threading.stack_size(128 * 1024)  # musl's default; aarch64 glibc's minimum
         result = []
         def work():
             s = akayu.Stream(); node = s
