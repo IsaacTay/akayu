@@ -291,6 +291,14 @@ prefetched items runs them too, so at most pool size + 1 run at once: on a 4-CPU
 `prefetch(16)` keeps 16 items in flight but runs 5 at a time, and the example above runs up to 5
 API calls at once, not 8.
 
+numpy releases the GIL inside most operations on large arrays of numbers (arithmetic, sorting,
+linear algebra), so branches doing that kind of numpy work do run at the same time. Its linear
+algebra library (usually OpenBLAS) also starts its own threads, one per CPU by default, on top of
+akayu's. When `par()` or `prefetch()` already provides the parallelism, those extra threads only
+compete for the same CPUs, and on a busy machine that can make matrix work many times slower. Limit
+them by setting `OPENBLAS_NUM_THREADS=1` (`MKL_NUM_THREADS=1` for an MKL build) before numpy is
+imported, or at run time with [threadpoolctl](https://github.com/joblib/threadpoolctl).
+
 ### Thread Safety at Convergence Points
 
 Where `par()` branches meet again (a `union` or `zip` below them), items from several branches can
@@ -351,12 +359,17 @@ Where the locks are:
 - Adding nodes, compiling or stopping a profile from a callback, on the part of the graph that is
   running, raises a `RuntimeError`; the graph keeps working afterwards. The same goes for another
   thread doing so while an item passes through: build the graph before threads emit into it.
-- Two threads whose callbacks emit into each other's sources can deadlock: each holds its own
-  source's lock and waits for the other's. This happens whether or not the sources merge, compiled
-  or not, with one exception: sources that merge (`union`, `zip`, `combine_latest`) in a graph
-  without `par()`, compiled, share one lock, so the threads take turns. A thread waiting for a lock
-  can't be interrupted (Ctrl+C takes effect only once it gets the lock), so a deadlocked process
-  has to be killed. Hand such items to a queue instead of emitting them from the callback.
+- Two threads whose callbacks emit into each other's sources would each wait for the other's
+  source forever. Instead, the thread that finds the other one waiting for it fails with
+  "Re-entrant emit detected" (rarely, both do), and the other finishes. The same goes for a `par()`
+  branch or prefetched call that emits into, or flushes, the source it runs under. Sources that
+  merge (`union`, `zip`, `combine_latest`) in a graph without `par()`, compiled, share one lock, so
+  there the threads take turns. To pass items between such threads without failures, hand them to
+  a queue instead of emitting them from the callback.
+- akayu sees who waits for whom through sources and `par()`/`prefetch()` work only. A cycle that
+  also runs through a thread waiting for a lock inside a graph (where branches or sources merge),
+  held by a third thread, can still deadlock. Ctrl+C interrupts a thread waiting to emit into or
+  flush a source, but one waiting for a lock inside a graph sees it only once it has the lock.
 - Each node an item passes adds to the thread's native stack. A graph thousands of nodes deep, a
   long chain of sources feeding each other, or a thread with a small stack raises `RecursionError`
   when the stack is nearly used up, rather than crashing; so do `flush()` and `drain()`.
@@ -404,7 +417,8 @@ Benchmark showing minimal overhead when combining:
   `prefetch(2)`, item 1's error comes out of the `emit()` of item 2, or of a `flush()`. Results
   that finished before it are still delivered. After such an `emit()`, the next items carry on;
   an `emit_batch()` stops at that point, and the batch's items it hadn't started yet are dropped.
-- Ctrl+C interrupts a thread that is waiting for branches or prefetched items. An `emit()`
+- Ctrl+C interrupts a thread that is waiting for branches or prefetched items, or for a source
+  another thread is emitting into. An `emit()`
   interrupted while waiting for a prefetched result has already started its item: the next
   `flush()` delivers it, so retrying the `emit()` would deliver it twice. Likewise, `par()` branches
   already running on pool threads keep going after the `emit()` raises, and pass their results

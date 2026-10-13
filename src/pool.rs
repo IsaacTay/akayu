@@ -12,6 +12,11 @@
 //! inside a node's update, and a foreign task reaching that node would fail
 //! its borrow instead of waiting for the lock.
 //! Jobs run in a copy of the submitting thread's `contextvars` context.
+//!
+//! Each task records the thread running it, and a thread asleep in
+//! `wait_for` the tasks it waits for: a thread about to wait for a source's
+//! lock checks with them whether the holder is waiting for it in turn
+//! (`lock::holder_waits_for_this_thread`).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -23,42 +28,11 @@ use pyo3::prelude::*;
 /// A unit of work, run on a worker (or its submitter) with the GIL held.
 pub(crate) type Job = Box<dyn FnOnce(Python<'_>) + Send>;
 
-/// Stacks, as (lowest, highest) address, of threads waiting for a task.
-type Stacks = Arc<[(usize, usize)]>;
-
-/// The threads waiting for a task: the one that submitted it, and those
-/// waiting in turn for that thread's own task (nested par()/prefetch()),
-/// each by its stack.
-#[derive(Clone, Default)]
-struct Waiting {
-    submitter: (usize, usize),
-    /// None unless the submitter itself runs a task for another thread.
-    outer: Option<Stacks>,
-}
-
-impl Waiting {
-    fn contains(&self, address: usize) -> bool {
-        let within = |&(low, high): &(usize, usize)| low <= address && address < high;
-        within(&self.submitter) || self.outer.as_deref().is_some_and(|o| o.iter().any(within))
-    }
-}
-
-thread_local! {
-    /// While a worker runs a task: the threads waiting for it.
-    static RUNNING_FOR: std::cell::RefCell<Option<Waiting>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Whether `address` is on the stack of a thread that waits for the task
-/// this thread is running (see `Emitting::check_not_waited_on`).
-pub(crate) fn waits_for_this_thread(address: usize) -> bool {
-    RUNNING_FOR.with(|r| r.borrow().as_ref().is_some_and(|w| w.contains(address)))
-}
-
 /// A queued job that runs at most once.
 pub(crate) struct Task {
     job: Mutex<Option<Job>>,
-    waiting: Waiting,
+    /// The thread running the job (`lock::this_thread`), 0 when none is.
+    runner: AtomicUsize,
 }
 
 impl Task {
@@ -76,47 +50,81 @@ impl Task {
             .is_none()
     }
 
-    /// Run the job here, on the thread that submitted it, if no worker has
-    /// started it.
+    /// Run the job here, unless another thread (a worker, or the thread that
+    /// submitted it) already has.
     pub(crate) fn run_if_unclaimed(&self, py: Python) {
-        if let Some(job) = self.claim() {
-            job(py);
-        }
-    }
-
-    /// Run the job on a worker, if its submitter hasn't, with the threads
-    /// waiting for it on record.
-    fn run_for_submitter(&self, py: Python) {
-        /// Puts back what the worker was running for before.
-        struct Restore(Option<Waiting>);
-        impl Drop for Restore {
+        /// Clears `runner`, also when the job unwinds.
+        struct Finished<'a>(&'a AtomicUsize);
+        impl Drop for Finished<'_> {
             fn drop(&mut self) {
-                let outer = self.0.take();
-                RUNNING_FOR.with(|r| *r.borrow_mut() = outer);
+                self.0.store(0, Ordering::Release);
             }
         }
         if let Some(job) = self.claim() {
-            let outer = RUNNING_FOR.with(|r| r.borrow_mut().replace(self.waiting.clone()));
-            let _restore = Restore(outer);
+            self.runner
+                .store(crate::lock::this_thread(), Ordering::Release);
+            let _finished = Finished(&self.runner);
             job(py);
         }
     }
 }
 
-/// Who waits for a task submitted now, from this thread.
-fn waiting_for_new_task() -> Waiting {
-    let outer = RUNNING_FOR.with(|r| {
-        r.borrow().as_ref().map(|w| {
-            // This thread runs a task: its waiters wait for this one too.
-            let mut stacks = vec![w.submitter];
-            stacks.extend(w.outer.as_deref().unwrap_or_default());
-            Stacks::from(stacks)
-        })
-    });
-    Waiting {
-        submitter: crate::stack::range(),
-        outer,
+/// A thread asleep in `wait_for`: who, by `lock::this_thread` and by its
+/// stack, and the tasks it waits for.
+struct Sleeper {
+    thread: usize,
+    stack: (usize, usize),
+    tasks: Vec<Arc<Task>>,
+}
+
+/// The threads asleep in `wait_for` (see `lock::holder_waits_for_this_thread`).
+static SLEEPING: Mutex<Vec<Sleeper>> = Mutex::new(Vec::new());
+
+/// Lists this thread in `SLEEPING` until dropped.
+struct Asleep(usize);
+
+impl Asleep {
+    fn new(tasks: &[Arc<Task>]) -> Self {
+        let thread = crate::lock::this_thread();
+        SLEEPING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Sleeper {
+                thread,
+                stack: crate::stack::range(),
+                tasks: tasks.to_vec(),
+            });
+        Self(thread)
     }
+}
+
+impl Drop for Asleep {
+    fn drop(&mut self) {
+        // A signal handler run while waiting may wait again on this thread:
+        // the innermost wait ends first, and is listed last.
+        let mut sleeping = SLEEPING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = sleeping.iter().rposition(|s| s.thread == self.0) {
+            sleeping.remove(i);
+        }
+    }
+}
+
+/// If a thread `is` matches (given its `lock::this_thread` and its stack) is
+/// asleep in `wait_for`: the threads running the tasks it waits for.
+pub(crate) fn runners_awaited_by(is: &dyn Fn(usize, (usize, usize)) -> bool) -> Vec<usize> {
+    let sleeping = SLEEPING.lock().unwrap_or_else(PoisonError::into_inner);
+    sleeping
+        .iter()
+        .rev()
+        .find(|s| is(s.thread, s.stack))
+        .map(|s| {
+            s.tasks
+                .iter()
+                .map(|t| t.runner.load(Ordering::Acquire))
+                .filter(|&r| r != 0)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 struct Queue {
@@ -211,10 +219,9 @@ pub(crate) fn _shutdown_pool(py: Python) {
 
 /// Queue `job`, starting a worker if none is idle and the pool isn't full.
 pub(crate) fn submit(job: Job) -> Arc<Task> {
-    let waiting = waiting_for_new_task();
     let task = Arc::new(Task {
         job: Mutex::new(Some(job)),
-        waiting,
+        runner: AtomicUsize::new(0),
     });
     let pool = pool();
     let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
@@ -267,7 +274,7 @@ fn worker(pool: &Pool) {
                         .unwrap_or_else(PoisonError::into_inner);
                 }
             });
-            task.run_for_submitter(py);
+            task.run_if_unclaimed(py);
             let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
             q.running -= 1;
             if q.running == 0 {
@@ -324,6 +331,10 @@ pub(crate) fn wait_for(
         }
         task.run_if_unclaimed(py);
     }
+    if target.is_ready() {
+        return Ok(());
+    }
+    let _asleep = Asleep::new(own);
     while !target.is_ready() {
         py.detach(|| target.wait_timeout(SIGNAL_POLL));
         py.check_signals()?;

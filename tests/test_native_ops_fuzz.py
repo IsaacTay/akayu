@@ -188,7 +188,7 @@ def canon(v):
     if isinstance(v, BaseException):
         return ("raise", type(v).__name__)
     if isinstance(v, float) and math.isnan(v):
-        return ("float", "nan")
+        return (type(v).__name__, "nan")
     return (type(v).__name__, repr(v))
 
 
@@ -229,46 +229,51 @@ def per_item(build, compiled, values):
     return got
 
 
-def mismatches(seed):
+def mismatches(seed, values=VALUES):
     rng = random.Random(seed)
+    return [m for _ in range(EXPRS_PER_SEED) for m in expr_mismatches(expression(rng), values)]
+
+
+def expr_mismatches(src, values=VALUES):
+    """Where akayu and Python disagree on `lambda x: <src>` over `values`, as a
+    map, a filter and a map.map, item by item and as a batch, uncompiled and
+    compiled."""
     found = []
-    for _ in range(EXPRS_PER_SEED):
-        src = expression(rng)
-        f = eval(f"lambda x: {src}")
-        want_map = [[r] if r[0] != "raise" else r for r in (call(f, v) for v in VALUES)]
-        want_filter = []
-        for v in VALUES:
-            t = truth(f, v)
-            want_filter.append(canon(t) if isinstance(t, BaseException) else [canon(v)] if t else [])
-        graphs = {
-            "map": (lambda s, out, g: s.map(g).sink(out.append), want_map),
-            "filter": (lambda s, out, g: s.filter(g).sink(out.append), want_filter),
-            "map.map": (lambda s, out, g: s.map(g).map(lambda y: y).sink(out.append), want_map),
-        }
-        for compiled in (False, True):
-            for kind, (build, want) in graphs.items():
-                # A fresh function per graph: analysis results are cached by code.
-                g = eval(f"lambda x: {src}")
-                got = per_item(lambda s, out, g=g, build=build: build(s, out, g), compiled, VALUES)
-                for v, w, a in zip(VALUES, want, got, strict=True):
-                    if w != a:
-                        found.append(f"{kind} compiled={compiled} {src} on {v!r}: python {w}, akayu {a}")
-                        break
-            # A batch of the values Python handles stops nowhere.
-            ok = [v for v, r in zip(VALUES, want_map, strict=True) if isinstance(r, list)]
+    f = eval(f"lambda x: {src}")
+    want_map = [[r] if r[0] != "raise" else r for r in (call(f, v) for v in values)]
+    want_filter = []
+    for v in values:
+        t = truth(f, v)
+        want_filter.append(canon(t) if isinstance(t, BaseException) else [canon(v)] if t else [])
+    graphs = {
+        "map": (lambda s, out, g: s.map(g).sink(out.append), want_map),
+        "filter": (lambda s, out, g: s.filter(g).sink(out.append), want_filter),
+        "map.map": (lambda s, out, g: s.map(g).map(lambda y: y).sink(out.append), want_map),
+    }
+    for compiled in (False, True):
+        for kind, (build, want) in graphs.items():
+            # A fresh function per graph: analysis results are cached by code.
             g = eval(f"lambda x: {src}")
-            s, out = akayu.Stream(), []
-            s.map(g).sink(out.append)
-            if compiled:
-                s.compile()
-            try:
-                s.emit_batch(ok)
-                got = [canon(o) for o in out]
-            except Exception as e:
-                got = canon(innermost(e))
-            want = [r[0] for r in want_map if isinstance(r, list)]
-            if got != want:
-                found.append(f"batch compiled={compiled} {src}: python {want[:5]}, akayu {got}")
+            got = per_item(lambda s, out, g=g, build=build: build(s, out, g), compiled, values)
+            for v, w, a in zip(values, want, got, strict=True):
+                if w != a:
+                    found.append(f"{kind} compiled={compiled} {src} on {v!r}: python {w}, akayu {a}")
+                    break
+        # A batch of the values Python handles stops nowhere.
+        ok = [v for v, r in zip(values, want_map, strict=True) if isinstance(r, list)]
+        g = eval(f"lambda x: {src}")
+        s, out = akayu.Stream(), []
+        s.map(g).sink(out.append)
+        if compiled:
+            s.compile()
+        try:
+            s.emit_batch(ok)
+            got = [canon(o) for o in out]
+        except Exception as e:
+            got = canon(innermost(e))
+        want = [r[0] for r in want_map if isinstance(r, list)]
+        if got != want:
+            found.append(f"batch compiled={compiled} {src}: python {want[:5]}, akayu {got}")
     return found
 
 
@@ -279,13 +284,13 @@ ACC_SEQS = [
 ACC_STARTS = ["0", "1", "0.0", "-1", "''", "[]", "2**63-1", "-2**63", "None", "1e308", "10**20", "True"]
 
 
-def accumulate_mismatches(seed):
+def accumulate_mismatches(seed, seqs=ACC_SEQS):
     rng = random.Random(seed)
     op = rng.choice(ARITH[:6])  # no **: 10**20 ** 2**62 never ends
     src = rng.choice([f"acc {op} x", f"x {op} acc", "max(acc, x)", "min(acc, x)", f"acc {op} {const(rng)}"])
     start = rng.choice(ACC_STARTS)
     found = []
-    for seq in ACC_SEQS:
+    for seq in seqs:
         f = eval(f"lambda acc, x: {src}")
         want, acc = [], eval(start)
         for v in seq:
