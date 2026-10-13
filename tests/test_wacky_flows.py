@@ -3,12 +3,15 @@ silently lose data. Each test pins the behaviour it was fixed to; the ones
 that used to crash the interpreter run in a subprocess.
 """
 
+import gc
 import operator
+import signal
 import subprocess
 import sys
 import textwrap
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -1049,3 +1052,269 @@ def test_a_profile_prints_a_node_below_a_merge_once():
     text = str(s.emit_profiled(1))
     assert "(shown above)" in text
     assert len(text.splitlines()) < 400
+
+
+# --- Round 5: signal handlers, finalizers and other threads around par() ---
+
+
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs signal.setitimer")
+@pytest.mark.parametrize("use_par", [False, True])
+def test_a_signal_handler_emitting_into_the_busy_source_is_refused(use_par):
+    """The handler runs on the main thread mid-emit (with par(), while it
+    waits for the branches): re-entry, not a deadlock on the source's lock."""
+    s, out, errors = akayu.Stream(), [], []
+    slow = lambda x: (time.sleep(0.3), x)[1]  # noqa: E731
+    if use_par:
+        p = s.par()
+        akayu.union(p.map(slow), p.map(lambda x: x)).seq().sink(out.append)
+    else:
+        s.map(slow).sink(out.append)
+    s.compile()
+
+    def handler(signum, frame):
+        try:
+            s.emit(100)
+        except RuntimeError as e:
+            errors.append(str(innermost(e)))
+
+    old = signal.signal(signal.SIGALRM, handler)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.1)
+        s.emit(1)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+    assert out == ([1, 1] if use_par else [1])
+    assert len(errors) == 1
+    assert "Re-entrant emit" in errors[0]
+
+
+def test_finalizers_emitting_from_par_branches():
+    """Garbage collection runs __del__ on whichever thread triggers it, here
+    pool threads mid-branch. An emit from it into another graph works; only
+    one landing in a source its own thread is emitting into is refused."""
+    target, out, lock = akayu.Stream(), [], threading.Lock()
+
+    def keep(x):
+        with lock:
+            out.append(x)
+
+    tp = target.par()
+    akayu.union(tp.map(lambda x: x), tp.map(lambda x: x)).seq().sink(keep)
+    target.compile()
+    errors = []
+
+    class Cycle:
+        def __init__(self):
+            self.me = self  # only the cycle collector frees it
+
+        def __del__(self):
+            try:
+                target.emit(-1)
+            except RuntimeError as e:
+                errors.append(str(innermost(e)))
+
+    def branch(x):
+        for _ in range(5):
+            Cycle()
+        return x
+
+    s = akayu.Stream()
+    p = s.par()
+    akayu.union(p.map(branch), p.map(branch)).seq().sink(target.emit)
+    s.compile()
+    threshold = gc.get_threshold()
+    gc.set_threshold(10)
+    try:
+        for i in range(200):
+            s.emit(i)
+    finally:
+        gc.set_threshold(*threshold)
+    gc.collect()
+    assert all("Re-entrant emit" in e for e in errors), set(errors)
+    finalized = 200 * 2 * 5 - len(errors)
+    assert sorted(out) == sorted([-1] * 2 * finalized + [i for i in range(200) for _ in range(4)])
+
+
+def test_a_par_branch_waiting_on_its_own_executor():
+    ex = ThreadPoolExecutor(4)
+    s, out = akayu.Stream(), []
+    p = s.par()
+    akayu.union(
+        p.map(lambda x: sum(ex.map(lambda y: y * 2, range(x, x + 8)))),
+        p.map(lambda x: ex.submit(lambda: -x).result()),
+    ).seq().sink(out.append)
+    s.compile()
+    try:
+        for i in range(200):
+            s.emit(i)
+    finally:
+        ex.shutdown()
+    assert sorted(out) == sorted([sum(range(i, i + 8)) * 2 for i in range(200)] + [-i for i in range(200)])
+
+
+def test_a_par_branch_joining_a_thread_that_emits_into_another_par_graph():
+    other, other_out = akayu.Stream(), []
+    op = other.par()
+    akayu.union(op.map(lambda x: x + 1), op.map(lambda x: x - 1)).seq().sink(other_out.append)
+    other.compile()
+
+    def branch(x):
+        t = threading.Thread(target=other.emit, args=(x,))
+        t.start()
+        t.join()
+        return x
+
+    s, out = akayu.Stream(), []
+    p = s.par()
+    akayu.union(p.map(branch), p.map(branch)).seq().sink(out.append)
+    s.compile()
+    for i in range(100):
+        s.emit(i)
+    assert sorted(out) == sorted([*range(100), *range(100)])
+    assert sorted(other_out) == sorted([i + d for i in range(100) for d in (1, 1, -1, -1)])
+
+
+def test_many_short_lived_threads_through_par_and_prefetch():
+    s, out, lock = akayu.Stream(), [], threading.Lock()
+
+    def keep(x):
+        with lock:
+            out.append(x)
+
+    p = s.par()
+    akayu.union(p.map(lambda x: x * 2), p.prefetch(2).map(lambda x: x * 3)).seq().sink(keep)
+    s.compile()
+    threads = [threading.Thread(target=s.emit, args=(i,)) for i in range(300)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    s.flush()
+    assert sorted(out) == sorted([i * k for i in range(300) for k in (2, 3)])
+
+
+# --- Round 5: waiting for a source's lock ---
+# A thread waits for a source's lock only while its holder isn't waiting for
+# it in turn. This used to be judged by who submitted the waiting pool task:
+# its submitter holding the source counted as a feedback loop, even when it
+# held it only briefly, while running work itself.
+
+
+def shared_stream():
+    """A stream emitted into from several threads, whose pipeline releases
+    the GIL, as I/O does."""
+    log, logged, lock = akayu.Stream(name="log"), [], threading.Lock()
+
+    def keep(x):
+        with lock:
+            logged.append(x)
+
+    log.map(lambda x: (time.sleep(0.001), x)[1]).sink(keep)
+    return log, logged
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_par_branches_emitting_into_a_shared_stream(compiled):
+    """The calling thread runs one branch itself; its emit into the stream
+    made a pool thread's emit fail as a feedback loop: every emit() failed."""
+    log, logged = shared_stream()
+    s = akayu.Stream()
+    p = s.par()
+    akayu.union(
+        p.map(lambda x: (log.emit(("a", x)), x)[1]),
+        p.map(lambda x: (log.emit(("b", x)), x)[1]),
+    ).seq().sink(lambda _: None)
+    if compiled:
+        s.compile()
+        log.compile()
+    for i in range(30):
+        s.emit(i)
+    assert sorted(logged) == sorted((k, i) for i in range(30) for k in "ab")
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_prefetched_calls_emitting_into_a_shared_stream(compiled):
+    """A thread waiting for its oldest prefetched call runs it itself if no
+    worker has started it, and so held the stream while workers ran later
+    calls: about half the items failed."""
+    log, logged = shared_stream()
+    s = akayu.Stream()
+    s.prefetch(4).map(lambda x: (log.emit(("call", x)), x)[1]).sink(log.emit)
+    if compiled:
+        s.compile()
+        log.compile()
+    for i in range(30):
+        s.emit(i)
+    s.flush()
+    assert sorted(logged, key=repr) == sorted([*range(30), *(("call", i) for i in range(30))], key=repr)
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_threads_emitting_into_each_others_sources_raise_instead_of_deadlocking(compiled):
+    """Each holds its own source and waits for the other's: the thread that
+    finds the other waiting for it raises. Both used to wait forever."""
+    code, last = run_script(
+        f"""
+        import threading, time, akayu
+        a, b = akayu.Stream(), akayu.Stream()
+        got, errors = [], []
+        def into(other):
+            def callback(x):
+                time.sleep(0.05)  # both threads hold their own source by now
+                if x == "first":
+                    other.emit("crossed")
+                got.append(x)
+            return callback
+        a.sink(into(b))
+        b.sink(into(a))
+        if {compiled}:
+            a.compile()
+            b.compile()
+        def run(source):
+            try:
+                source.emit("first")
+            except RuntimeError as e:
+                errors.append(e)
+        threads = [threading.Thread(target=run, args=(s,), daemon=True) for s in (a, b)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(20)
+        hung = any(t.is_alive() for t in threads)
+        reentrant = all("Re-entrant emit" in str(e.__cause__ or e) for e in errors)
+        # One raises and the other finishes; rarely both find the other waiting.
+        print(hung, len(errors) == 1 and sorted(got) == ["crossed", "first"] or len(errors) == 2, reentrant)
+    """,
+        timeout=60,
+    )
+    assert (code, last) == (0, "False True True")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+@pytest.mark.parametrize("compiled", [False, True])
+def test_ctrl_c_reaches_a_thread_waiting_for_a_source(compiled):
+    """It used to take effect only once the other thread let go."""
+    s = akayu.Stream()
+    holding, release = threading.Event(), threading.Event()
+
+    def hold(x):
+        if x == "hold":
+            holding.set()
+            release.wait(10)
+
+    s.sink(hold)
+    if compiled:
+        s.compile()
+    holder = threading.Thread(target=s.emit, args=("hold",))
+    holder.start()
+    assert holding.wait(10)
+    threading.Timer(0.2, signal.raise_signal, (signal.SIGINT,)).start()
+    start = time.perf_counter()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            s.emit("waits")
+        assert time.perf_counter() - start < 5
+    finally:
+        release.set()
+        holder.join()

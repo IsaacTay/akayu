@@ -6,8 +6,9 @@
 //! per node, which cost ~3,600 instructions per emit through PyO3 method calls.
 
 use std::ops::Deref;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, PoisonError};
+use std::time::Duration;
 
 use lock_api::RawReentrantMutex;
 use parking_lot::{RawMutex, RawThreadId};
@@ -36,18 +37,19 @@ impl NodeLock {
         NodeLockGuard(self, std::marker::PhantomData)
     }
 
-    /// `acquire`, except that when another thread holds the lock, `check`
-    /// first decides whether waiting is safe (see
-    /// `Emitting::check_not_waited_on`).
+    /// `acquire`, except that while another thread holds the lock, `check`
+    /// decides whether waiting is still safe (see
+    /// `Emitting::check_not_waited_on`), every `RECHECK`: the holder may only
+    /// start waiting for this thread after this one has started waiting.
+    /// Signals (Ctrl+C) interrupt the wait with their error.
     #[inline]
     pub(crate) fn acquire_checked(
         &self,
         py: Python,
-        check: impl FnOnce() -> PyResult<()>,
+        check: impl Fn() -> PyResult<()>,
     ) -> PyResult<NodeLockGuard<'_>> {
         if !self.0.try_lock() {
-            check()?;
-            self.wait(py);
+            self.wait_checked(py, &check)?;
         }
         Ok(NodeLockGuard(self, std::marker::PhantomData))
     }
@@ -55,8 +57,21 @@ impl NodeLock {
     #[cold]
     #[inline(never)]
     fn wait(&self, py: Python) {
-        let _blocked = Blocked::new();
+        let _blocked = Blocked::new(self);
         py.detach(|| self.0.lock());
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wait_checked(&self, py: Python, check: &dyn Fn() -> PyResult<()>) -> PyResult<()> {
+        let _blocked = Blocked::new(self);
+        loop {
+            check()?;
+            if py.detach(|| self.0.try_lock_for(RECHECK)) {
+                return Ok(());
+            }
+            py.check_signals()?;
+        }
     }
 
     /// Lock within `timeout`, waiting with the GIL released.
@@ -75,32 +90,63 @@ impl NodeLock {
     }
 }
 
+/// How often a thread waiting in `acquire_checked` checks again whether its
+/// wait can end.
+const RECHECK: Duration = Duration::from_millis(20);
+
+/// This thread, for the checks below: the address of a thread-local, so
+/// unique among running threads, and never 0.
+pub(crate) fn this_thread() -> usize {
+    thread_local! {
+        static TOKEN: u8 = const { 0 };
+    }
+    TOKEN.with(|t| std::ptr::from_ref(t) as usize)
+}
+
+/// A thread waiting in `NodeLock::wait`: who, by `ThreadId`, by
+/// `this_thread` and by its stack, and the lock it waits for.
+struct BlockedOn {
+    id: std::thread::ThreadId,
+    thread: usize,
+    stack: (usize, usize),
+    lock: *const NodeLock,
+}
+
+// SAFETY: `lock` is only dereferenced under `BLOCKED`'s mutex, while the
+// thread waiting for it is listed (see `holder_waits_for_this_thread`).
+unsafe impl Send for BlockedOn {}
+
 /// Threads waiting in `NodeLock::wait`. A thread that waits for another
 /// thread's flush checks it here: a flush whose callback is blocked on a
 /// lock may be blocked on one the waiting thread holds.
-static BLOCKED: std::sync::Mutex<Vec<std::thread::ThreadId>> = std::sync::Mutex::new(Vec::new());
+static BLOCKED: std::sync::Mutex<Vec<BlockedOn>> = std::sync::Mutex::new(Vec::new());
 
 /// Lists this thread in `BLOCKED` until dropped.
-struct Blocked(std::thread::ThreadId);
+struct Blocked(usize);
 
 impl Blocked {
-    fn new() -> Self {
-        let me = std::thread::current().id();
+    fn new(lock: &NodeLock) -> Self {
+        let thread = this_thread();
         BLOCKED
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(me);
-        Self(me)
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(BlockedOn {
+                id: std::thread::current().id(),
+                thread,
+                stack: crate::stack::range(),
+                lock: std::ptr::from_ref(lock),
+            });
+        Self(thread)
     }
 }
 
 impl Drop for Blocked {
     fn drop(&mut self) {
-        let mut blocked = BLOCKED
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(i) = blocked.iter().position(|t| *t == self.0) {
-            blocked.swap_remove(i);
+        // A signal handler run while waiting may wait again on this thread:
+        // the innermost wait ends first, and is listed last.
+        let mut blocked = BLOCKED.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(i) = blocked.iter().rposition(|b| b.thread == self.0) {
+            blocked.remove(i);
         }
     }
 }
@@ -109,8 +155,54 @@ impl Drop for Blocked {
 pub(crate) fn is_blocked(thread: std::thread::ThreadId) -> bool {
     BLOCKED
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .contains(&thread)
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|b| b.id == thread)
+}
+
+/// Whether the thread emitting into (or flushing) a source, found by `mark`,
+/// an address on its stack, waits for this thread: asleep on a task this
+/// thread runs, or blocked on a lock this thread holds, directly or through
+/// other threads waiting likewise. This thread waiting for that source's lock
+/// would never end. A thread blocked on a lock that this one doesn't hold
+/// ends the search: who holds that lock isn't recorded.
+pub(crate) fn holder_waits_for_this_thread(mark: usize) -> bool {
+    #[derive(Clone, Copy)]
+    enum Who {
+        /// The thread whose stack holds this address.
+        Address(usize),
+        /// The thread with this `this_thread`.
+        Thread(usize),
+    }
+    let me = this_thread();
+    let blocked = BLOCKED.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut todo = vec![Who::Address(mark)];
+    let mut seen = Vec::new();
+    while let Some(who) = todo.pop() {
+        let is = move |thread: usize, (low, high): (usize, usize)| match who {
+            Who::Address(a) => low <= a && a < high,
+            Who::Thread(t) => t == thread,
+        };
+        if let Some(b) = blocked.iter().rev().find(|b| is(b.thread, b.stack)) {
+            // SAFETY: a thread is listed only while it waits for this lock,
+            // which outlives the wait, and this holds BLOCKED's mutex, so the
+            // thread can't stop waiting meanwhile.
+            if unsafe { &*b.lock }.held_by_this_thread() {
+                return true;
+            }
+            continue;
+        }
+        for runner in crate::pool::runners_awaited_by(&is) {
+            if runner == me {
+                return true;
+            }
+            if !seen.contains(&runner) {
+                seen.push(runner);
+                todo.push(Who::Thread(runner));
+            }
+        }
+    }
+    false
 }
 
 /// Unlocks on drop, including on error paths. Not Send: it must unlock on the
@@ -235,11 +327,12 @@ impl<'a> Emitting<'a> {
         Ok(Self(flag))
     }
 
-    /// Before waiting for a source's lock: fail, as an emit() into it from
+    /// While waiting for a source's lock: fail, as an emit() into it from
     /// the emitting thread itself would, if the thread emitting into it (or
-    /// flushing it) is waiting for this one. That is a par() branch or a
-    /// prefetched call, run on a pool thread, emitting into or flushing the
-    /// source it runs under: the wait would never end.
+    /// flushing it) is waiting for this one, so the wait would never end:
+    /// a par() branch or a prefetched call, on a pool thread, emitting into
+    /// or flushing the source it runs under, or two threads emitting into
+    /// each other's sources (see `holder_waits_for_this_thread`).
     #[cold]
     #[inline(never)]
     pub(crate) fn check_not_waited_on(
@@ -247,7 +340,7 @@ impl<'a> Emitting<'a> {
         refuse: impl FnOnce(usize) -> pyo3::PyErr,
     ) -> pyo3::PyResult<()> {
         let state = flag.load(Ordering::Acquire);
-        if state != IDLE && crate::pool::waits_for_this_thread(state & !FLUSHING) {
+        if state != IDLE && holder_waits_for_this_thread(state & !FLUSHING) {
             return Err(refuse(state));
         }
         Ok(())

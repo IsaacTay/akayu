@@ -179,7 +179,7 @@ runs a modest number of seeds by default; set the variable to run more, for exam
 | Test | What it checks | Seeds |
 |------|----------------|-------|
 | `tests/test_reference_fuzz.py` | random graphs (every operation, feedback sinks, extra sources) and scripts of emit, emit_batch, flush and drain calls with compile() at a random point, against a pure-Python interpreter | `AKAYU_FUZZ_SEEDS` (default 4000) |
-| `tests/test_native_ops_fuzz.py` | random lambdas over awkward values (overflow, NaN, -0.0, subclasses overriding operators) run natively, against plain Python: same results, same exception types | `AKAYU_OPS_FUZZ_SEEDS` (default 30) |
+| `tests/test_native_ops_fuzz.py` | random lambdas over awkward values (overflow, NaN, -0.0, subclasses overriding operators) run natively, against plain Python: same results, same exception types. `tests/test_numpy_flows.py` runs it over numpy scalars and arrays too | `AKAYU_OPS_FUZZ_SEEDS` (default 30) |
 | `tests/test_concurrency_fuzz.py` | several threads emitting and flushing at once: every sink gets exactly the items its path predicts, with no errors or hangs | `AKAYU_CONCURRENCY_FUZZ_SEEDS` (default 40) |
 
 The property tests (`test_property_based.py` and others) use Hypothesis with the `akayu` profile

@@ -109,8 +109,9 @@ Pure-Python computation doesn't run in parallel, and free-threaded Python doesn'
 - A thread waiting for a lock releases the GIL, so other Python threads keep running.
 - For parallel I/O, use `par()` or `prefetch()`, which run work on akayu's thread pool.
 
-With limits: two threads whose callbacks emit into each other's sources can deadlock, and in an
-uncompiled graph some cross-thread flushes fail instead of waiting. See
+With limits: two threads whose callbacks emit into each other's sources get an error instead of
+waiting for each other forever, and in an uncompiled graph some cross-thread flushes fail instead
+of waiting. See
 [Callbacks, Re-entrancy and Limits](features/concurrency.md#callbacks-re-entrancy-and-limits).
 
 ```python

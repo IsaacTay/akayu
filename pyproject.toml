@@ -50,7 +50,7 @@ dev = [
     "hypothesis>=6.113.0",
     "maturin>=1.10,<2.0",
     "mypy>=1.18",  # tests/test_stubs.py: mypy + stubtest check the type stub
-    # numpy/scipy are only needed by the pipeline/ test fixture
+    # numpy: tests/test_numpy_flows.py and the pipeline/ test fixture; scipy: the fixture only
     "numpy>=2.1",
     "psutil>=5.0",
     "pytest>=8.0",

@@ -55,7 +55,7 @@ fi
 
 # The test files to run, listed: under Wine, pytest sees them by their Unix
 # paths, so neither --ignore nor --ignore-glob with a Z:\ path matches.
-skip=" test_pipeline_flows.py test_pipeline_patterns.py test_streamz_vs_akayu.py "
+skip=" test_numpy_flows.py test_pipeline_flows.py test_pipeline_patterns.py test_streamz_vs_akayu.py "
 args=()
 for arg in "$@"; do
     case $arg in

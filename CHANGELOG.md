@@ -177,7 +177,12 @@ independent of machine load:
   (and one ran after another had failed); and it panicked on the `collect()` + flush idiom below a
   `seq()`.
 - A `par()` branch running on a pool thread that emitted into or flushed the source it ran under
-  deadlocked (on the calling thread's branch it raised); it raises.
+  deadlocked (on the calling thread's branch it raised); it raises. So do two threads whose
+  callbacks emit into each other's sources, which used to wait for each other forever: a thread
+  about to wait for a source checks whether the thread holding it waits for it in turn, through
+  pool tasks and source locks. `par()` branches and prefetched calls can emit into a stream that
+  the thread running them emits into as well (a shared log), without being taken for a loop.
+- Ctrl+C reaches a thread waiting to emit into, or flush, a source that another thread is using.
 - With only one of several sources feeding a node compiled, an item could re-enter that node
   mid-update through the compiled source; it is refused, as when none or all are compiled.
 - `emit_batch()` into `prefetch()` dropped the results that had finished before a failing item,
