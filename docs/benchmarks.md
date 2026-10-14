@@ -17,7 +17,9 @@ described under [Benchmark Details](#benchmark-details).
 
 ## Complex Flow Topologies (500k items)
 
-Every akayu graph is compiled with `compile()`. "Pure Python" is a hand-written loop with the
+Every akayu graph is compiled: `compile()` is called on its first source. In the graphs with
+several sources (multi-union, zip, combine latest), that compiles the merge and everything below
+it, while the other sources stay uncompiled. "Pure Python" is a hand-written loop with the
 operations inlined: no functions are called, so it is a floor rather than an equivalent
 program.
 
@@ -68,18 +70,26 @@ Each topology processes 500,000 items. Timing includes building and compiling th
 
 ### Basic pipeline (`just bench`)
 
-The pytest-benchmark suite's main pipeline:
+The pytest-benchmark suite's main pipeline (`tests/test_benchmark.py`), uncompiled, fed 500,000
+items one `emit()` at a time (and, in `test_benchmark_batch_throughput`, as 500
+`emit_batch()` calls of 1,000):
 
 - `map(lambda x: x + 1)`
 - `filter(lambda x: x % 2 == 0)`
-- `sink(results.append)`
+- `map(lambda x: x / 2)`
+- `sink(inc_count)`, a Python function counting the items
 
 ```mermaid
 flowchart LR
     S[Source] --> M["map(x + 1)"]
     M --> F["filter(x % 2 == 0)"]
-    F --> K["sink(append)"]
+    F --> M2["map(x / 2)"]
+    M2 --> K["sink(inc_count)"]
 ```
+
+The same file also times this logic as a hand-written loop and with Python's `map`/`filter`,
+plus a `flatten()` expansion pipeline; `just bench` runs it with the split, compile, lambda and
+vectorcall benchmark files.
 
 ### Multi-union
 

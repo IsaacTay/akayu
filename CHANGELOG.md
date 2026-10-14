@@ -25,7 +25,10 @@
 - Python 3.14 support, including the lambda optimizer.
 - `akayu.__version__`.
 - Faster `compile()` through cached lambda analysis.
-- Linux aarch64 wheels from `just publish`.
+- Wheels for Linux x86_64 and aarch64 (manylinux2014), macOS arm64 and x86_64, and Windows x64,
+  for CPython 3.13 and 3.14, all built on one Linux machine by `just wheels` (which
+  `just publish` runs). `just test-wheel-windows` and `just test-wheel-aarch64` run the tests on
+  the Windows and aarch64 wheels under Wine and qemu.
 
 ### Performance
 
@@ -186,6 +189,12 @@ independent of machine load:
   text grew with the square of the depth, and a node below a merge was printed once per path
   (exponentially many times for stacked diamonds).
 - `compile()` of each of many sources feeding one merge took time quadratic in their number.
+- The documentation told users to `pip install akayu`, which isn't on PyPI (it installs from
+  GitHub), described `compile()` fusions that don't exist (composed functions, `FilterMap`,
+  `MapSink`), and left out that `prefetch()` holds its last results until `flush()`, that the
+  thread pool's size and the GIL cap concurrency, and several threading limits. The API reference
+  shows `union()`, `zip()`, `combine_latest()` and `ProfileReport`, and the stub's docstrings say
+  what each method raises.
 
 ## 1.0.0
 

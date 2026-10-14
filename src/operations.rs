@@ -406,15 +406,16 @@ impl Stream {
         Ok(node)
     }
 
-    /// Enable prefetching for the next map operation.
+    /// Run the next `map()`, `filter()` or `batch_map()` on up to `n` items at once.
     ///
-    /// When followed by a `.map()`, this causes the map to process up to `n` items
-    /// concurrently while preserving output order. Uses a shared global thread pool,
-    /// making it efficient to combine with `par()` for parallel branch execution.
+    /// The function of the `map()`, `filter()` or `batch_map()` called on the
+    /// returned node runs on the thread pool shared with `par()`, up to `n` items
+    /// at a time, and its results go on in input order. The last `n - 1` results
+    /// stay in flight until more items arrive or `flush()`/`drain()` is called.
     ///
-    /// Eager fusion: If the next operation is `map()`, `filter()`, or `batch_map()`,
-    /// the prefetch is fused into that operation at creation time, avoiding
-    /// unnecessary node creation.
+    /// That call fuses into this node and returns it, so a second `.map()` on it
+    /// is an ordinary map after the first. Any other operation after `prefetch()`
+    /// runs on the calling thread, with no concurrency.
     ///
     /// # Arguments
     ///
@@ -434,11 +435,12 @@ impl Stream {
     /// output = []
     /// result.sink(output.append)
     /// source.emit_batch([1, 2, 3, 4])  # processed concurrently
+    /// source.flush()  # wait for the last results
     /// ```
     ///
     /// # Raises
     ///
-    /// * `ValueError` - If `n` is 0.
+    /// * `ValueError` - If `n` is less than 1 or doesn't fit in 64 bits.
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(name = "prefetch", signature = (n, *, stream_name=None))]
     pub fn prefetch(
@@ -1285,20 +1287,17 @@ impl Stream {
         result
     }
 
-    /// Freeze and optimize the stream graph.
+    /// Freeze and optimize the graph below this stream.
     ///
-    /// Triggers topology optimizations (like chain fusion) and prevents
-    /// further modifications to the graph. **Once called, the entire graph
-    /// becomes immutable.**
+    /// Each linear run of steps becomes one node that calls its functions in
+    /// turn, steps compile() recognizes run natively, and a graph without
+    /// `par()` gets a single lock.
     ///
-    /// This enables optimizations that are unsafe for dynamic topologies:
-    /// - Consecutive map operations are fused into a single composed map
-    /// - Consecutive filter operations are fused into a single composed filter
-    /// - Prefetch nodes are fused with their following map/filter operations
-    ///
-    /// IMPORTANT: After calling compile(), attempting to add new nodes (via map,
-    /// filter, sink, etc.) to any part of the graph will raise a RuntimeError.
-    /// Build your complete pipeline before calling this method.
+    /// compile() freezes every node reachable downstream of this stream: adding
+    /// a node below any of them raises a RuntimeError. Streams that only feed
+    /// into the graph (another input of a `union()`, or the source above a
+    /// derived node you compile) are neither frozen nor optimized, so call
+    /// compile() on every source. Build your complete pipeline first.
     ///
     /// # Returns
     ///
@@ -1310,8 +1309,8 @@ impl Stream {
     /// import akayu
     /// source = akayu.Stream()
     /// source.map(f1).map(f2).sink(print)
-    /// source.compile()  # f1 and f2 are fused into a single map
-    /// source.emit(1)   # Fast path with optimized graph
+    /// source.compile()  # map, map and sink become one node
+    /// source.emit(1)
     /// ```
     ///
     /// # Raises

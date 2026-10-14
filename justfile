@@ -69,7 +69,7 @@ fmt-check:
 lint:
     uv run ruff check .
 
-# Everything CI would run: lint, formatting, clippy, quick tests, docs examples and diagrams
+# The gate before committing: lint, formatting, clippy, quick tests and docs checks
 check: lint fmt-check clippy test-quick docs-check
 
 # Clean build artifacts
@@ -79,7 +79,7 @@ clean:
 
 # Clean all caches (use when builds seem stale)
 clean-all: clean
-    rm -rf .venv/lib/python*/site-packages/akayu/*.so
+    rm -f python/akayu/akayu.*.so python/akayu/akayu.*.pyd
     uv cache clean akayu 2>/dev/null || true
 
 # Force rebuild (bypasses uv cache)
@@ -199,8 +199,12 @@ docs-check-mermaid:
 docs-test-examples: build
     uv run python -m pytest --codeblocks docs/ README.md --ignore docs/benchmarks.md
 
+# Build the site strictly: every page in the nav, every link and #anchor resolving
+docs-check-site:
+    uv run --isolated --only-group docs mkdocs build --strict -d target/docs-site
+
 # Run all documentation checks
-docs-check: docs-check-mermaid docs-test-examples
+docs-check: docs-check-mermaid docs-check-site docs-test-examples
 
 # Check markdown formatting (no changes)
 docs-fmt-check: sync-docs
