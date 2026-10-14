@@ -1,16 +1,21 @@
 # Compile Optimizations
 
-akayu includes a powerful optimization system that transforms your stream graph for maximum performance. Call `.compile()` on your source stream after building the pipeline to enable these optimizations.
+akayu includes an optimization pass that rewrites your stream graph for speed. Call `.compile()` on each source stream after building the pipeline to enable it.
 
 ## What `.compile()` Does
 
 When you call `.compile()`, akayu:
 
-1. **Freezes the topology** - Prevents further modifications to the stream graph
-1. **Applies chain fusion** - Combines consecutive operations into single nodes
+1. **Freezes the topology** - Prevents further modifications to the graph below the stream
+1. **Fuses chains** - Runs each linear run of steps as one node, see [Chain Fusion](#chain-fusion)
 1. **Runs simple functions natively** - see [Native Operations](#native-operations)
 1. **Shares one lock across the graph** - see [Proven Fast Paths](#proven-fast-paths)
-1. **Marks convergence points** - Identifies nodes that need thread-safe locking for `par()` + `prefetch()` combinations
+1. **Locks converging `par()` branches** - When two branches of a `par()` reach a common node,
+   every node in its branches gets its own lock
+1. **Fuses the chunking idiom** - `collect()` plus `filter(p).sink(lambda _: c.flush())` on the
+   same parent becomes one `chunk_by` node
+1. **Warns about a useless `par()`** - A `par()` with one branch or none issues a `UserWarning`:
+   it only adds thread-pool dispatch
 
 <!--pytest.mark.skip-->
 
@@ -31,11 +36,18 @@ It is critical to understand that `.compile()` transforms your dynamic graph int
 
 ### The Locking Effect
 
-When you call `.compile()` on a source stream:
+When you call `.compile()` on a stream:
 
-- The entire reachable graph is traversed.
-- Every node is marked as `compiled`.
-- Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on *any* node in that graph will raise a `RuntimeError`.
+- Every node reachable from it (downstream) is traversed.
+- Each of those nodes is marked as `compiled`.
+- Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on one of those nodes raises a `RuntimeError`.
+- Calling `.compile()` a second time on the same stream raises `RuntimeError: Stream '...' is already compiled`.
+
+Nodes that are not downstream of the stream stay open. In a graph with several sources
+(`union`, `zip`, `combine_latest`), `s1.compile()` compiles the merge and everything below it,
+but not `s2`: `s2.compiled` is still `False`, and nodes can still be added to it. Call
+`compile()` on every source; [`MultiStream.compile()`](multistream.md) does this for each of
+its streams. Likewise, compiling a node below the source leaves the source open.
 
 ### Example of Modifying a Compiled Graph
 
@@ -47,8 +59,9 @@ branch = source.map(lambda x: x + 1)
 
 source.compile()
 
-# This will raise RuntimeError: "Stream 'map' is already compiled"
-new_node = branch.map(lambda x: x * 2) 
+# RuntimeError: Cannot modify frozen stream 'map(<lambda>)'.
+# Call compile() only after building the complete graph.
+new_node = branch.map(lambda x: x * 2)
 ```
 
 ```mermaid
@@ -64,101 +77,52 @@ flowchart LR
     style locked stroke:#9ca3af,stroke-dasharray: 5 5,fill:transparent
 ```
 
-This locking mechanism is necessary because many optimizations (like [Map Fusion](#map-fusion)) physically merge nodes and change the underlying propagation logic, making it impossible to safely attach new branches to the original structure.
+This locking mechanism is necessary because many optimizations (like [Chain Fusion](#chain-fusion)) physically merge nodes and change the underlying propagation logic, making it impossible to safely attach new branches to the original structure.
 
-## Map Fusion
+## Chain Fusion
 
-Consecutive `map()` operations are fused into a single node with a composed function:
+Each linear run of `map()`, `starmap()`, `filter()`, `flatten()`, `accumulate()`,
+`batch_map()` and `sink()` steps becomes one chain node, which runs the steps in a flat loop:
 
 ```mermaid
 flowchart LR
     subgraph before [Before]
         A1[source]:::source --> B1[map f1]:::process
-        B1 --> C1[map f2]:::process
-        C1 --> D1[map f3]:::process
+        B1 --> C1[filter p]:::process
+        C1 --> D1[map f2]:::process
         D1 --> E1[sink]:::sink
     end
     subgraph after [After]
-        A2["source 🔒"]:::source --> B2["map(f1 >> f2 >> f3) 🔒"]:::process
-        B2 --> E2["sink 🔒"]:::sink
+        A2["source 🔒"]:::source --> B2["chain: map f1 → filter p → map f2 → sink 🔒"]:::process
     end
     before -.-> after
 ```
 
-This reduces:
+Every function is still called in turn (unless it runs [natively](#native-operations)); nothing
+is composed. What fusion removes is the per-node work between the steps: borrowing each node and
+propagating to it. A filter that drops an item ends the chain for it, so
+the later steps aren't called. Profiles and error messages still name each step:
 
-- Node traversal overhead
-- Python function call overhead
-- Memory allocations for intermediate values
+```text
+RuntimeError: Stream operation failed at node 'map(<lambda>)' (defined at app.py:12)
+```
 
 **Benchmark impact**: a compiled pipeline of 10 chained maps runs about 142x faster than streamz (see [Benchmarks](../benchmarks.md)); fusion makes the 10 nodes one.
 
-## Filter Fusion
+A chain ends at:
 
-Consecutive `filter()` operations are combined with short-circuit evaluation:
+- a node with several downstreams (a **split point**, see [Limitations](#limitations));
+- a merge (`union()`, `zip()`, `combine_latest()`), or any node with more than one parent;
+- a `sink()`;
+- any node that isn't one of the steps above: `collect()`, `chunk_by()`, `chunks_between()`,
+  `par()` / `seq()`, and the step that follows a `prefetch()`.
 
-```mermaid
-flowchart LR
-    subgraph before [Before]
-        A1[source]:::source --> B1[filter p1]:::process
-        B1 --> C1[filter p2]:::process
-        C1 --> D1[sink]:::sink
-    end
-    subgraph after [After]
-        A2["source 🔒"]:::source --> B2["filter(p1 AND p2) 🔒"]:::process
-        B2 --> D2["sink 🔒"]:::sink
-    end
-    before -.-> after
-```
-
-The combined predicate uses short-circuit evaluation - if `p1` returns false, `p2` is never called.
-
-## FilterMap Fusion
-
-A `filter()` followed by `map()` is fused into a single `FilterMap` node:
-
-```mermaid
-flowchart LR
-    subgraph before [Before]
-        A1[source]:::source --> B1[filter pred]:::process
-        B1 --> C1[map func]:::process
-        C1 --> D1[sink]:::sink
-    end
-    subgraph after [After]
-        A2["source 🔒"]:::source --> B2["FilterMap(pred, func) 🔒"]:::process
-        B2 --> D2["sink 🔒"]:::sink
-    end
-    before -.-> after
-```
-
-This avoids the intermediate step of passing the value through the filter before mapping.
-
-## Terminal Fusions
-
-Operations ending in `sink()` are fused into specialized terminal nodes:
-
-```mermaid
-flowchart LR
-    subgraph before [Before]
-        A1[map func]:::process --> B1[sink callback]:::sink
-    end
-    subgraph after [After]
-        C1["MapSink 🔒"]:::process
-    end
-    before -.-> after
-```
-
-| Pattern                   | Fused Node    | Behavior                        |
-| ------------------------- | ------------- | ------------------------------- |
-| `map` → `sink`            | MapSink       | `callback(func(x))`             |
-| `filter` → `sink`         | FilterSink    | `if pred(x): callback(x)`       |
-| `filter` → `map` → `sink` | FilterMapSink | `if pred(x): callback(func(x))` |
-
-These terminal fusions eliminate propagation overhead since the combined node handles everything internally.
+A chain of one step is left as it is.
 
 ## Source Elimination
 
-Intermediate `Source` nodes (like those created by `seq()`) that only forward values are bypassed:
+Intermediate `Source` nodes that only forward values (those created by `seq()`, or by a
+`union()` with a single input) are bypassed:
 
 ```mermaid
 flowchart LR
@@ -172,6 +136,8 @@ flowchart LR
     before -.-> after
 ```
 
+A `seq()` directly below `par()` is kept: it is what keeps the nodes after it sequential.
+
 ## Native Operations
 
 `compile()` reads the bytecode of each function and replaces simple ones with native operations,
@@ -182,18 +148,29 @@ so no Python function call happens per item. Recognized shapes include:
 - Chains of such steps: `x % 2 == 0`, `x * 2 + 1`, `x["a"]["b"]`, `str(x).upper()`
 - `and` / `or` of them, and tuples/lists of them: `(x["a"], x["b"])`
 - Extra parameters with defaults, the loop-variable idiom: `lambda x, k=k: x + k`
-- Accumulators: `acc + x`, `acc + 1` (any binary operator), `max(acc, x)`, `min(acc, x)`
+- Accumulators, with `returns_state=False`: `acc <op> x` and `acc <op> constant` for
+  `+ - * / // % **` (the accumulator first: `x + acc` is still called), `max(acc, x)`,
+  `min(acc, x)`
 - Sinks: `sink(results.append)` on a list, `sink(print)`
+
+Builtin callables passed directly also run natively after `compile()`: `map(len)`, `map(str)`,
+`map(int)`, `map(float)`, `map(bool)`, `map(type)`, `map(tuple)`, `map(list)`, `map(set)`,
+`map(frozenset)`, `map(operator.not_)`, `map(operator.truth)`, `map(operator.itemgetter(k))`
+with one key, `map(operator.attrgetter("a.b"))` with one name (dotted paths are followed),
+`filter(isinstance, T)`, `filter(operator.is_, v)` and `filter(operator.is_not, None)`.
 
 Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
 item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
 
-Lambdas whose native form depends on nothing but their own code (`lambda x: x + 1`,
-`lambda x: x["k"]`, `lambda x: x.strip()`) run natively even before `compile()`: there is no
-closure, default or global value it would have to read once. Everything else is called until
-`compile()`: lambdas that read such values (`lambda x: x + k`), so late binding holds; `def`
-functions, so coverage and breakpoints in their bodies work as usual; and a function whose code
-was replaced in place (IPython's autoreload does that).
+`map()` and `filter()` lambdas whose native form depends on nothing but their own code
+(`lambda x: x + 1`, `lambda x: x["k"]`, `lambda x: x.strip()`) run natively even before
+`compile()`: there is no closure, default or global value it would have to read once. Builtin
+names count as globals, so `lambda x: len(x)` and `lambda x: str(x).upper()` are called until
+`compile()`. Everything else is called until `compile()`: other steps (`accumulate()`, `sink()`,
+builtin callables); lambdas that read closure, default or global values (`lambda x: x + k`,
+`lambda x: x in allowed`), so late binding holds; `def` functions, so coverage and breakpoints
+in their bodies work as usual; and a function whose code was replaced in place (IPython's
+autoreload does that).
 
 A method call on an item of a builtin type (`x.strip()` on a `str`, `x.get("k", 0)` on a `dict`)
 calls that type's C method directly: builtin types can't be changed, so `compile()` looks the
@@ -247,18 +224,19 @@ results = []
 
 # Build a pipeline that will benefit from fusion
 (source
-    .filter(lambda x: x > 0)      # These three filters
-    .filter(lambda x: x < 100)    # will be fused into one
+    .filter(lambda x: x > 0)      # Six steps in a line:
+    .filter(lambda x: x < 100)    # fused into one chain
     .filter(lambda x: x % 2 == 0)
-    .map(lambda x: x * 2)         # These two maps
-    .map(lambda x: x + 1)         # will be fused into one
-    .sink(results.append))        # Terminal fusion with map
+    .map(lambda x: x * 2)         # The numeric steps run natively,
+    .map(lambda x: x + 1)         # on machine integers
+    .sink(results.append))        # A direct list append
 
 # Apply optimizations
 source.compile()
 
 # Process data through optimized pipeline
 source.emit_batch(range(200))
+print(len(results))  # 49
 ```
 
 **Before: 7 nodes**
@@ -277,7 +255,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["source 🔒"]:::source --> B["FilterMapSink 🔒<br/>pred: combined<br/>func: *2, +1<br/>sink: append"]:::process
+    A["source 🔒"]:::source --> B["chain 🔒<br/>filter → filter → filter → map → map<br/>(native, unboxed)<br/>→ sink append"]:::process
 ```
 
 ## Checking Compilation Status
@@ -317,12 +295,13 @@ The orange-bordered node is a **split point** - it has multiple downstreams, so 
 ```mermaid
 flowchart TD
     A["source 🔒"]:::source --> B["map f1 🔒"]:::warn
-    B --> C["MapSink(f2, s1) 🔒"]:::process
-    B --> D["MapSink(f3, s2) 🔒"]:::process
+    B --> C["chain: map f2 → sink s1 🔒"]:::process
+    B --> D["chain: map f3 → sink s2 🔒"]:::process
 
 ```
 
-Each branch after the split is optimized independently (green nodes are fused), but `f1` stays separate.
+Each branch after the split is fused into its own chain, but `f1` stays separate. The other
+places a chain ends are listed under [Chain Fusion](#chain-fusion).
 
 <!--pytest.mark.skip-->
 

@@ -20,8 +20,18 @@ nav:
     - Batch Processing: features/batch-processing.md
     - MultiStream: features/multistream.md
   - Patterns & Best Practices: patterns.md
+  - Migrating from streamz: migrating-from-streamz.md
+  - FAQ: faq.md
   - API Reference: api.md
   - Benchmarks: benchmarks.md
+
+# Every page in the nav, and every link (and its #anchor) resolving:
+# `mkdocs build --strict` fails otherwise.
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
 
 plugins:
   - search

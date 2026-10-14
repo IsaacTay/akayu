@@ -77,6 +77,12 @@ class Stream:
     Data flows through a directed graph of stream nodes, where each node applies
     a transformation (map, filter, etc.) before passing results downstream.
 
+    Each operation returns a new node. Adding a node below one that `compile()`
+    froze, or below a node that is processing an item (from one of its own
+    callbacks, or while another thread emits through it), raises `RuntimeError`.
+    Operations that take a function raise `TypeError` for an `async def`
+    function: use `prefetch()` or `par()` for concurrent I/O.
+
     Example:
         ```python
         source = Stream()
@@ -89,6 +95,10 @@ class Stream:
 
     def __new__(cls, name: str | None = None) -> Self:
         """Create a new source Stream.
+
+        A subclass whose `__init__` takes other arguments must override
+        `__new__` too: `Stream.__new__` receives the same arguments and raises
+        `TypeError` for anything but a name.
 
         Args:
             name: Optional name for the stream (defaults to "source").
@@ -115,6 +125,9 @@ class Stream:
 
         Returns:
             A new Stream emitting the transformed values.
+
+        Raises:
+            TypeError: If `func` is an async function.
         """
         ...
 
@@ -134,6 +147,9 @@ class Stream:
 
         Returns:
             A new Stream emitting only elements that pass the filter.
+
+        Raises:
+            TypeError: If `predicate` is an async function.
         """
         ...
 
@@ -151,6 +167,9 @@ class Stream:
 
         Returns:
             A new Stream emitting the transformed values.
+
+        Raises:
+            TypeError: If `func` is an async function.
         """
         ...
 
@@ -162,6 +181,11 @@ class Stream:
         Unlike `map()` which calls the function once per item, `batch_map()` calls
         the function once per batch with all items as a list. This is ideal for
         vectorized operations like NumPy functions that can process arrays efficiently.
+        Each item of the returned iterable is passed downstream separately.
+
+        The function gets the whole batch only from `emit_batch()` in a linear
+        part of the graph. Under `emit()`, and below a branch point even under
+        `emit_batch()`, it is called once per item with a one-item list.
 
         Args:
             func: Function that receives a list of items and returns an iterable of results.
@@ -171,6 +195,9 @@ class Stream:
 
         Returns:
             A new Stream emitting the transformed values.
+
+        Raises:
+            TypeError: If `func` is an async function.
 
         Example:
             ```python
@@ -222,6 +249,9 @@ class Stream:
 
         Returns:
             A new Stream emitting tuples of chunked items.
+
+        Raises:
+            TypeError: If `predicate` is an async function.
         """
         ...
 
@@ -246,6 +276,9 @@ class Stream:
         Returns:
             A new Stream emitting tuples of the items between delimiters.
 
+        Raises:
+            TypeError: If `open` or `close` is an async function.
+
         Example:
             ```python
             source = Stream()
@@ -261,10 +294,10 @@ class Stream:
     def drain(self, *args: Any, **kwargs: Any) -> None:
         """Recursively flush this node and all downstream nodes.
 
-        Unlike `flush()`, which only flushes this node's buffer,
-        `drain()` flushes this node and then recursively drains every
-        downstream node. Use this when you want to flush an entire
-        pipeline (e.g. at the end of processing).
+        Unlike `flush()`, which stops at the first buffering node on each
+        path, `drain()` flushes this node and then recursively drains every
+        downstream node, so every buffer's contents are emitted. Use this when
+        you want to flush an entire pipeline (e.g. at the end of processing).
 
         Args:
             *args: Ignored (for compatibility with streamz).
@@ -281,9 +314,18 @@ class Stream:
         so `source.flush()` reaches the first buffering node on every path.
         Use `drain()` to flush every node in the graph.
 
+        Called from another thread, flushing a source (or any node of a
+        compiled graph) waits for a running `emit()` to finish, and an `emit()`
+        waits for the flush. See the Concurrency guide for the limits.
+
         Args:
             *args: Ignored (for compatibility with streamz).
             **kwargs: Ignored (for compatibility with streamz).
+
+        Raises:
+            RuntimeError: If a callback raises (as for `emit()`), or a node is
+                flushed from one of its own downstream callbacks mid-update.
+            RecursionError: If the graph is too deep for the thread's stack.
         """
         ...
 
@@ -301,6 +343,9 @@ class Stream:
 
         Returns:
             A new Stream (for chaining, though sink typically ends a pipeline).
+
+        Raises:
+            TypeError: If `func` is an async function.
         """
         ...
 
@@ -362,43 +407,94 @@ class Stream:
 
         Returns:
             A new Stream emitting accumulated states (or results if returns_state=True).
+
+        Raises:
+            TypeError: If `func` is an async function.
         """
         ...
 
     def prefetch(self, n: int, *, stream_name: str | None = None) -> Stream:
-        """Enable prefetching for the next map operation.
+        """Run the next `map()`, `filter()` or `batch_map()` on up to `n` items at once.
 
-        When followed by a `.map()`, this causes the map to process up to `n` items
-        concurrently while preserving output order. Uses a shared global thread pool,
-        making it efficient to combine with `par()` for parallel branch execution.
+        The function of the `map()`, `filter()` or `batch_map()` called on the
+        returned node runs on the thread pool shared with `par()`, up to `n`
+        items at a time, and its results go on in input order. A result is
+        passed on only once later items have come in: the last `n - 1` stay in
+        flight until more items arrive or `flush()`/`drain()` is called, so
+        flush at the end of the input. Under `emit_batch()`, a `batch_map()`
+        gets each whole batch as one task.
+
+        That `map()`/`filter()`/`batch_map()` call returns this same node, now
+        running the function, so a second `.map()` on it is an ordinary map
+        after the first. Any other operation after `prefetch()` (`sink()`,
+        `starmap()`, ...) runs on the calling thread, with no concurrency.
+
+        Only work that releases the GIL overlaps (I/O, `time.sleep()`, C code
+        that releases it), and the pool (one thread per CPU) also caps how many
+        functions run at once.
 
         Args:
-            n: Maximum number of items to process concurrently.
+            n: Maximum number of items in flight.
+            stream_name: Optional custom name for this node.
 
         Returns:
-            A new Stream that will modify the next map to use prefetching.
+            A prefetch node: call `map()`, `filter()` or `batch_map()` on it.
+
+        Raises:
+            ValueError: If `n` is less than 1 or doesn't fit in 64 bits.
+
+        Example:
+            ```python
+            source = Stream()
+            pages = source.prefetch(8).map(fetch).to_list()
+            source.emit_batch(urls)
+            source.flush()  # wait for the last results
+            ```
         """
         ...
 
     def emit(self, x: Any) -> None:
         """Emit a single value into the stream.
 
-        This is the primary way to push data into a source stream.
-        The value propagates through all downstream nodes.
+        This is the primary way to push data into a source stream. The value
+        goes through every downstream node before `emit()` returns, except
+        results still in flight in a `prefetch()` (see `flush()`).
+
+        Emits and flushes of the same graph from different threads wait for
+        each other; see the Concurrency guide for the limits. Exceptions that
+        aren't `Exception` subclasses (`KeyboardInterrupt`, `SystemExit`, ...)
+        raised in a callback pass through unchanged.
 
         Args:
             x: The value to emit.
+
+        Raises:
+            RuntimeError: If a callback raises: the error names the node, and
+                the original exception is its `__cause__`. Also if this isn't a
+                source node, if a callback emits into a node that is already
+                processing an item (re-entrant emit), or if a callback changes
+                the graph mid-emit.
+            RecursionError: If the graph is too deep for the thread's stack
+                (thousands of nodes, or long chains of sources feeding each other).
         """
         ...
 
-    def emit_batch(self, items: list[Any]) -> None:
+    def emit_batch(self, items: Sequence[Any]) -> None:
         """Emit multiple values into the stream as a batch.
 
-        More efficient than calling `emit()` multiple times when processing
-        many items. Values are processed together through the pipeline.
+        Cheaper per item than calling `emit()` for each. The batch goes through
+        the pipeline step by step: each step processes every item before the
+        next step starts (below a branch point, items go through the branches
+        one at a time unless `compile()` proves the branches independent). If
+        a step raises, the steps after it see none of the batch.
 
         Args:
-            items: List of values to emit.
+            items: The values, as a sequence (list, tuple, range, ...).
+
+        Raises:
+            RuntimeError: As for `emit()`.
+            RecursionError: As for `emit()`.
+            TypeError: If `items` isn't a sequence (a generator or a set), or is a str.
         """
         ...
 
@@ -450,11 +546,11 @@ class Stream:
         """
         ...
 
-    def emit_batch_profiled(self, items: list[Any]) -> ProfileReport:
+    def emit_batch_profiled(self, items: Sequence[Any]) -> ProfileReport:
         """Emit a batch of values and return a profiling report.
 
         Args:
-            items: List of values to emit.
+            items: The values, as a sequence (see `emit_batch()`).
 
         Returns:
             A ProfileReport for this batch emit.
@@ -462,48 +558,56 @@ class Stream:
         ...
 
     def compile(self) -> Stream:
-        """Freeze and optimize the stream graph.
+        """Freeze and optimize the graph below this stream.
 
-        Triggers topology optimizations (like chain fusion) and prevents
-        further modifications to the graph. Call this after building your
-        complete pipeline but before emitting data.
+        Call this after building the complete pipeline, before emitting data.
+        Each linear run of steps (map, filter, starmap, flatten, accumulate,
+        batch_map, sink) becomes one node that calls its functions in turn;
+        errors and profiles still name each step. Steps compile() recognizes
+        (simple lambdas, builtins such as `len`) run natively, and a graph
+        without `par()` gets a single lock.
 
-        This enables optimizations that are unsafe for dynamic topologies:
-        - Consecutive map operations are fused into a single composed map
-        - Consecutive filter operations are fused into a single composed filter
-        - Prefetch nodes are fused with their following map/filter operations
-
-        After calling compile(), attempting to add new nodes to any part of
-        the graph will raise a RuntimeError.
+        compile() freezes every node reachable downstream of this stream:
+        adding a node below any of them raises `RuntimeError`. Streams that
+        only feed into the graph (another input of a `union()`, or the source
+        above a derived node you compile) are neither frozen nor optimized, so
+        call compile() on every source. State such as an `accumulate()`'s
+        total carries across compile().
 
         Returns:
             self (for chaining)
 
         Raises:
-            RuntimeError: If the graph is already compiled/frozen.
+            RuntimeError: If this stream is already compiled.
+
+        Warns:
+            UserWarning: For a `par()` with fewer than two branches.
 
         Example:
             ```python
             s = Stream()
             s.map(f1).map(f2).sink(print)
-            s.compile()  # f1 and f2 are fused into a single map
-            s.emit(1)    # Fast path with optimized graph
+            s.compile()  # map, map and sink become one node
+            s.emit(1)
             ```
         """
         ...
 
     def par(self) -> Stream:
-        """Create a parallel branch point that executes all downstreams concurrently.
+        """Create a branch point whose downstream branches run concurrently.
 
-        When values flow through a parallel node, all downstream branches are
-        executed in parallel threads rather than sequentially. This is useful for
-        I/O-bound operations where branches can overlap their waiting time.
+        Each item goes to every branch at once: the branches run on the thread
+        pool shared with `prefetch()` (the last one on the calling thread), and
+        `emit()` returns once all of them have finished. If branches raise, the
+        first failing branch's error (in the order the branches were added) is
+        raised.
 
-        Uses a shared global thread pool with `prefetch()`, so combining them has
-        minimal overhead. Locks are only applied at convergence points (union/zip)
-        for efficient parallel execution.
+        Only work that releases the GIL overlaps: I/O, `time.sleep()`, C code
+        that releases it. Pure-Python CPU work gains nothing. Branches that
+        converge (`union()`, `zip()`) take turns at the merge.
 
-        Use `seq()` to switch back to sequential execution after parallel branches.
+        Use `seq()` directly below a `par()` to run several steps as one
+        sequential branch.
 
         Returns:
             A new Stream that will propagate values to its downstreams in parallel.
@@ -514,7 +618,7 @@ class Stream:
             p = s.par()  # Create parallel branch point
             a = p.map(load_from_disk)   # Branch 1
             b = p.map(fetch_from_api)   # Branch 2
-            merged = union(a, b).seq()  # Back to sequential
+            merged = union(a, b)
             s.emit(filename)  # a and b run in parallel
             ```
         """
@@ -525,10 +629,12 @@ class Stream:
         ...
 
     def seq(self) -> Stream:
-        """Create a sequential branch point (explicit synchronization point).
+        """Create a node whose downstreams run one after another (the default).
 
-        This is the default behavior for streams, but can be used explicitly
-        after parallel sections to clearly indicate sequential execution resumes.
+        Directly below a `par()`, `seq()` groups the nodes built on it into one
+        branch whose steps run in order on one thread. Anywhere else it is a
+        pass-through: it doesn't move work back to the calling thread (nodes
+        after `union(a, b).seq()` still run on the thread that delivered the item).
 
         Returns:
             A new Stream that will propagate values to its downstreams sequentially.
@@ -537,11 +643,10 @@ class Stream:
             ```python
             s = Stream()
             p = s.par()
-            a = p.map(slow_op1)
-            b = p.map(slow_op2)
-            merged = union(a, b).seq()  # Explicit sequential point
-            merged.map(f1).sink(...)    # Sequential from here
-            merged.map(f2).sink(...)
+            q = p.seq()               # one branch...
+            q.map(parse).sink(store)  # ...whose steps run in order
+            q.map(index).sink(search)
+            p.map(make_thumbnail).sink(save)  # a second, concurrent branch
             ```
         """
         ...
@@ -578,6 +683,10 @@ class Stream:
 
         Returns:
             A new Stream emitting tuples of latest values.
+
+        Raises:
+            ValueError: If `emit_on` names a stream that isn't an input, or is
+                an empty list.
         """
         ...
 
@@ -617,11 +726,17 @@ class MultiStream:
     def __init__(self, streams: dict[str, Stream]) -> None:
         """Create a MultiStream batch from a sequence or dict of Stream instances.
 
+        Elements can also be MultiStreams: operations, `compile()` and
+        `to_list()` then apply to the streams inside, while `union()`, `zip()`
+        and `combine_latest()` raise `TypeError` for a nested MultiStream.
+
         Args:
-            streams: List, tuple, or dict of Stream instances.
+            streams: List, tuple, or dict of Stream (or MultiStream) instances.
+                Use str dict keys: an int is always read as a position by
+                `ms[i]`.
 
         Raises:
-            TypeError: If any element is not a Stream.
+            TypeError: If any element is not a Stream or MultiStream.
         """
         ...
 
@@ -635,7 +750,7 @@ class MultiStream:
         ...
 
     def __iter__(self) -> Iterator[Stream]:
-        """Iterate over the individual Stream instances."""
+        """Iterate over the individual Stream instances (in dict mode, the values)."""
         ...
 
     @overload
@@ -681,11 +796,7 @@ class MultiStream:
         ...
 
     def values(self) -> Iterator[Stream]:
-        """Iterate over stream values in dict mode.
-
-        Raises:
-            TypeError: If in list mode.
-        """
+        """Iterate over the streams (in either mode)."""
         ...
 
     def items(self) -> Iterator[tuple[str, Stream]]:
@@ -905,6 +1016,10 @@ def combine_latest(
 
     Returns:
         Stream if all inputs are Stream, otherwise MultiStream.
+
+    Raises:
+        ValueError: If `emit_on` names a stream that isn't an input, or is an
+            empty list.
     """
     ...
 
@@ -937,7 +1052,7 @@ def to_text_file(data: Any, path: str) -> None:
 
     Args:
         data: The item to write.
-        path: The file to append to.
+        path: The file to append to, as a str (a `Path` raises `TypeError`).
     """
     ...
 
@@ -956,11 +1071,26 @@ class TextFileSource(Stream):
     def __new__(cls, path: str, interval: float | None = None) -> Self: ...
     def __init__(self, path: str, interval: float | None = None) -> None: ...
     def start(self) -> Self:
-        """Start reading the file in a background thread. Returns self."""
+        """Start reading the file in a background thread. Returns self.
+
+        Raises:
+            RuntimeError: If already started.
+        """
         ...
 
     def join(self, timeout: float | None = None) -> None:
-        """Wait until every line has been emitted, re-raising any error."""
+        """Wait until every line has been emitted, re-raising any error.
+
+        Args:
+            timeout: Seconds to wait; None waits for the last line.
+
+        Raises:
+            RuntimeError: If `start()` wasn't called.
+            TimeoutError: If `timeout` passes first.
+            Exception: The error that stopped the reader: from opening or
+                reading the file (such as `FileNotFoundError`), or from the
+                pipeline.
+        """
         ...
 
 def from_text_file(path: str, interval: float | None = None) -> TextFileSource:

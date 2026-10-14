@@ -62,7 +62,7 @@ source.emit_batch([1, 2, 3, 4, 5])
 
 ### Testing a Pipeline
 
-Use `union()` to inject test data without modifying your pipeline:
+Build the pipeline in a function, so a test can run it on a fresh source without modifying it:
 
 ```python
 import akayu
@@ -145,7 +145,10 @@ Choosing between `par()` and `prefetch()` depends on your bottleneck.
 Use `prefetch()` when your pipeline is bound by latency (waiting for external resources) rather than CPU work.
 
 - **Best For**: API calls, Database queries, File downloads.
-- **Pros**: Simple syntax, strictly preserves order, controls concurrency limit.
+- **Pros**: Simple syntax, strictly preserves order, caps the requests in flight.
+- **Mind**: the last `n - 1` results arrive only with the next items or a `flush()`, and at most
+  one request per CPU (plus one) runs at once, whatever `n` is. See
+  [Concurrency](features/concurrency.md#how-prefetch-works).
 
 ```mermaid
 flowchart LR
@@ -160,8 +163,11 @@ flowchart LR
 import akayu
 
 source = akayu.Stream()
-# Keep 4 requests in flight at once
+# Keep up to 4 requests in flight at once
 source.prefetch(4).map(requests.get).sink(save_response)
+
+source.emit_batch(urls)
+source.flush()  # the last 3 responses
 ```
 
 ### Strategy B: The Scatter-Gather (Diamond Pattern)
@@ -246,7 +252,7 @@ assert [int(x) for x in results] == [0, 2, 4, 6, 8]
 
 ### 1. The "Late Modification"
 
-Attempting to modify the graph after `compile()` will crash your application.
+Adding to the graph after `compile()` raises a `RuntimeError`.
 
 <!--pytest.mark.xfail(strict=True)-->
 
@@ -257,14 +263,14 @@ s = akayu.Stream()
 s.map(lambda x: x + 1)
 s.compile()
 
-s.map(lambda x: x * 2)  # ❌ RuntimeError: Graph is locked
+s.map(lambda x: x * 2)  # ❌ RuntimeError: Cannot modify frozen stream 'source'. ...
 ```
 
 **Fix**: Define the entire topology before calling compile.
 
 ### 2. The Trivial Parallelism
 
-Using `par()` for cheap operations (like simple arithmetic) often makes code *slower* due to thread switching overhead.
+Using `par()` for work that holds the GIL (simple arithmetic, or any pure-Python computation) makes code *slower*: the branches can't overlap, and dispatching them to threads costs extra.
 
 <!--pytest.mark.skip-->
 
@@ -273,4 +279,4 @@ Using `par()` for cheap operations (like simple arithmetic) often makes code *sl
 s.par().map(lambda x: x + 1) 
 ```
 
-**Fix**: Only parallelize tasks that take >1ms (I/O, heavy compute). For simple math, standard sequential processing is faster.
+**Fix**: Only parallelize branches that wait with the GIL released: network or disk I/O, `time.sleep()`, C libraries that release the GIL. Even 0.1ms of such waiting per branch pays off. Pure-Python computation, cheap or heavy, is faster sequentially.

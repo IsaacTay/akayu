@@ -2,15 +2,18 @@
 
 ## Do I need Rust installed?
 
-**No.** akayu distributes pre-built wheels via pip. Just run:
+**Yes**, to install it: akayu isn't on PyPI, so it installs from GitHub and builds from source
+with a Rust toolchain ([rustup](https://rustup.rs/)):
 
 <!--pytest.mark.skip-->
 
 ```bash
-pip install akayu
+pip install "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
-No Rust toolchain, no compilation step.
+Machines that only run akayu don't need Rust if you give them a wheel: `just wheels` builds them
+for Linux (x86_64 and aarch64, glibc 2.17+), macOS (arm64 and x86_64) and Windows x64, for
+CPython 3.13 and 3.14. See [System Requirements](getting-started.md#system-requirements).
 
 ## When should I call `compile()`?
 
@@ -88,7 +91,11 @@ cProfile.run('source.emit_batch(data)', 'profile.stats')
 
 ## How does akayu handle concurrency?
 
-akayu uses thread-based concurrency via `par()` and `prefetch()` for parallel execution. There is no asyncio support — `par()` manages its own thread pool to execute operations in parallel without blocking the GIL.
+With threads: `par()` runs branches and `prefetch()` runs calls on a shared pool of worker threads
+(one per CPU). There is no asyncio support. Callbacks run with the GIL held, so only work that
+releases it overlaps: network and disk I/O, `time.sleep()`, C code that releases the GIL.
+Pure-Python computation doesn't run in parallel, and free-threaded Python doesn't change that
+(importing akayu turns the GIL back on). See [Concurrency](features/concurrency.md).
 
 ## Is it thread-safe?
 
@@ -101,6 +108,10 @@ akayu uses thread-based concurrency via `par()` and `prefetch()` for parallel ex
   contains `par()`), so a compiled graph is entered by one thread at a time.
 - A thread waiting for a lock releases the GIL, so other Python threads keep running.
 - For parallel I/O, use `par()` or `prefetch()`, which run work on akayu's thread pool.
+
+With limits: two threads whose callbacks emit into each other's sources can deadlock, and in an
+uncompiled graph some cross-thread flushes fail instead of waiting. See
+[Callbacks, Re-entrancy and Limits](features/concurrency.md#callbacks-re-entrancy-and-limits).
 
 ```python
 from concurrent.futures import ThreadPoolExecutor
@@ -124,7 +135,7 @@ assert sorted(results) == [x * x for x in range(100)]
 
 | Library       | Performance               | Async                                 | Rust Backend | Learning Curve |
 | ------------- | ------------------------- | ------------------------------------- | ------------ | -------------- |
-| **akayu**     | High (~30-60x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
+| **akayu**     | High (28-142x vs streamz) | ❌ (threads via `par()`/`prefetch()`) | ✅           | Low            |
 | **streamz**   | Medium                    | ✅                                    | ❌           | Low            |
 | **RxPY**      | Medium                    | ❌                                    | ❌           | Medium         |
 | **aiostream** | Medium                    | ✅                                    | ❌           | Low            |
@@ -135,7 +146,7 @@ assert sorted(results) == [x * x for x in range(100)]
 
 ### Common causes:
 
-1. **Too much parallelism on cheap ops** — `par()` overhead only pays off for ops >1ms
+1. **`par()` around work that holds the GIL** — `par()` only speeds up branches that wait with the GIL released (I/O, sleeps); pure-Python computation runs one branch at a time, plus the dispatch cost
 1. **Not using `compile()`** — Missing operator fusion
 1. **Item-by-item processing** — Use `emit_batch()` + `batch_map()` for bulk data
 1. **Python function overhead** — Consider numba or vectorized ops in `batch_map()`

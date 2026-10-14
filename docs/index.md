@@ -5,17 +5,20 @@ A Rust-powered Python library for high-performance stream data processing. Built
 ## Features
 
 - **Rust-powered core** — Minimal overhead, maximum performance
-- **Compile-time optimizations** — Chain fusion and operator fusion for reduced traversal
+- **Compile-time optimizations** — Chain fusion, and simple lambdas run natively
 - **Concurrent processing** — `par()` for parallel branches, `prefetch()` for I/O concurrency
 - **Batch operations** — Vectorized processing with `batch_map()` and `emit_batch()`
-- **Dynamic pipelines** — Build and modify streams at runtime when uncompiled
+- **Dynamic pipelines** — Keep adding to streams at runtime when uncompiled
 
 ## Quick Install + Hello World
+
+akayu installs from GitHub and builds from source: you need CPython 3.13 or 3.14 and a Rust
+toolchain ([details](getting-started.md#system-requirements)).
 
 <!--pytest.mark.skip-->
 
 ```bash
-pip install akayu
+pip install "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
 ```python

@@ -33,7 +33,8 @@ ms = MultiStream(sensors)
 
 Dict mode preserves keys through transforms and returns dict-shaped results from collectors.
 
-`MultiStream` accepts a `dict`, `list`, or `tuple` of `Stream` instances.
+`MultiStream` accepts a `dict`, `list`, or `tuple` of `Stream` instances, or of `MultiStream`s
+(see [Nested MultiStreams](#nested-multistreams)).
 
 <!--pytest.mark.xfail(strict=True)-->
 
@@ -44,8 +45,8 @@ MultiStream([])           # empty list batch — OK
 MultiStream({})           # empty dict batch — OK
 MultiStream([Stream()])   # single stream — OK
 MultiStream(Stream())     # TypeError — must be list/tuple/dict
-MultiStream([1, 2])       # TypeError — elements must be Stream
-MultiStream({"a": 1})     # TypeError — values must be Stream
+MultiStream([1, 2])       # TypeError — elements must be Stream or MultiStream
+MultiStream({"a": 1})     # TypeError — values must be Stream or MultiStream
 ```
 
 ## Dict Mode vs List Mode
@@ -57,9 +58,14 @@ MultiStream({"a": 1})     # TypeError — values must be Stream
 | `to_list()` returns  | `[list_0, list_1]`      | `{"a": list_0, "b": list_1}`      |
 | `to_set()` returns   | `[set_0, set_1]`        | `{"a": set_0, "b": set_1}`        |
 | `keys()` / `items()` | raises TypeError        | available                         |
+| `values()`           | the streams             | the streams                       |
 | `to_dict()`          | raises TypeError        | `{"a": stream_a, "b": stream_b}`  |
 | Key propagation      | through transforms      | through transforms                |
 | After combinators    | list mode               | dict mode (keys preserved)        |
+
+An `int` is always a position, also in dict mode: with `MultiStream({1: s1, 0: s2})`, `ms[1]`
+is `s2`. Iterating a `MultiStream` yields its streams, not its keys, so test for a key with
+`"temp" in ms.keys()`.
 
 ## Transforms
 
@@ -76,7 +82,7 @@ collected = positives.collect()
 results = collected.map(lambda tup: sum(tup)).to_list()
 ```
 
-Supported transforms: `map`, `filter`, `sink`, `starmap`, `accumulate`, `flatten`, `collect`, `batch_map`, `chunk_by`.
+Supported transforms: `map`, `filter`, `sink`, `starmap`, `accumulate`, `flatten`, `collect`, `batch_map`, `chunk_by`, `chunks_between`.
 
 Concurrency/branching: `par`, `parallel`, `seq`, `prefetch` — applied per-stream (each stream gets its own branch point or prefetch buffer).
 
@@ -159,16 +165,17 @@ ms.drain()            # drain all streams
 
 Broadcasting is the core power of `MultiStream`. Combinators (`union`, `combine_latest`, `zip`) accept mixed `Stream` and `MultiStream` arguments:
 
-- **Same keys (dict mode)**: pairs by key name, keys preserved in result
+- **Same keys in the same order (dict mode)**: pairs by key, keys preserved in result
 - **Same-length MultiStreams**: pairwise combination (stream 0 with stream 0, stream 1 with stream 1, etc.)
 - **Length-1 MultiStream or plain Stream**: expanded to match the batch size
 - **Mismatched lengths (>1)**: raises `ValueError`
-- **Mismatched dict keys**: raises `ValueError`
+- **Mismatched dict keys**, or the same keys in another order: raises `ValueError`
 - **Dict + list-backed MultiStream**: raises `TypeError`
 
 ```
 Dict mode, same keys:      MultiStream({"a":s1,"b":s2}) + MultiStream({"a":s3,"b":s4}) → dict mode preserved
 Dict mode, different keys: MultiStream({"a":s1,"b":s2}) + MultiStream({"x":s3,"y":s4}) → ValueError
+Dict mode, key order:      MultiStream({"a":s1,"b":s2}) + MultiStream({"b":s3,"a":s4}) → ValueError
 Dict mode + list-backed:   MultiStream({"a":s1,"b":s2}) + MultiStream([s3, s4])        → TypeError
 Dict mode + plain Stream:  MultiStream({"a":s1,"b":s2}) + Stream()                     → dict mode (broadcast)
 List mode:                 MultiStream(3) + MultiStream(3) → list mode
@@ -338,7 +345,8 @@ print(profilers["temp"].report)
 
 ## stream_name with MultiStream
 
-When you pass `stream_name` to a transform, `MultiStream` auto-indexes it:
+When you pass `stream_name` to `map`, `filter`, `sink`, `starmap`, `batch_map` or `prefetch`,
+`MultiStream` appends each stream's position to it (in dict mode too: the position, not the key):
 
 <!-- pytest-codeblocks:cont -->
 
@@ -346,6 +354,55 @@ When you pass `stream_name` to a transform, `MultiStream` auto-indexes it:
 ms.map(lambda x: x, stream_name="enrich")
 # Creates streams named "enrich_0", "enrich_1", "enrich_2", ...
 ```
+
+`accumulate`, `flatten`, `collect`, `chunk_by` and `chunks_between` give every stream the same
+name. `par()`, `parallel()` and `seq()` take no `stream_name`.
+
+## Replacing and Adding Streams
+
+Assigning to a key replaces the stream under it; assigning to a new key (dict mode) appends it.
+An `int` key replaces by position:
+
+```python
+from akayu import MultiStream, Stream
+
+ms = MultiStream({"temp": Stream()})
+ms["humid"] = Stream()   # new key: appended
+ms["temp"] = Stream()    # replaces the stream under "temp"
+ms[0] = Stream()         # replaces by position ("temp" again)
+
+assert list(ms.keys()) == ["temp", "humid"]
+```
+
+A list-backed `MultiStream` only takes `int` positions (a `str` key raises `TypeError`, a position
+past the end `IndexError`), and the value must be a `Stream` or `MultiStream` (`TypeError`
+otherwise). Assignment only changes this `MultiStream`: transforms built from it earlier keep the
+streams they were built on.
+
+## Nested MultiStreams
+
+A `MultiStream` can hold `MultiStream`s. Transforms, collectors and actions (`compile()`,
+`flush()`, `drain()`) apply to every stream inside, and collectors return nested results:
+
+```python
+from akayu import MultiStream, Stream
+
+g1 = MultiStream([Stream(), Stream()])
+g2 = MultiStream([Stream()])
+groups = MultiStream({"g1": g1, "g2": g2})
+
+results = groups.map(lambda v: v + 1).to_list()
+groups.compile()
+
+g1[0].emit(1)
+g1[1].emit(2)
+g2[0].emit(3)
+
+assert results == {"g1": [[2], [3]], "g2": [[4]]}
+```
+
+Combinators (`union`, `combine_latest`, `zip`) don't support nested `MultiStream`s yet and raise
+`TypeError`: call them on each inner `MultiStream`.
 
 ## Real-World Example: Multi-Sensor Alarm Pipeline
 
@@ -403,7 +460,7 @@ assert values["temp"] == [20, 55, 70]
 | `combine_latest(*others, emit_on=None)` | `MultiStream`                     | Pairwise combine_latest with broadcasting  |
 | `zip(*others)`                          | `MultiStream`                     | Pairwise zip with broadcasting             |
 | `keys()`                                | `Iterator[str]`                   | Dict mode: iterate over keys               |
-| `values()`                              | `Iterator[Stream]`                | Dict mode: iterate over streams            |
+| `values()`                              | `Iterator[Stream]`                | Iterate over streams (both modes)          |
 | `items()`                               | `Iterator[(str, Stream)]`         | Dict mode: iterate over key-stream pairs   |
 | `to_dict()`                             | `dict[str, Stream]`               | Dict mode: return streams as dict          |
 | `keyed`                                 | `bool`                            | `True` if constructed with a dict          |

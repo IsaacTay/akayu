@@ -50,10 +50,17 @@ If you prefer not to use Nix, you can set up the development environment manuall
     uv run maturin develop --uv
     ```
 
-6.  **Run the quick tests** (skips benchmarks):
+6.  **Install [just](https://github.com/casey/just)** for the task recipes, and
+    [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) (`mmdc`) for `just docs-check`
+    (part of `just check`).
+
+7.  **Run the quick tests** (skips benchmarks):
     ```bash
     just test-quick
     ```
+
+`just test-py314`, `just wheels`, `just test-wheel-windows` and `just test-wheel-aarch64` fetch their toolchains and
+interpreters with Nix, so they need Nix installed even outside the dev shell.
 
 ## Quick Start with Just
 
@@ -123,7 +130,9 @@ The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebu
 | macOS arm64, x86_64 | linked with zig; an extension module needs only `libSystem`, so no Apple SDK is needed |
 | Windows x64 | `cargo-xwin` (clang-cl + lld-link), with PyO3 generating the `python3x.lib` import libraries |
 
-The tools come from the `wheels` dev shell in `flake.nix` (`nix develop .#wheels`), which `just wheels` enters by itself. On first use `cargo-xwin` downloads the MSVC C runtime and Windows SDK headers to `~/.cache/cargo-xwin`. `just publish` runs `just wheels` and uploads the wheels.
+The tools come from the `wheels` dev shell in `flake.nix` (`nix develop .#wheels`), which `just wheels` enters by itself. On first use `cargo-xwin` downloads the MSVC C runtime and Windows SDK headers to `~/.cache/cargo-xwin`. `just publish` runs `just wheels`, uploads the wheels (not the sdist) to the project's copyparty share, and prints a `uv add 'akayu @ <url>'` line for each.
+
+There are no free-threaded (3.13t/3.14t), musllinux or Windows arm64 wheels: the extension builds for free-threaded Python, but turns the GIL back on.
 
 The Windows and aarch64 wheels can be tested here too:
 
@@ -144,7 +153,8 @@ The project includes a comprehensive test suite using `pytest`.
 | `just test` | Build + run all tests, including benchmarks |
 | `just test-py314` | Build a cp314 wheel and run the quick tests on Python 3.14 |
 | `just bench` | Build release + run benchmarks only |
-| `just docs-check` | Run the documentation examples and validate the diagrams |
+| `just bench-cost` | CPU instructions and memory per item for a set of pipelines (`--save before.json`, then `--compare before.json` after a change) |
+| `just docs-check` | Build the docs site strictly (every page in the nav, every link and anchor resolving), run the documentation examples and validate the diagrams |
 
 Or manually:
 
@@ -153,6 +163,29 @@ uv run python -m pytest tests            # Run all tests
 uv run python -m pytest tests -v         # Verbose output
 uv run python -m pytest tests/test_benchmark.py -v  # Run benchmarks
 ```
+
+`just bench` and `just bench-cost` build a release extension, while `just build` and the test
+recipes leave a debug build installed: run `just build-release` before timing anything by hand.
+`bench-cost` counts instructions rather than time, so its numbers hold up on a busy machine;
+`tests/bench_complex.py` is the wall-clock comparison against streamz behind
+`docs/benchmarks.md`.
+
+### Fuzzers
+
+Several tests generate random graphs and inputs and compare akayu with a plain-Python model. Each
+runs a modest number of seeds by default; set the variable to run more, for example
+`AKAYU_FUZZ_SEEDS=20000 uv run python -m pytest tests -k fuzz`:
+
+| Test | What it checks | Seeds |
+|------|----------------|-------|
+| `tests/test_reference_fuzz.py` | random graphs (every operation, feedback sinks, extra sources) and scripts of emit, emit_batch, flush and drain calls with compile() at a random point, against a pure-Python interpreter | `AKAYU_FUZZ_SEEDS` (default 4000) |
+| `tests/test_native_ops_fuzz.py` | random lambdas over awkward values (overflow, NaN, -0.0, subclasses overriding operators) run natively, against plain Python: same results, same exception types | `AKAYU_OPS_FUZZ_SEEDS` (default 30) |
+| `tests/test_concurrency_fuzz.py` | several threads emitting and flushing at once: every sink gets exactly the items its path predicts, with no errors or hangs | `AKAYU_CONCURRENCY_FUZZ_SEEDS` (default 40) |
+
+The property tests (`test_property_based.py` and others) use Hypothesis with the `akayu` profile
+from `tests/conftest.py`, which turns off its per-example deadline. Each bug found by probing
+unusual flows has a regression test in `tests/test_wacky_flows.py`; cases that used to crash the
+interpreter run in a subprocess.
 
 ## Code Style
 
@@ -175,16 +208,19 @@ together with the quick tests and the documentation checks; run it before submit
     - `operations.rs`, `combinators.rs`: the Python-facing operations (`map`, `filter`, `union`, ...).
     - `execution.rs`: propagating values through the graph.
     - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas.
+    - `numeric.rs`: unboxed int/float arithmetic and comparisons for runs of numeric steps.
+    - `call.rs`: calling functions with extra bound arguments (`map(f, *args, **kwargs)`) natively.
     - `node.rs`: the node and builtin-operation types.
     - `gc.rs`: garbage-collection support, so stream graphs are freed.
     - `lock.rs`: the per-node lock behind `emit()`/`flush()` and shared children.
     - `pool.rs`, `prefetch.rs`: the thread pool behind `par()` and `prefetch()`.
+    - `stack.rs`: the native stack check that turns very deep graphs into `RecursionError`.
     - `profiling.rs`, `error.rs`, `helpers.rs`: profiling, errors and shared helpers.
     - `akayu.py`: Python helpers embedded in the extension (lambda analysis, wrappers, profiler); importable as `akayu._helpers`.
-- `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`.
+- `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`. The stub's docstrings are the API reference (`docs/api.md` renders them); `help()` shows the Rust `///` doc comments instead, so a behaviour change updates both. `tests/test_stubs.py` checks the stub against the runtime with mypy's stubtest (`tests/stubtest_allowlist.txt` lists the accepted differences).
 - `tests/`: the `pytest` suite. Benchmarks (`test_*benchmark*.py`) and `test_memory_leak.py` are skipped by `just test-quick`.
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
-- `docs/`: the documentation site (`mkdocs.yml`); `just docs-check` runs its code blocks.
+- `docs/`: the documentation site (`mkdocs.yml`); `just docs` serves it locally with live reload, and `just docs-check` builds it strictly and runs its code blocks.
 - `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
 - `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, testing the Windows and aarch64 wheels under Wine and qemu).
 - `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
@@ -238,7 +274,7 @@ Welcome! Here are some areas where contributions are especially appreciated:
 1.  Make your changes in `src/` (Rust) or `python/akayu/` (Python).
 2.  Run `just build` (or `just build-release` for optimized builds) to rebuild.
 3.  Add or update tests in `tests/`.
-4.  Use `.compile()` in your benchmarks to test the performance impact of fusion and other optimizations.
+4.  For performance changes, measure before and after with `just bench-cost --save before.json` and `--compare before.json`, compiled and uncompiled pipelines alike.
 5.  Run `just test-quick` to verify your changes.
 6.  If tests behave unexpectedly, try `just rebuild` to bypass any cached builds.
 7.  Format with `just fmt`, then run `just check` before submitting a PR.

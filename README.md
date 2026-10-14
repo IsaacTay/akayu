@@ -7,6 +7,17 @@ A rust powered python library for stream data processing. Takes heavy inspiratio
 > [!warning]
 > This project was partially vibed for internal use, use at own risk.
 
+## Install
+
+akayu isn't on PyPI. Install it from GitHub, which builds it from source: you need CPython 3.13 or
+3.14 and a Rust toolchain ([rustup](https://rustup.rs/)).
+
+<!--pytest.mark.skip-->
+
+```bash
+pip install "akayu @ git+https://github.com/IsaacTay/akayu"
+```
+
 ## Features
 
 - High Performance: Rust-powered core with automatic optimizations

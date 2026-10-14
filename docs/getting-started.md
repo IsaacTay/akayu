@@ -2,8 +2,17 @@
 
 ## System Requirements
 
-- Python 3.13+
-- No Rust toolchain required — pre-built wheels are distributed via pip
+- CPython 3.13 or 3.14, on Linux, macOS or Windows
+- A Rust toolchain, from [rustup](https://rustup.rs/) (on Windows, with the Visual Studio C++
+  build tools it asks for): akayu isn't on PyPI, so installing it builds it from source, which
+  takes a minute or two
+
+akayu also builds for free-threaded Python (3.13t, 3.14t), but importing it turns the GIL back on.
+
+To install on machines without Rust, build wheels once with `just wheels` (Linux x86_64 and
+aarch64 for glibc 2.17+, macOS arm64 and x86_64, Windows x64; see
+[Building Wheels](https://github.com/IsaacTay/akayu/blob/main/CONTRIBUTING.md#building-wheels))
+and install the one for each machine's platform.
 
 ## Installation
 
@@ -12,7 +21,7 @@
 <!--pytest.mark.skip-->
 
 ```bash
-pip install akayu
+pip install "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
 ///
@@ -22,7 +31,7 @@ pip install akayu
 <!--pytest.mark.skip-->
 
 ```bash
-uv add akayu
+uv add "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
 ///
@@ -32,7 +41,7 @@ uv add akayu
 <!--pytest.mark.skip-->
 
 ```bash
-pixi add akayu
+pixi add --pypi "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
 ///
@@ -115,9 +124,11 @@ The `compile()` step enables graph optimizations but is **optional**.
 
 **What compile() does:**
 
-- **Operator fusion** — Chains of `map.map.map` become a single fused operation
+- **Chain fusion** — A run of steps like `map.filter.map` becomes one node, and simple lambdas run natively
 - **Graph locking** — Prevents accidental modifications after optimization
-- **State initialization** — Prepares accumulate states upfront
+
+It freezes and optimizes the graph below the stream you call it on: in a graph with several
+sources, compile each of them.
 
 **When to use it:**
 
@@ -128,7 +139,7 @@ The `compile()` step enables graph optimizations but is **optional**.
 **When to skip it:**
 
 - Debugging — uncompiled graphs are easier to inspect
-- Dynamic pipelines — you need to add/remove nodes at runtime
+- Dynamic pipelines — you need to add nodes at runtime (there is no way to remove one)
 - Rapid prototyping — faster iteration without recompiling
 
 ```python
@@ -193,7 +204,7 @@ RuntimeError: Emit called on non-source node 'double'. ...
 ```
 
 All transform methods support `stream_name`: `map`, `filter`, `sink`, `flatten`,
-`collect`, `prefetch`, `accumulate`, `chunk_by`, `starmap`, `batch_map`.
+`collect`, `prefetch`, `accumulate`, `chunk_by`, `chunks_between`, `starmap`, `batch_map`.
 
 If not provided, a default name is generated from the function name (e.g. `"map(my_func)"`).
 
@@ -208,7 +219,8 @@ If not provided, a default name is generated from the function name (e.g. `"map(
 - [`#!python batch_map(func)`](api.md#akayu.Stream.batch_map) — Vectorized batch transformation
 - [`#!python starmap(func)`](api.md#akayu.Stream.starmap) — Map with argument unpacking
 - [`#!python chunk_by(predicate)`](api.md#akayu.Stream.chunk_by) — Buffer until delimiter, emit as tuple
-- [`#!python prefetch(n)`](api.md#akayu.Stream.prefetch) — Enable concurrent processing for next map
+- [`#!python chunks_between(open, close)`](api.md#akayu.Stream.chunks_between) — Emit the items between two delimiters as a tuple
+- [`#!python prefetch(n)`](api.md#akayu.Stream.prefetch) — Run the next `map`, `filter` or `batch_map` on up to `n` items at once (call `flush()` at the end)
 - [`#!python sink(func)`](api.md#akayu.Stream.sink) — Terminal side-effect operation
 
 ### Collecting
@@ -216,7 +228,8 @@ If not provided, a default name is generated from the function name (e.g. `"map(
 - [`#!python collect()`](api.md#akayu.Stream.collect) — Buffer elements until `flush()`
 - [`#!python to_list()`](api.md#akayu.Stream.to_list) — Collect into a Python list
 - [`#!python to_set()`](api.md#akayu.Stream.to_set) — Collect into a Python set
-- [`#!python drain()`](api.md#akayu.Stream.drain) — Discard all elements
+- [`#!python flush()`](api.md#akayu.Stream.flush) — Emit buffered items, up to the first buffering node on each path
+- [`#!python drain()`](api.md#akayu.Stream.drain) — Flush every buffering node downstream
 
 ### Combining Streams
 
@@ -259,5 +272,5 @@ print(results)
 ## Next Steps
 
 - [Starter Patterns](patterns.md#starter-patterns) — Common patterns with examples
-- [Advanced Patterns](patterns.md#patterns--best-practices) — Concurrency, batching, anti-patterns
+- [Patterns & Best Practices](patterns.md) — Concurrency, batching, anti-patterns
 - [API Reference](api.md) — Full method documentation

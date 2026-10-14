@@ -18,8 +18,8 @@ TOP_DIRS = ("src", "python", "tests", "examples", "docs", "scripts", "pipeline")
 PATH_RE = re.compile(rf"`((?:{'|'.join(TOP_DIRS)})/[\w./*-]*)`")
 # `just test-quick`, just docs-check, ...
 JUST_RE = re.compile(r"\bjust ([a-z][\w-]*)")
-# indented bullet under `src/` or `tests/`: - `lib.rs`: ...
-NESTED_RE = re.compile(r"^\s{4,}- `([\w.-]+\.(?:rs|py))`", re.MULTILINE)
+# indented bullet under `src/`: - `optimization.rs`, `builtin.rs`: ...
+NESTED_RE = re.compile(r"^\s{4,}- (`.*?`):", re.MULTILINE)
 
 
 def _recipes():
@@ -49,13 +49,26 @@ def test_referenced_recipes_exist(doc):
 
 
 def test_contributing_file_map_matches_the_tree():
-    """The nested src/ file list must name real files."""
+    """The nested src/ file list must name real files, and all of them."""
     text = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
     section = text[text.index("## Project Structure") : text.index("### Python Package Structure")]
-    named = NESTED_RE.findall(section)
+    named = [n for names in NESTED_RE.findall(section) for n in re.findall(r"`([\w.-]+\.(?:rs|py))`", names)]
     assert named, "file map not found"
     missing = [n for n in named if not (ROOT / "src" / n).exists()]
     assert not missing, f"CONTRIBUTING.md file map names missing src/ files: {missing}"
+    unnamed = sorted(p.name for p in (ROOT / "src").glob("*.[rp][sy]") if p.name not in named)
+    assert not unnamed, f"CONTRIBUTING.md file map leaves out src/ files: {unnamed}"
+
+
+def test_api_reference_covers_the_public_api():
+    """docs/api.md renders every public name, and mdformat hasn't flattened a
+    mkdocstrings options block into text (it rendered as a stray paragraph)."""
+    import akayu
+
+    text = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
+    rendered = re.findall(r"^::: akayu\.(\w+)$", text, re.MULTILINE)
+    assert not set(akayu.__all__) - set(rendered), f"docs/api.md leaves out {set(akayu.__all__) - set(rendered)}"
+    assert not re.search(r"^(options|members):", text, re.MULTILINE), "unindented mkdocstrings options in docs/api.md"
 
 
 def test_no_machine_specific_paths():

@@ -54,16 +54,14 @@ one item continue the same way, also under `emit()`.
 - Enables vectorized operations with `batch_map()`
 - More efficient for bulk data processing
 
-**Benchmark comparison** (500k items):
+How much `emit_batch()` saves depends on the pipeline: it helps most on long linear chains (the
+deep-pipeline benchmark takes 100 ms instead of 137 ms) and little below a fan-out. See
+[Benchmarks](../benchmarks.md).
 
-| Method            | Time   |
-| ----------------- | ------ |
-| `emit()` per item | ~230ms |
-| `emit_batch()`    | ~143ms |
+## Internal Mechanics
 
-## `update_batch()` Internal Mechanics
-
-When you call `emit_batch()`, internally each node's `update_batch()` method is called instead of `update()`:
+Internally, `emit_batch()` hands each node the whole batch (the private `_update_batch()`)
+where `emit()` hands it one item (`_update()`). For `map(lambda x: x * 2).filter(lambda x: x > 2).sink(...)`:
 
 ```mermaid
 sequenceDiagram
@@ -73,20 +71,20 @@ sequenceDiagram
     participant K as Sink
 
     Note over S,K: emit_batch([1,2,3])
-    S->>M: update_batch([1,2,3])
-    M->>F: update_batch([2,4,6])
-    F->>K: update_batch([4,6])
+    S->>M: _update_batch([1,2,3])
+    M->>F: _update_batch([2,4,6])
+    F->>K: _update_batch([4,6])
 
     Note over S,K: vs emit(1), emit(2), emit(3)
-    S->>M: update(1)
-    M->>F: update(2)
-    F->>K: update(2)
-    S->>M: update(2)
-    M->>F: update(4)
-    F->>K: update(4)
-    S->>M: update(3)
-    M->>F: update(6)
-    F->>K: update(6)
+    S->>M: _update(1)
+    M->>F: _update(2)
+    Note over F: 2 is dropped
+    S->>M: _update(2)
+    M->>F: _update(4)
+    F->>K: _update(4)
+    S->>M: _update(3)
+    M->>F: _update(6)
+    F->>K: _update(6)
 ```
 
 Each node type handles batches efficiently:
@@ -94,7 +92,9 @@ Each node type handles batches efficiently:
 - **Map**: Applies function to each item, returns transformed batch
 - **Filter**: Returns batch of items that pass predicate
 - **Flatten**: Expands all iterables, returns flattened batch
-- **BatchMap**: Calls function once with entire batch
+- **BatchMap**: Calls function once with entire batch. Under `emit(x)` it is called with `[x]`,
+  and below a branch point, where a batch goes through the branches one item at a time, it is
+  called once per item with a one-item list (compiled or not)
 - **Sink**: Calls function for each item (side effects)
 
 ## `batch_map()` - Vectorized Operations
@@ -137,6 +137,10 @@ flowchart LR
 - Database batch queries
 - API batch requests
 - Any function optimized for bulk input
+
+The function only sees a whole batch when the items arrive through `emit_batch()` and the
+`batch_map()` isn't below a branch point (see the BatchMap bullet above): in a branch, a batch
+query becomes one query per item.
 
 <!--pytest.mark.skip-->
 
@@ -201,15 +205,15 @@ flowchart TD
 ```mermaid
 flowchart TD
     A[source] --> B[map f1]
-    B --> C["MapSink(f2, s1)"]
-    B --> D["MapSink(f3, s2)"]
+    B --> C["chain: map f2 → sink s1"]
+    B --> D["chain: map f3 → sink s2"]
 
     style B stroke:#fb4934,stroke-width:3px
     style C fill:#458588
     style D fill:#458588
 ```
 
-Each branch gets terminal fusion (green), but `f1` remains separate at the split point (red border).
+Each branch is fused into a chain (blue), but `f1` remains separate at the split point (red border).
 
 ### Working with Splits
 
@@ -231,16 +235,17 @@ However, this trades fusion for duplicate computation. Choose based on whether:
 - `f1` is expensive (keep shared)
 - Function call overhead dominates (fuse)
 
-## BatchMap Fusion
+## BatchMap in Chains
 
-Consecutive `batch_map()` operations are fused:
+Consecutive `batch_map()` steps join a chain like any other step: after `compile()` they run in
+one node, and each function is still called in turn, with the whole batch:
 
 <!--pytest.mark.skip-->
 
 ```python
 source.batch_map(f1).batch_map(f2)
 
-# After compile: single batch_map(compose(f1, f2))
+# After compile: one chain node; f1 gets the batch, then f2 gets f1's results
 ```
 
 ```mermaid
@@ -250,7 +255,7 @@ flowchart LR
     end
 
     subgraph after [After]
-        C["batch_map(f1 >> f2)"]
+        C["chain: batch_map f1 → batch_map f2"]
     end
 
     before -.->|compile| after
@@ -258,27 +263,41 @@ flowchart LR
 
 ## Prefetch with Batch Operations
 
-`prefetch()` works with `batch_map()` for concurrent vectorized processing:
-
-<!--pytest.mark.skip-->
+`prefetch(n).batch_map(f)` runs `f` on the thread pool, one batch at a time per task: each
+`emit_batch()` call is one task, and `f` gets that whole batch on one pool thread. Batches from
+successive `emit_batch()` calls run concurrently, up to `n` at once, and their results come out in
+order. A single `emit_batch()` therefore gets no concurrency: split large inputs into several
+batches. Once `n` batches are in flight, the oldest is finished and passed on; the last `n - 1`
+stay in flight until more batches arrive or you call `flush()`:
 
 ```python
-source.prefetch(4).batch_map(batch_process)
-source.compile()
+import time
 
-# Batches are processed concurrently
-source.emit_batch(large_dataset)
+import akayu
+
+def batch_process(batch):
+    time.sleep(0.01)  # e.g. one request for the whole batch
+    return [x * 2 for x in batch]
+
+source = akayu.Stream()
+results = source.prefetch(4).batch_map(batch_process).to_list()
+
+for start in range(0, 100, 10):
+    source.emit_batch(list(range(start, start + 10)))  # one task per batch
+print(len(results))  # 70: three batches still in flight
+
+source.flush()  # wait for them
+print(len(results))  # 100
 ```
 
 ```mermaid
 flowchart TD
-    I[large_dataset] --> S[source]
-    S --> P["prefetch(4)"]
-    P --> B[batch_map]
-    B --> K[sink]
+    I["emit_batch(chunk) per chunk"] --> S[source]
+    S --> P["prefetch(4) + batch_map"]
+    P --> K[sink]
 
     subgraph pool [Thread Pool]
-        W["concurrent batch processing"]
+        W["one task per batch, up to 4 in flight"]
     end
 
     P -.-> pool
@@ -310,7 +329,7 @@ inserted = []
     .batch_map(validate_batch)
     .batch_map(transform_batch)
     .batch_map(batch_insert)
-    .sink(lambda r: inserted.extend(r)))
+    .sink(inserted.append))  # batch_map passes each record on as its own item
 
 source.compile()
 
@@ -327,14 +346,15 @@ flowchart TD
     S --> V["batch_map<br/>validate"]
     V --> T["batch_map<br/>transform"]
     T --> D["batch_map<br/>db.insert_many"]
-    D --> K["sink<br/>extend results"]
+    D --> K["sink<br/>append each record"]
 
     style V fill:#458588
     style T fill:#458588
     style D fill:#458588
 ```
 
-After compile(), the three `batch_map` operations are fused into one!
+After compile(), the three `batch_map` steps and the sink run as one chain: each function is
+called once per chunk, in turn.
 
 ## Collecting Results
 
