@@ -2,18 +2,18 @@
 
 ## Do I need Rust installed?
 
-**Yes**, to install it: akayu isn't on PyPI, so it installs from GitHub and builds from source
-with a Rust toolchain ([rustup](https://rustup.rs/)):
+**No**, on Linux (x86_64 and aarch64, glibc 2.17+), macOS (arm64 and x86_64) and Windows x64:
+each release has wheels for CPython 3.13 and 3.14 there, which install from akayu's package index:
 
 <!--pytest.mark.skip-->
 
 ```bash
-pip install "akayu @ git+https://github.com/IsaacTay/akayu"
+uv add akayu --index akayu=https://isaactay.github.io/akayu/simple/
 ```
 
-Machines that only run akayu don't need Rust if you give them a wheel: `just wheels` builds them
-for Linux (x86_64 and aarch64, glibc 2.17+), macOS (arm64 and x86_64) and Windows x64, for
-CPython 3.13 and 3.14. See [System Requirements](getting-started.md#system-requirements).
+On other platforms, or to install an unreleased commit from GitHub, installing builds akayu from
+source and needs a Rust toolchain ([rustup](https://rustup.rs/)). See
+[Installation](getting-started.md#installation).
 
 ## When should I call `compile()`?
 

@@ -66,7 +66,8 @@
           '';
         };
 
-        # Wheels for every platform, built on this host (no CI): `just wheels`.
+        # Wheels for every platform, cross-compiled on this host: `just wheels`
+        # (releases are built on each platform by .github/workflows/wheels.yml).
         #   - Linux x86_64/aarch64: linked with zig against glibc 2.17 symbols,
         #     so the wheels are manylinux2014 (no Docker image needed).
         #   - macOS arm64/x86_64: linked with zig; an extension module needs
@@ -90,8 +91,6 @@
             python314
             just
             uv
-            # Needed by `just publish` to upload to copyparty.
-            curl
           ];
 
           shellHook = ''

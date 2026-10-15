@@ -48,6 +48,13 @@ jobs:
       - name: Build docs
         run: uv run mkdocs build
 
+      # The package index uv and pip install the released wheels from, at
+      # /simple/. The Wheels workflow starts this one after each release.
+      - name: Add the package index
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: uv run python scripts/wheel_index.py site
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
