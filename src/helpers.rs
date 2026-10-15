@@ -351,35 +351,17 @@ pub(crate) fn check_not_compiled(compiled: bool, name: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Append `str(data)` and a newline to a file, creating it if needed.
+///
+/// Meant to be used as a sink::
+///
+///     source.sink(akayu.to_text_file, path="output.txt")
+///
+/// Args:
+///     data: The item to write.
+///     path: The file to append to, as a str (a `Path` raises `TypeError`).
 #[pyfunction]
 #[pyo3(signature = (data, path))]
-/// Write data to a text file, appending a newline.
-///
-/// Converts the input data to a string and appends it as a new line to the specified file.
-/// Creates the file if it doesn't exist. This is a side-effect operation intended
-/// for logging or output purposes.
-///
-/// # Arguments
-///
-/// * `data` - The data to write (will be converted to string via `str()`).
-/// * `path` - The file path to write to.
-///
-/// # Returns
-///
-/// None.
-///
-/// # Examples
-///
-/// ```python
-/// import akayu
-/// source = akayu.Stream()
-/// source.sink(akayu.to_text_file, path="output.txt")
-/// source.emit("Hello")
-/// source.emit("World")
-/// # output.txt contains:
-/// # Hello
-/// # World
-/// ```
 pub fn to_text_file(py: Python, data: Py<PyAny>, path: String) -> PyResult<()> {
     let mut line = data.bind(py).str()?.to_string();
     line.push('\n');

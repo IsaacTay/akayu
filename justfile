@@ -186,6 +186,10 @@ docs-watch: docs
 docs-build: sync-docs
     uv run mkdocs build
 
+# Copy the runtime docstrings (Rust `///` comments, `__init__.py`) into the type stub
+stub-docs: build
+    uv run python scripts/stub_docs.py
+
 # Format markdown documentation
 docs-fmt:
     uv run --isolated --only-group docs mdformat docs/ README.md

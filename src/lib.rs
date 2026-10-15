@@ -86,13 +86,21 @@ impl StreamPtr {
 /// Data flows through a directed graph of stream nodes, where each node applies
 /// a transformation (map, filter, etc.) before passing results downstream.
 ///
+/// Each operation returns a new node. Adding a node below one that `compile()`
+/// froze raises `FrozenGraphError`; below a node that is processing an item
+/// (from one of its own callbacks, or while another thread emits through it),
+/// `BusyError`.
+/// Operations that take a function raise `TypeError` for an `async def`
+/// function: use `prefetch()` or `par()` for concurrent I/O.
+///
 /// Example:
-///     >>> source = `Stream()`
-///     >>> result = []
-///     >>> source.map(lambda x: x * 2).sink(result.append)
-///     >>> source.emit(5)
-///     >>> result
-///     [10]
+///     ```python
+///     source = Stream()
+///     result = []
+///     source.map(lambda x: x * 2).sink(result.append)
+///     source.emit(5)
+///     result  # [10]
+///     ```
 #[pyclass(subclass, weakref, module = "akayu")]
 #[allow(clippy::struct_excessive_bools)] // These flags are intentionally separate for clarity
 pub struct Stream {

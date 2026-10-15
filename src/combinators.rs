@@ -15,37 +15,33 @@ use crate::node::{CombineLatestState, NodeLogic};
 // Stream methods for combinators
 #[pymethods]
 impl Stream {
-    /// Create a parallel branch point that executes all downstreams concurrently.
+    /// Create a branch point whose downstream branches run concurrently.
     ///
-    /// When values flow through a parallel node, all downstream branches are
-    /// executed in parallel threads rather than sequentially. This is useful for
-    /// I/O-bound operations where branches can overlap their waiting time.
+    /// Each item goes to every branch at once: the branches run on the thread
+    /// pool shared with `prefetch()` (the last one on the calling thread), and
+    /// `emit()` returns once all of them have finished. If branches raise, the
+    /// first failing branch's error (in the order the branches were added) is
+    /// raised.
     ///
-    /// Uses a shared global thread pool with `prefetch()`, so combining them has
-    /// minimal overhead. Locks are only applied at convergence points (union/zip)
-    /// for efficient parallel execution.
+    /// Only work that releases the GIL overlaps: I/O, `time.sleep()`, C code
+    /// that releases it. Pure-Python CPU work gains nothing. Branches that
+    /// converge (`union()`, `zip()`) take turns at the merge.
     ///
-    /// Use `seq()` to switch back to sequential execution after parallel branches.
+    /// Use `seq()` directly below a `par()` to run several steps as one
+    /// sequential branch.
     ///
-    /// # Returns
+    /// Returns:
+    ///     A new Stream that will propagate values to its downstreams in parallel.
     ///
-    /// A new Stream that will propagate values to its downstreams in parallel.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// p = source.par()  # Create parallel branch point
-    /// a = p.map(load_from_disk)   # Branch 1
-    /// b = p.map(fetch_from_api)   # Branch 2
-    /// merged = akayu.union(a, b).seq()  # Back to sequential
-    /// source.emit(filename)  # a and b run in parallel
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Example:
+    ///     ```python
+    ///     s = Stream()
+    ///     p = s.par()  # Create parallel branch point
+    ///     a = p.map(load_from_disk)   # Branch 1
+    ///     b = p.map(fetch_from_api)   # Branch 2
+    ///     merged = union(a, b)
+    ///     s.emit(filename)  # a and b run in parallel
+    ///     ```
     #[pyo3(name = "par")]
     pub fn par(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let mut this = graph_node_mut(slf)?;
@@ -60,38 +56,30 @@ impl Stream {
         )
     }
 
-    /// Alias for `par()`.
-    ///
-    /// This is an alias for `par()` that provides an alternative name.
-    /// See `par()` for full documentation.
+    /// Alias for `par()`. Create a parallel branch point.
     pub fn parallel(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         Stream::par(slf, py)
     }
 
-    /// Create a sequential branch point (explicit synchronization point).
+    /// Create a node whose downstreams run one after another (the default).
     ///
-    /// This is the default behavior for streams, but can be used explicitly
-    /// after parallel sections to clearly indicate sequential execution resumes.
+    /// Directly below a `par()`, `seq()` groups the nodes built on it into one
+    /// branch whose steps run in order on one thread. Anywhere else it is a
+    /// pass-through: it doesn't move work back to the calling thread (nodes
+    /// after `union(a, b).seq()` still run on the thread that delivered the item).
     ///
-    /// # Returns
+    /// Returns:
+    ///     A new Stream that will propagate values to its downstreams sequentially.
     ///
-    /// A new Stream that will propagate values to its downstreams sequentially.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// p = source.par()
-    /// a = p.map(slow_op1)
-    /// b = p.map(slow_op2)
-    /// merged = akayu.union(a, b).seq()  # Explicit sequential point
-    /// merged.map(f1).sink(...)    # Sequential from here
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Example:
+    ///     ```python
+    ///     s = Stream()
+    ///     p = s.par()
+    ///     q = p.seq()               # one branch...
+    ///     q.map(parse).sink(store)  # ...whose steps run in order
+    ///     q.map(index).sink(search)
+    ///     p.map(make_thumbnail).sink(save)  # a second, concurrent branch
+    ///     ```
     pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let mut this = graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
@@ -110,30 +98,11 @@ impl Stream {
     /// Creates a new stream that emits elements from this stream and all
     /// other streams. Elements are emitted in the order they arrive.
     ///
-    /// # Arguments
+    /// Args:
+    ///     *others: Other streams to merge with this one.
     ///
-    /// * `*others` - Other streams to merge with this one.
-    ///
-    /// # Returns
-    ///
-    /// A new Stream emitting elements from all input streams.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// s1 = akayu.Stream()
-    /// s2 = akayu.Stream()
-    /// merged = s1.union(s2)
-    /// result = []
-    /// merged.sink(result.append)
-    /// s1.emit(1)  # result contains [1]
-    /// s2.emit(2)  # result contains [1, 2]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Returns:
+    ///     A new Stream emitting elements from all input streams.
     #[pyo3(signature = (*others))]
     pub fn union(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         merge(py, Merge::Union, &with_self(slf, others))
@@ -145,35 +114,17 @@ impl Stream {
     /// any stream emits. Only starts emitting after all streams have
     /// emitted at least one value.
     ///
-    /// # Arguments
+    /// Args:
+    ///     *others: Other streams to combine with this one.
+    ///     emit_on: Stream or list of streams that trigger emission.
+    ///         If None (default), emit on update from any stream.
     ///
-    /// * `*others` - Other streams to combine with this one.
-    /// * `emit_on` - Stream or list of streams that trigger emission.
-    ///   If None (default), emit on update from any stream.
+    /// Returns:
+    ///     A new Stream emitting tuples of latest values.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting tuples of latest values.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// s1 = akayu.Stream()
-    /// s2 = akayu.Stream()
-    /// combined = s1.combine_latest(s2)
-    /// result = []
-    /// combined.sink(result.append)
-    /// s1.emit('a')
-    /// s2.emit(1)
-    /// s1.emit('b')  # result contains [('a', 1), ('b', 1)]
-    /// s2.emit(2)    # result contains [('a', 1), ('b', 1), ('b', 2)]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
-    /// * `TypeError` - If `emit_on` is not a Stream or list of Streams.
+    /// Raises:
+    ///     ValueError: If `emit_on` names a stream that isn't an input, or is
+    ///         an empty list.
     #[pyo3(signature = (*others, emit_on=None))]
     pub fn combine_latest(
         slf: &Bound<'_, Self>,
@@ -191,32 +142,11 @@ impl Stream {
     /// an unbounded buffer: an input that runs ahead of the others keeps
     /// its items in memory until they are paired.
     ///
-    /// # Arguments
+    /// Args:
+    ///     *others: Other streams to zip with this one.
     ///
-    /// * `*others` - Other streams to zip with this one.
-    ///
-    /// # Returns
-    ///
-    /// A new Stream emitting zipped tuples.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// s1 = akayu.Stream()
-    /// s2 = akayu.Stream()
-    /// zipped = s1.zip(s2)
-    /// result = []
-    /// zipped.sink(result.append)
-    /// s1.emit(1)
-    /// s1.emit(2)   # waiting for s2...
-    /// s2.emit('a') # result contains [(1, 'a')]
-    /// s2.emit('b') # result contains [(1, 'a'), (2, 'b')]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Returns:
+    ///     A new Stream emitting zipped tuples.
     #[pyo3(signature = (*others))]
     pub fn zip(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
         merge(py, Merge::Zip, &with_self(slf, others))

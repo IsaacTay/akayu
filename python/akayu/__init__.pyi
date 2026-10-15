@@ -119,8 +119,9 @@ class Stream:
     a transformation (map, filter, etc.) before passing results downstream.
 
     Each operation returns a new node. Adding a node below one that `compile()`
-    froze, or below a node that is processing an item (from one of its own
-    callbacks, or while another thread emits through it), raises `RuntimeError`.
+    froze raises `FrozenGraphError`; below a node that is processing an item
+    (from one of its own callbacks, or while another thread emits through it),
+    `BusyError`.
     Operations that take a function raise `TypeError` for an `async def`
     function: use `prefetch()` or `par()` for concurrent I/O.
 
@@ -364,8 +365,13 @@ class Stream:
             **kwargs: Ignored (for compatibility with streamz).
 
         Raises:
-            RuntimeError: If a callback raises (as for `emit()`), or a node is
-                flushed from one of its own downstream callbacks mid-update.
+            CallbackError: If a callback raises (as for `emit()`).
+            BusyError: If a node is flushed from one of its own downstream
+                callbacks mid-update.
+            ReentrantError: If a callback of the flush flushes a node that is
+                being flushed.
+            DeadlockError: If waiting for another thread would never end (see
+                the Concurrency guide).
             RecursionError: If the graph is too deep for the thread's stack.
         """
         ...
@@ -510,11 +516,17 @@ class Stream:
             x: The value to emit.
 
         Raises:
-            RuntimeError: If a callback raises: the error names the node, and
-                the original exception is its `__cause__`. Also if this isn't a
-                source node, if a callback emits into a node that is already
-                processing an item (re-entrant emit), or if a callback changes
-                the graph mid-emit.
+            CallbackError: If a callback raises: it names the node (`node`,
+                `location`), and the original exception is its `__cause__`.
+                akayu errors a callback causes arrive this way too: a callback
+                emitting into its own source (`ReentrantError`), or changing
+                the graph mid-emit (`BusyError`).
+            NotASourceError: If this isn't a source node.
+            ReentrantError: If an item comes back into a node still processing
+                another (a loop through sources).
+            DeadlockError: If waiting for another thread would never end:
+                threads emitting into each other's sources (see the
+                Concurrency guide).
             RecursionError: If the graph is too deep for the thread's stack
                 (thousands of nodes, or long chains of sources feeding each other).
         """
@@ -533,7 +545,10 @@ class Stream:
             items: The values, as a sequence (list, tuple, range, ...).
 
         Raises:
-            RuntimeError: As for `emit()`.
+            CallbackError: As for `emit()`.
+            NotASourceError: As for `emit()`.
+            ReentrantError: As for `emit()`.
+            DeadlockError: As for `emit()`.
             RecursionError: As for `emit()`.
             TypeError: If `items` isn't a sequence (a generator or a set), or is a str.
         """
@@ -548,7 +563,8 @@ class Stream:
         meanwhile are not counted.
 
         Raises:
-            RuntimeError: If called on a non-source node or if profiling is already active.
+            NotASourceError: If called on a non-source node.
+            StreamError: If profiling is already active.
         """
         ...
 
@@ -619,7 +635,9 @@ class Stream:
             self (for chaining)
 
         Raises:
-            RuntimeError: If this stream is already compiled.
+            FrozenGraphError: If this stream is already compiled.
+            BusyError: If a node of the graph is processing an item (compile()
+                called from a callback, or while another thread emits).
 
         Warns:
             UserWarning: For a `par()` with fewer than two branches.

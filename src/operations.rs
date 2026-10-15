@@ -329,7 +329,7 @@ impl Stream {
         Self::blank(NodeLogic::Source, name, capture_source_location(py))
     }
 
-    /// Returns True if the stream graph is compiled (frozen).
+    /// True if the stream graph is compiled (frozen).
     #[getter]
     pub fn compiled(&self) -> bool {
         self.compiled
@@ -337,34 +337,17 @@ impl Stream {
 
     /// Apply a function to each element in the stream.
     ///
-    /// Transforms each element by passing it through the provided function.
-    /// The function can accept additional positional and keyword arguments.
+    /// Args:
+    ///     func: Function to apply to each element.
+    ///     *args: Additional positional arguments passed to func.
+    ///     stream_name: Optional custom name for this node.
+    ///     **kwargs: Additional keyword arguments passed to func.
     ///
-    /// # Arguments
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
     ///
-    /// * `func` - Function to apply to each element.
-    /// * `*args` - Additional positional arguments passed to `func`.
-    /// * `**kwargs` - Additional keyword arguments passed to `func`. Use
-    ///   `stream_name="name"` to set a custom name for this node.
-    ///
-    /// # Returns
-    ///
-    /// A new Stream emitting the transformed values.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// doubled = source.map(lambda x: x * 2)
-    /// result = []
-    /// doubled.sink(result.append)
-    /// source.emit(5)  # result contains [10]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `func` is an async function.
     #[pyo3(signature = (func, *args, stream_name=None, **kwargs))]
     pub fn map(
         slf: &Bound<'_, Self>,
@@ -403,39 +386,39 @@ impl Stream {
     /// Run the next `map()`, `filter()` or `batch_map()` on up to `n` items at once.
     ///
     /// The function of the `map()`, `filter()` or `batch_map()` called on the
-    /// returned node runs on the thread pool shared with `par()`, up to `n` items
-    /// at a time, and its results go on in input order. The last `n - 1` results
-    /// stay in flight until more items arrive or `flush()`/`drain()` is called.
+    /// returned node runs on the thread pool shared with `par()`, up to `n`
+    /// items at a time, and its results go on in input order. A result is
+    /// passed on only once later items have come in: the last `n - 1` stay in
+    /// flight until more items arrive or `flush()`/`drain()` is called, so
+    /// flush at the end of the input. Under `emit_batch()`, a `batch_map()`
+    /// gets each whole batch as one task.
     ///
-    /// That call fuses into this node and returns it, so a second `.map()` on it
-    /// is an ordinary map after the first. Any other operation after `prefetch()`
-    /// runs on the calling thread, with no concurrency.
+    /// That `map()`/`filter()`/`batch_map()` call returns this same node, now
+    /// running the function, so a second `.map()` on it is an ordinary map
+    /// after the first. Any other operation after `prefetch()` (`sink()`,
+    /// `starmap()`, ...) runs on the calling thread, with no concurrency.
     ///
-    /// # Arguments
+    /// Only work that releases the GIL overlaps (I/O, `time.sleep()`, C code
+    /// that releases it), and the pool (one thread per CPU) also caps how many
+    /// functions run at once.
     ///
-    /// * `n` - Maximum number of items to process concurrently.
+    /// Args:
+    ///     n: Maximum number of items in flight.
+    ///     stream_name: Optional custom name for this node.
     ///
-    /// # Returns
+    /// Returns:
+    ///     A prefetch node: call `map()`, `filter()` or `batch_map()` on it.
     ///
-    /// A new Stream that will prefetch items for the next transformation.
+    /// Raises:
+    ///     ValueError: If `n` is less than 1 or doesn't fit in 64 bits.
     ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// # Process up to 4 items concurrently
-    /// result = source.prefetch(4).map(lambda x: x * 2)
-    /// output = []
-    /// result.sink(output.append)
-    /// source.emit_batch([1, 2, 3, 4])  # processed concurrently
-    /// source.flush()  # wait for the last results
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `ValueError` - If `n` is less than 1 or doesn't fit in 64 bits.
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Example:
+    ///     ```python
+    ///     source = Stream()
+    ///     pages = source.prefetch(8).map(fetch).to_list()
+    ///     source.emit_batch(urls)
+    ///     source.flush()  # wait for the last results
+    ///     ```
     #[pyo3(name = "prefetch", signature = (n, *, stream_name=None))]
     pub fn prefetch(
         slf: &Bound<'_, Self>,
@@ -463,35 +446,20 @@ impl Stream {
 
     /// Apply a function to each element, unpacking the element as arguments.
     ///
-    /// Similar to map, but each element is unpacked with `*element` before
-    /// being passed to the function. Useful when elements are tuples or
-    /// iterables that should be spread as function arguments.
+    /// Similar to map, but each element is unpacked with *element before
+    /// being passed to the function. Useful when elements are tuples.
     ///
-    /// # Arguments
+    /// Args:
+    ///     func: Function to apply (receives unpacked element).
+    ///     *args: Additional positional arguments passed to func.
+    ///     stream_name: Optional custom name for this node.
+    ///     **kwargs: Additional keyword arguments passed to func.
     ///
-    /// * `func` - Function to apply (receives unpacked element).
-    /// * `*args` - Additional positional arguments passed to `func`.
-    /// * `**kwargs` - Additional keyword arguments passed to `func`.
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting the transformed values.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// summed = source.starmap(lambda a, b: a + b)
-    /// result = []
-    /// summed.sink(result.append)
-    /// source.emit((1, 2))   # result contains [3]
-    /// source.emit((3, 4))   # result contains [3, 7]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `func` is an async function.
     #[pyo3(signature = (func, *args, stream_name=None, **kwargs))]
     pub fn starmap(
         slf: &Bound<'_, Self>,
@@ -531,34 +499,31 @@ impl Stream {
     /// Unlike `map()` which calls the function once per item, `batch_map()` calls
     /// the function once per batch with all items as a list. This is ideal for
     /// vectorized operations like NumPy functions that can process arrays efficiently.
+    /// Each item of the returned iterable is passed downstream separately.
     ///
-    /// # Arguments
+    /// The function gets the whole batch only from `emit_batch()` in a linear
+    /// part of the graph. Under `emit()`, and below a branch point even under
+    /// `emit_batch()`, it is called once per item with a one-item list.
     ///
-    /// * `func` - Function that receives a list of items and returns an
-    ///   iterable of results.
-    /// * `*args` - Additional positional arguments passed to `func`.
-    /// * `**kwargs` - Additional keyword arguments passed to `func`. Use
-    ///   `stream_name="name"` to set a custom name for this node.
+    /// Args:
+    ///     func: Function that receives a list of items and returns an iterable of results.
+    ///     *args: Additional positional arguments passed to func.
+    ///     stream_name: Optional custom name for this node.
+    ///     **kwargs: Additional keyword arguments passed to func.
     ///
-    /// # Returns
+    /// Returns:
+    ///     A new Stream emitting the transformed values.
     ///
-    /// A new Stream emitting the transformed values.
+    /// Raises:
+    ///     TypeError: If `func` is an async function.
     ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// import numpy as np
-    /// source = akayu.Stream()
-    /// squared = source.batch_map(np.square)
-    /// result = []
-    /// squared.sink(result.append)
-    /// source.emit_batch([1, 4, 9, 16])  # result contains [1, 4, 9, 16]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Example:
+    ///     ```python
+    ///     import numpy as np
+    ///     s = Stream()
+    ///     s.batch_map(np.sqrt).sink(print)
+    ///     s.emit_batch([1, 4, 9, 16])  # prints 1.0, 2.0, 3.0, 4.0
+    ///     ```
     #[pyo3(signature = (func, *args, stream_name=None, **kwargs))]
     pub fn batch_map(
         slf: &Bound<'_, Self>,
@@ -599,31 +564,17 @@ impl Stream {
     /// Only elements for which the predicate returns a truthy value
     /// are passed downstream.
     ///
-    /// # Arguments
+    /// Args:
+    ///     predicate: Function that returns True for elements to keep.
+    ///     *args: Additional positional arguments passed to predicate.
+    ///     stream_name: Optional custom name for this node.
+    ///     **kwargs: Additional keyword arguments passed to predicate.
     ///
-    /// * `predicate` - Function that returns True for elements to keep.
-    /// * `*args` - Additional positional arguments passed to `predicate`.
-    /// * `**kwargs` - Additional keyword arguments passed to `predicate`.
+    /// Returns:
+    ///     A new Stream emitting only elements that pass the filter.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting only elements that pass the filter.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// evens = source.filter(lambda x: x % 2 == 0)
-    /// result = []
-    /// evens.sink(result.append)
-    /// source.emit(5)   # filtered out
-    /// source.emit(4)   # result contains [4]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `predicate` is an async function.
     #[pyo3(signature = (predicate, *args, stream_name=None, **kwargs))]
     pub fn filter(
         slf: &Bound<'_, Self>,
@@ -668,27 +619,10 @@ impl Stream {
     /// Flatten an iterable element into individual elements.
     ///
     /// Each element is expected to be iterable. The items within each
-    /// element are emitted individually downstream. Useful for
-    /// processing streams where each item contains multiple sub-items.
+    /// element are emitted individually downstream.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting the flattened elements.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// flattened = source.flatten()
-    /// result = []
-    /// flattened.sink(result.append)
-    /// source.emit([1, 2, 3])  # result contains [1, 2, 3]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Returns:
+    ///     A new Stream emitting the flattened elements.
     #[pyo3(signature = (*, stream_name=None))]
     pub fn flatten(
         slf: &Bound<'_, Self>,
@@ -704,33 +638,11 @@ impl Stream {
 
     /// Collect elements into a buffer until `flush()` is called.
     ///
-    /// Elements are accumulated in an internal buffer. **Elements are NOT passed
-    /// downstream until `flush()` is called.** When flushed, all collected
-    /// elements are emitted as a single tuple. This is useful for batching
-    /// elements before downstream processing.
+    /// Elements are accumulated in an internal buffer. When `flush()` is
+    /// called, all collected elements are emitted as a single tuple.
     ///
-    /// # Returns
-    ///
-    /// A new Stream that emits collected tuples on flush.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// collected = source.collect()
-    /// result = []
-    /// collected.sink(result.append)
-    /// source.emit(1)
-    /// source.emit(2)
-    /// source.emit(3)
-    /// print(result)  # [] — nothing yet!
-    /// source.flush()  # result now contains [(1, 2, 3)]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Returns:
+    ///     A new Stream that emits collected tuples on flush.
     #[pyo3(signature = (*, stream_name=None))]
     pub fn collect(
         slf: &Bound<'_, Self>,
@@ -755,56 +667,19 @@ impl Stream {
     /// Each item is buffered. When the predicate returns True for an item,
     /// the buffer (including the delimiter if `include_delimiter=True`) is
     /// emitted as a tuple downstream, and the buffer is cleared.
-    /// The delimiter itself is excluded by default (set `include_delimiter=True`
-    /// to include it).
     ///
     /// Any remaining items in the buffer are emitted on `flush()`.
     ///
-    /// # Arguments
+    /// Args:
+    ///     predicate: Function that returns True for delimiter items.
+    ///     include_delimiter: If True, the delimiter item is included
+    ///         in the emitted tuple. If False, it is excluded.
     ///
-    /// * `predicate` - Function that returns True for delimiter items.
-    /// * `include_delimiter` - If True, the delimiter item is included
-    ///   in the emitted tuple. If False (default), it is excluded.
+    /// Returns:
+    ///     A new Stream emitting tuples of chunked items.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting tuples of chunked items.
-    ///
-    /// # Examples
-    ///
-    /// Split a character stream on spaces:
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// words = source.chunk_by(lambda x: x == ' ')
-    /// result = []
-    /// words.sink(result.append)
-    /// source.emit('H')
-    /// source.emit('i')
-    /// source.emit(' ')   # delimiter triggers emit
-    /// source.emit('there')
-    /// source.flush()     # flush remaining
-    /// print(result)  # [('H', 'i'), ('there',)]
-    /// ```
-    ///
-    /// Split lines including the newline delimiter:
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// lines = source.chunk_by(lambda x: x == '\n', include_delimiter=True)
-    /// result = []
-    /// lines.sink(result.append)
-    /// for ch in 'Hello\nWorld\n':
-    ///     source.emit(ch)
-    /// source.flush()
-    /// print(result)  # [('H', 'e', 'l', 'l', 'o', '\n'), ('W', 'o', 'r', 'l', 'd', '\n')]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `predicate` is an async function.
     #[pyo3(signature = (predicate, *, include_delimiter=false, stream_name=None))]
     pub fn chunk_by(
         slf: &Bound<'_, Self>,
@@ -835,49 +710,36 @@ impl Stream {
         )
     }
 
-    /// Extract items between two delimiter predicates.
+    /// Emit the items between an opening and a closing delimiter as a tuple.
     ///
-    /// State machine that buffers items between `open` and `close` delimiters.
-    /// When `open` returns True, transitions to Inside state and starts buffering.
-    /// When `close` returns True in Inside state, emits the buffer as a tuple
-    /// and transitions back to Outside state. The delimiters themselves are
-    /// NOT included in the emitted tuple.
+    /// Outside a chunk only `open` is called; inside one only `close` is.
+    /// Items are buffered until `close` matches, then emitted as a tuple.
+    /// The delimiters themselves are not included, and empty chunks are not
+    /// emitted. The same predicate can serve as both delimiters.
     ///
-    /// Only `open` is called while Outside and only `close` while Inside, so
-    /// a stray `close` Outside or a stray `open` Inside is ignored, and the
-    /// same predicate can serve as both delimiters (e.g. quotes).
+    /// `flush()`/`drain()` discard an incomplete chunk, return to the
+    /// outside state, and continue on to downstream nodes.
     ///
-    /// `flush()`/`drain()` discard an incomplete chunk, return to the Outside
-    /// state, and continue on to downstream nodes.
+    /// Args:
+    ///     open: Predicate that returns True for the opening delimiter.
+    ///     close: Predicate that returns True for the closing delimiter.
+    ///     stream_name: Optional custom name for this node.
     ///
-    /// # Arguments
+    /// Returns:
+    ///     A new Stream emitting tuples of the items between delimiters.
     ///
-    /// * `open` - Predicate that returns True for the opening delimiter.
-    /// * `close` - Predicate that returns True for the closing delimiter.
+    /// Raises:
+    ///     TypeError: If `open` or `close` is an async function.
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting tuples of extracted items.
-    ///
-    /// # Examples
-    ///
-    /// Extract content between `[` and `]`:
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// content = source.chunks_between(lambda c: c == '[', lambda c: c == ']')
-    /// results = []
-    /// content.sink(results.append)
-    /// for ch in "abc[def]ghi[jkl]mno":
-    ///     source.emit(ch)
-    /// source.flush()
-    /// # results == [('d', 'e', 'f'), ('j', 'k', 'l')]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Example:
+    ///     ```python
+    ///     source = Stream()
+    ///     out = []
+    ///     source.chunks_between(lambda c: c == "[", lambda c: c == "]").sink(out.append)
+    ///     for ch in "a[bc]d[e]":
+    ///         source.emit(ch)
+    ///     out  # [('b', 'c'), ('e',)]
+    ///     ```
     #[pyo3(signature = (open, close, *, stream_name=None))]
     pub fn chunks_between(
         slf: &Bound<'_, Self>,
@@ -927,27 +789,23 @@ impl Stream {
     /// so `source.flush()` reaches the first buffering node on every path.
     /// Use `drain()` to flush every node in the graph.
     ///
-    /// # Arguments
+    /// Called from another thread, flushing a source (or any node of a
+    /// compiled graph) waits for a running `emit()` to finish, and an `emit()`
+    /// waits for the flush. See the Concurrency guide for the limits.
     ///
-    /// * `*args` - Ignored (for compatibility with streamz).
-    /// * `**kwargs` - Ignored (for compatibility with streamz).
+    /// Args:
+    ///     *args: Ignored (for compatibility with streamz).
+    ///     **kwargs: Ignored (for compatibility with streamz).
     ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// collected = source.collect()
-    /// result = []
-    /// collected.sink(result.append)
-    /// source.emit(1)
-    /// source.emit(2)
-    /// source.flush()  # result now contains [(1, 2)]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called re-entrantly (during a flush).
+    /// Raises:
+    ///     CallbackError: If a callback raises (as for `emit()`).
+    ///     BusyError: If a node is flushed from one of its own downstream
+    ///         callbacks mid-update.
+    ///     ReentrantError: If a callback of the flush flushes a node that is
+    ///         being flushed.
+    ///     DeadlockError: If waiting for another thread would never end (see
+    ///         the Concurrency guide).
+    ///     RecursionError: If the graph is too deep for the thread's stack.
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn flush(
         slf: &Bound<'_, Self>,
@@ -963,33 +821,14 @@ impl Stream {
 
     /// Recursively flush this node and all downstream nodes.
     ///
-    /// Unlike `flush()`, which only flushes this node's buffer,
-    /// `drain()` flushes this node and then recursively drains every
-    /// downstream node. Use this when you want to flush an entire
-    /// pipeline (e.g. at the end of processing).
+    /// Unlike `flush()`, which stops at the first buffering node on each
+    /// path, `drain()` flushes this node and then recursively drains every
+    /// downstream node, so every buffer's contents are emitted. Use this when
+    /// you want to flush an entire pipeline (e.g. at the end of processing).
     ///
-    /// # Arguments
-    ///
-    /// * `*args` - Ignored (for compatibility with streamz).
-    /// * `**kwargs` - Ignored (for compatibility with streamz).
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// collected = source.collect()
-    /// result = []
-    /// collected.sink(result.append)
-    /// source.emit(1)
-    /// source.emit(2)
-    /// source.drain()  # drains entire pipeline
-    /// # result contains [(1, 2)]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called re-entrantly (during a drain).
+    /// Args:
+    ///     *args: Ignored (for compatibility with streamz).
+    ///     **kwargs: Ignored (for compatibility with streamz).
     #[pyo3(signature = (*_args, **_kwargs))]
     pub fn drain(
         slf: &Bound<'_, Self>,
@@ -1009,31 +848,18 @@ impl Stream {
     ///
     /// Similar to map, but the return value of func is discarded.
     /// Use this for terminal operations like printing or storing results.
-    /// Unlike map which returns a transformed stream, sink typically ends
-    /// a pipeline (no further operations are typically added after sink).
     ///
-    /// # Arguments
+    /// Args:
+    ///     func: Function to call with each element.
+    ///     *args: Additional positional arguments passed to func.
+    ///     stream_name: Optional custom name for this node.
+    ///     **kwargs: Additional keyword arguments passed to func.
     ///
-    /// * `func` - Function to call with each element.
-    /// * `*args` - Additional positional arguments passed to `func`.
-    /// * `**kwargs` - Additional keyword arguments passed to `func`.
+    /// Returns:
+    ///     A new Stream (for chaining, though sink typically ends a pipeline).
     ///
-    /// # Returns
-    ///
-    /// A new Stream (for chaining, though sink typically ends a pipeline).
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// source.map(lambda x: x * 2).sink(print)  # prints doubled values
-    /// source.emit(5)  # prints 10
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `func` is an async function.
     #[pyo3(signature = (func, *args, stream_name=None, **kwargs))]
     pub fn sink(
         slf: &Bound<'_, Self>,
@@ -1062,60 +888,21 @@ impl Stream {
 
     /// Accumulate values using a function, emitting each intermediate state.
     ///
-    /// Similar to functools.reduce, but emits every intermediate result
-    /// rather than just the final state. The function receives
-    /// `(current_state, new_element)` and returns the new state.
+    /// Similar to functools.reduce, but emits every intermediate result.
+    /// The function receives (current_state, new_element) and returns the new state.
     ///
-    /// # Arguments
+    /// Args:
+    ///     func: Accumulator function (state, element) -> new_state.
+    ///         If returns_state=True, function should return (new_state, result).
+    ///     start: Initial state value.
+    ///     returns_state: If True, func returns (state, result) tuple where state
+    ///         is passed to next call and result is emitted. Default False.
     ///
-    /// * `func` - Accumulator function `(state, element) -> new_state`. If
-    ///   `returns_state=True`, function should return `(new_state, result)`.
-    /// * `start` - Initial state value passed to first call of `func`.
-    /// * `returns_state` - If False (default), `func` returns the new state
-    ///   directly and the state is emitted. If True, `func` returns a
-    ///   `(new_state, result)` tuple — `new_state` is used for the next
-    ///   call and `result` is emitted. This lets you keep internal state
-    ///   (e.g. a counter) separate from what gets emitted.
+    /// Returns:
+    ///     A new Stream emitting accumulated states (or results if returns_state=True).
     ///
-    /// # Returns
-    ///
-    /// A new Stream emitting accumulated states (or results if `returns_state=True`).
-    ///
-    /// # Examples
-    ///
-    /// Running total:
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// accumulated = source.accumulate(lambda state, x: state + x, start=0)
-    /// result = []
-    /// accumulated.sink(result.append)
-    /// source.emit(1)  # result contains [1]
-    /// source.emit(2)  # result contains [1, 3]
-    /// source.emit(3)  # result contains [1, 3, 6]
-    /// ```
-    ///
-    /// Using `returns_state` to keep a counter separate from emitted values:
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// # func returns (state, emit_value) when returns_state=True
-    /// indexed = source.accumulate(
-    ///     lambda count, x: (count + 1, (count, x)),
-    ///     start=0,
-    ///     returns_state=True,
-    /// )
-    /// result = []
-    /// indexed.sink(result.append)
-    /// source.emit('a')  # result contains [(0, 'a')]
-    /// source.emit('b')  # result contains [(0, 'a'), (1, 'b')]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the stream graph is already compiled.
+    /// Raises:
+    ///     TypeError: If `func` is an async function.
     #[pyo3(signature = (func, start, *, returns_state=false, stream_name=None))]
     pub fn accumulate(
         slf: &Bound<'_, Self>,
@@ -1148,29 +935,32 @@ impl Stream {
 
     /// Emit a single value into the stream.
     ///
-    /// This is the primary way to push data into a source stream.
-    /// The value propagates through all downstream nodes.
+    /// This is the primary way to push data into a source stream. The value
+    /// goes through every downstream node before `emit()` returns, except
+    /// results still in flight in a `prefetch()` (see `flush()`).
     ///
-    /// **Restriction**: This method can ONLY be called on a source node.
-    /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
+    /// Emits and flushes of the same graph from different threads wait for
+    /// each other; see the Concurrency guide for the limits. Exceptions that
+    /// aren't `Exception` subclasses (`KeyboardInterrupt`, `SystemExit`, ...)
+    /// raised in a callback pass through unchanged.
     ///
-    /// # Arguments
+    /// Args:
+    ///     x: The value to emit.
     ///
-    /// * `x` - The value to emit.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// result = []
-    /// source.map(lambda x: x * 2).sink(result.append)
-    /// source.emit(5)  # result contains [10]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
+    /// Raises:
+    ///     CallbackError: If a callback raises: it names the node (`node`,
+    ///         `location`), and the original exception is its `__cause__`.
+    ///         akayu errors a callback causes arrive this way too: a callback
+    ///         emitting into its own source (`ReentrantError`), or changing
+    ///         the graph mid-emit (`BusyError`).
+    ///     NotASourceError: If this isn't a source node.
+    ///     ReentrantError: If an item comes back into a node still processing
+    ///         another (a loop through sources).
+    ///     DeadlockError: If waiting for another thread would never end:
+    ///         threads emitting into each other's sources (see the
+    ///         Concurrency guide).
+    ///     RecursionError: If the graph is too deep for the thread's stack
+    ///         (thousands of nodes, or long chains of sources feeding each other).
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let _entered = self.enter_source(py, false)?;
 
@@ -1189,29 +979,22 @@ impl Stream {
 
     /// Emit multiple values into the stream as a batch.
     ///
-    /// More efficient than calling `emit()` multiple times when processing
-    /// many items. Values are processed together through the pipeline.
+    /// Cheaper per item than calling `emit()` for each. The batch goes through
+    /// the pipeline step by step: each step processes every item before the
+    /// next step starts (below a branch point, items go through the branches
+    /// one at a time unless `compile()` proves the branches independent). If
+    /// a step raises, the steps after it see none of the batch.
     ///
-    /// **Restriction**: This method can ONLY be called on a source node.
-    /// Calling it on a derived node (e.g. from `.map()`) will raise a RuntimeError.
+    /// Args:
+    ///     items: The values, as a sequence (list, tuple, range, ...).
     ///
-    /// # Arguments
-    ///
-    /// * `items` - List of values to emit.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// result = []
-    /// source.map(lambda x: x * 2).sink(result.append)
-    /// source.emit_batch([1, 2, 3])  # result contains [2, 4, 6]
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
+    /// Raises:
+    ///     CallbackError: As for `emit()`.
+    ///     NotASourceError: As for `emit()`.
+    ///     ReentrantError: As for `emit()`.
+    ///     DeadlockError: As for `emit()`.
+    ///     RecursionError: As for `emit()`.
+    ///     TypeError: If `items` isn't a sequence (a generator or a set), or is a str.
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let _entered = self.enter_source(py, false)?;
 
@@ -1230,34 +1013,38 @@ impl Stream {
 
     /// Freeze and optimize the graph below this stream.
     ///
-    /// Each linear run of steps becomes one node that calls its functions in
-    /// turn, steps compile() recognizes run natively, and a graph without
-    /// `par()` gets a single lock.
+    /// Call this after building the complete pipeline, before emitting data.
+    /// Each linear run of steps (map, filter, starmap, flatten, accumulate,
+    /// batch_map, sink) becomes one node that calls its functions in turn;
+    /// errors and profiles still name each step. Steps compile() recognizes
+    /// (simple lambdas, builtins such as `len`) run natively, and a graph
+    /// without `par()` or `prefetch()` gets a single lock.
     ///
-    /// compile() freezes every node reachable downstream of this stream: adding
-    /// a node below any of them raises a RuntimeError. Streams that only feed
-    /// into the graph (another input of a `union()`, or the source above a
-    /// derived node you compile) are neither frozen nor optimized, so call
-    /// compile() on every source. Build your complete pipeline first.
+    /// compile() freezes every node reachable downstream of this stream:
+    /// adding a node below any of them raises `FrozenGraphError`. Streams that
+    /// only feed into the graph (another input of a `union()`, or the source
+    /// above a derived node you compile) are neither frozen nor optimized, so
+    /// call compile() on every source. State such as an `accumulate()`'s
+    /// total carries across compile().
     ///
-    /// # Returns
+    /// Returns:
+    ///     self (for chaining)
     ///
-    /// self (for chaining).
+    /// Raises:
+    ///     FrozenGraphError: If this stream is already compiled.
+    ///     BusyError: If a node of the graph is processing an item (compile()
+    ///         called from a callback, or while another thread emits).
     ///
-    /// # Examples
+    /// Warns:
+    ///     UserWarning: For a `par()` with fewer than two branches.
     ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// source.map(f1).map(f2).sink(print)
-    /// source.compile()  # map, map and sink become one node
-    /// source.emit(1)
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If the graph is already compiled/frozen or if
-    ///   modifications are attempted after compilation.
+    /// Example:
+    ///     ```python
+    ///     s = Stream()
+    ///     s.map(f1).map(f2).sink(print)
+    ///     s.compile()  # map, map and sink become one node
+    ///     s.emit(1)
+    ///     ```
     pub fn compile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
         let source_py_ptr = slf.as_ptr() as usize;
         let mut this = crate::helpers::graph_node_mut(slf)?;
@@ -1306,9 +1093,9 @@ impl Stream {
     /// the emits of the thread that started it; emits from other threads
     /// meanwhile are not counted.
     ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called on a non-source node or if profiling is already active.
+    /// Raises:
+    ///     NotASourceError: If called on a non-source node.
+    ///     StreamError: If profiling is already active.
     pub fn start_profiling(&self) -> PyResult<()> {
         if !matches!(self.logic, NodeLogic::Source) {
             return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
@@ -1318,37 +1105,23 @@ impl Stream {
 
     /// Stop profiling and return the collected report.
     ///
-    /// Returns a `ProfileReport` with per-node timing and item flow data.
-    ///
-    /// # Returns
-    ///
-    /// A `ProfileReport` with per-node timing and item flow data.
+    /// Returns:
+    ///     A ProfileReport with per-node timing and item flow data.
     pub fn stop_profiling(&self, py: Python) -> PyResult<Py<crate::profiling::ProfileReport>> {
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
         crate::profiling::build_report(py, self, data, wall_time, emit_count)
     }
 
-    /// Return a `Profiler` context manager for this source.
+    /// Return a Profiler context manager for this source.
     ///
-    /// Provides a convenient way to profile a block of emit calls.
-    /// The profiler is a context manager that automatically starts
-    /// profiling on entry and stops on exit. Like `start_profiling()`, it
-    /// records the emits of the thread that entered it.
+    /// Usage:
+    ///     >>> with source.profile() as p:
+    ///     ...     source.emit(42)
+    ///     >>> print(p.report)
     ///
-    /// # Returns
-    ///
-    /// A `Profiler` context manager.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// source.map(lambda x: x * 2).sink(print)
-    /// with source.profile() as p:
-    ///     source.emit(42)
-    /// print(p.report)
-    /// ```
+    /// Returns:
+    ///     A context manager that profiles all emits within the block made
+    ///     by the thread that entered it.
     pub fn profile(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyAny>> {
         {
             let this = crate::helpers::graph_node(slf)?;
@@ -1362,30 +1135,13 @@ impl Stream {
 
     /// Emit a single value and return a profiling report.
     ///
-    /// Convenience method combining start_profiling + emit + stop_profiling
-    /// for single-shot profiling of an emit call.
+    /// Convenience method combining start_profiling + emit + stop_profiling.
     ///
-    /// # Arguments
+    /// Args:
+    ///     x: The value to emit.
     ///
-    /// * `x` - The value to emit.
-    ///
-    /// # Returns
-    ///
-    /// A `ProfileReport` for this single emit.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// source.map(lambda x: x * 2).sink(print)
-    /// report = source.emit_profiled(5)  # prints 10
-    /// print(report)  # shows timing breakdown
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called on a non-source node.
+    /// Returns:
+    ///     A ProfileReport for this single emit.
     pub fn emit_profiled(
         &self,
         py: Python,
@@ -1404,30 +1160,11 @@ impl Stream {
 
     /// Emit a batch of values and return a profiling report.
     ///
-    /// Convenience method combining start_profiling + emit_batch + stop_profiling
-    /// for profiling a batch emit call.
+    /// Args:
+    ///     items: The values, as a sequence (see `emit_batch()`).
     ///
-    /// # Arguments
-    ///
-    /// * `items` - List of values to emit.
-    ///
-    /// # Returns
-    ///
-    /// A `ProfileReport` for this batch emit.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// source.map(lambda x: x * 2).sink(print)
-    /// report = source.emit_batch_profiled([1, 2, 3])  # prints 2, 4, 6
-    /// print(report)  # shows timing breakdown
-    /// ```
-    ///
-    /// # Raises
-    ///
-    /// * `RuntimeError` - If called on a non-source node.
+    /// Returns:
+    ///     A ProfileReport for this batch emit.
     pub fn emit_batch_profiled(
         &self,
         py: Python,
@@ -1452,27 +1189,20 @@ impl Stream {
         format!("<Stream(nodes=1, compiled={})>", self.compiled)
     }
 
-    /// Convert the stream to a Python list.
+    /// Collect all emitted items into a Python list.
     ///
-    /// Adds a sink that appends each element to a list and returns it.
-    /// This is a terminal operation that collects all emitted values.
+    /// Creates a sink that appends each item to a list, then returns the list.
+    /// Items are collected as they flow through the stream.
     ///
-    /// # Returns
+    /// Returns:
+    ///     A Python list containing all emitted items.
     ///
-    /// A Python list containing all emitted elements.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// result = source.map(lambda x: x * 2).to_list()
-    /// source.emit(1)
-    /// source.emit(2)
-    /// source.emit(3)
-    /// source.flush()
-    /// print(result)  # [2, 4, 6]
-    /// ```
+    /// Example:
+    ///     >>> s = Stream()
+    ///     >>> results = s.map(lambda x: x * 2).to_list()
+    ///     >>> s.emit_batch([1, 2, 3])
+    ///     >>> results
+    ///     [2, 4, 6]
     pub fn to_list(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PyList>> {
         let list: Bound<'_, PyList> = PyList::new(py, Vec::<Py<PyAny>>::new())?;
         let append: Py<PyAny> = list.getattr("append")?.unbind();
@@ -1482,28 +1212,20 @@ impl Stream {
         Ok(list.unbind())
     }
 
-    /// Convert the stream to a Python set.
+    /// Collect all emitted items into a Python set (deduplicates).
     ///
-    /// Adds a sink that adds each element to a set and returns it.
-    /// This is a terminal operation that collects all emitted values.
+    /// Creates a sink that adds each item to a set, then returns the set.
+    /// Items are collected as they flow through the stream.
     ///
-    /// # Returns
+    /// Returns:
+    ///     A Python set containing all emitted items.
     ///
-    /// A Python set containing all emitted elements.
-    ///
-    /// # Examples
-    ///
-    /// ```python
-    /// import akayu
-    /// source = akayu.Stream()
-    /// result = source.filter(lambda x: x > 5).to_set()
-    /// source.emit(1)
-    /// source.emit(10)
-    /// source.emit(20)
-    /// source.emit(10)  # duplicate
-    /// source.flush()
-    /// print(result)  # {10, 20}
-    /// ```
+    /// Example:
+    ///     >>> s = Stream()
+    ///     >>> results = s.map(lambda x: x % 3).to_set()
+    ///     >>> s.emit_batch([1, 2, 3, 4, 5])
+    ///     >>> results
+    ///     {0, 1, 2}
     pub fn to_set(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<PySet>> {
         let set: Bound<'_, PySet> = PySet::new(py, Vec::<Py<PyAny>>::new())?;
         let add: Py<PyAny> = set.getattr("add")?.unbind();
