@@ -488,6 +488,74 @@ pub(crate) type PtrBuild = std::hash::BuildHasherDefault<PtrHasher>;
 pub(crate) type PtrMap<K, V> = std::collections::HashMap<K, V, PtrBuild>;
 pub(crate) type PtrSet<K> = std::collections::HashSet<K, PtrBuild>;
 
+/// Values made from objects compile() meets again and again, by the objects'
+/// identity, so graphs built from the same code share them. Each entry keeps
+/// what makes its key unambiguous alive, or can tell it died (`H`: a weak
+/// reference, the object itself, the ops a run was made from).
+///
+/// Once the table holds `sweep_at` entries, an insert first drops the
+/// entries nothing but the table still uses (`live` says which are used),
+/// and beyond `max` entries new values are made but not kept. Whatever the
+/// table lets go of is freed after its lock is released: freeing can run
+/// Python code (a `__del__`), which may come back to the table.
+pub(crate) struct InternTable<K, H, V> {
+    entries: LazyLock<Mutex<PtrMap<K, (H, V)>>>,
+    sweep_at: usize,
+    max: usize,
+}
+
+impl<K: std::hash::Hash + Eq, H, V: Clone> InternTable<K, H, V> {
+    pub(crate) const fn new(sweep_at: usize, max: usize) -> Self {
+        Self {
+            entries: LazyLock::new(Mutex::default),
+            sweep_at,
+            max,
+        }
+    }
+
+    /// The value kept for `key`, if its entry is still `valid` (its object
+    /// is still the one the key's address named).
+    pub(crate) fn get(&self, key: &K, valid: impl Fn(&H) -> bool) -> Option<V> {
+        let entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let (holder, value) = entries.get(key)?;
+        valid(holder).then(|| value.clone())
+    }
+
+    /// Keep `value` for `key`, unless the table is full, and return the value
+    /// kept for it (another thread's, if it got there first).
+    pub(crate) fn insert(&self, key: K, holder: H, value: V, live: impl Fn(&H) -> bool) -> V {
+        let mut freed: Vec<(H, V)> = Vec::new();
+        let kept = {
+            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+            if entries.len() >= self.sweep_at {
+                freed.extend(
+                    entries
+                        .extract_if(|_, (holder, _)| !live(holder))
+                        .map(|(_, entry)| entry),
+                );
+            }
+            let full = entries.len() >= self.max;
+            match entries.entry(key) {
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    let kept = entry.get().1.clone();
+                    freed.push((holder, value));
+                    kept
+                }
+                std::collections::hash_map::Entry::Vacant(entry) if !full => {
+                    entry.insert((holder, value)).1.clone()
+                }
+                std::collections::hash_map::Entry::Vacant(_) => {
+                    let kept = value.clone();
+                    freed.push((holder, value));
+                    kept
+                }
+            }
+        };
+        drop(freed);
+        kept
+    }
+}
+
 /// `slf` for changing the graph, or a clean error (not a panic) while it is
 /// processing an item: a callback building on it mid-emit.
 pub(crate) fn graph_node_mut<'py>(

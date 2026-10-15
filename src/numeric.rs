@@ -16,7 +16,7 @@
 
 use pyo3::ffi;
 use pyo3::prelude::*;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::Arc;
 
 use crate::node::{BinaryOp, BuiltinOp, CompareOp};
 
@@ -176,11 +176,10 @@ pub(crate) enum RunOutcome {
 /// from, so graphs with the same steps share one: a run is a few allocations,
 /// a third of a small compiled graph's memory. Entries hold their ops, so a
 /// key's addresses can't be reused by other ops while it lives.
-type Runs =
-    crate::helpers::PtrMap<Box<[(bool, usize)]>, (Box<[Arc<BuiltinOp>]>, Option<Arc<NumRun>>)>;
-static RUNS: LazyLock<Mutex<Runs>> = LazyLock::new(Mutex::default);
-/// Beyond this many live entries, runs are no longer shared.
-const RUNS_MAX: usize = 1024;
+type RunKey = Box<[(bool, usize)]>;
+type RunOps = Box<[Arc<BuiltinOp>]>;
+static RUNS: crate::helpers::InternTable<RunKey, RunOps, Option<Arc<NumRun>>> =
+    crate::helpers::InternTable::new(256, 1024);
 
 impl NumRun {
     /// The shared run starting at the first of `steps`, (is_filter, op) for
@@ -194,32 +193,14 @@ impl NumRun {
             .iter()
             .map(|(f, op)| (*f, Arc::as_ptr(op) as usize))
             .collect();
-        if let Some((_, run)) = RUNS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-        {
-            return run.clone();
+        if let Some(run) = RUNS.get(&key, |_| true) {
+            return run;
         }
         let run = Self::from_steps(py, steps.iter().map(|(f, op)| (*f, &***op))).map(Arc::new);
         let ops = steps.iter().map(|(_, op)| Arc::clone(op)).collect();
-        let freed = {
-            let mut runs = RUNS.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut dead = Runs::default();
-            if runs.len() >= RUNS_MAX / 4 {
-                // Entries whose ops only this table still holds.
-                let live;
-                (live, dead) = std::mem::take(&mut *runs)
-                    .into_iter()
-                    .partition(|(_, (ops, _))| ops.iter().all(|op| Arc::strong_count(op) > 1));
-                *runs = live;
-            }
-            let replaced = (runs.len() < RUNS_MAX).then(|| runs.insert(key, (ops, run.clone())));
-            (dead, replaced)
-        };
-        // Freed outside the lock: freeing an op's constants can run Python code.
-        drop(freed);
-        run
+        // In use: some graph still holds every op the run was made from.
+        let in_use = |ops: &RunOps| ops.iter().all(|op| Arc::strong_count(op) > 1);
+        RUNS.insert(key, ops, run, in_use)
     }
 
     /// `steps` are (is_filter, op) for consecutive chain steps; the run is the
