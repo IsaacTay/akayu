@@ -105,7 +105,7 @@ Pure-Python computation doesn't run in parallel, and free-threaded Python doesn'
 - Streams merged with `union`, `zip` or `combine_latest` can be emitted from different threads:
   the merged node and everything after it are locked per item.
 - `compile()` replaces those per-item locks with one lock for the whole connected graph (unless it
-  contains `par()`), so a compiled graph is entered by one thread at a time.
+  contains `par()` or `prefetch()`), so a compiled graph is entered by one thread at a time.
 - A thread waiting for a lock releases the GIL, so other Python threads keep running.
 - For parallel I/O, use `par()` or `prefetch()`, which run work on akayu's thread pool.
 

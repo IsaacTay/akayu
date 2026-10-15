@@ -14,9 +14,9 @@
 //! Jobs run in a copy of the submitting thread's `contextvars` context.
 //!
 //! Each task records the thread running it, and a thread asleep in
-//! `wait_for` the tasks it waits for: a thread about to wait for a source's
-//! lock checks with them whether the holder is waiting for it in turn
-//! (`lock::holder_waits_for_this_thread`).
+//! `wait_for` is listed with the tasks it waits for (`lock::Waiting`): a
+//! thread about to wait for a lock checks with them whether the lock's holder
+//! waits for it in turn.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
@@ -41,6 +41,11 @@ impl Task {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
+    }
+
+    /// The thread running the job (`lock::this_thread`), 0 when none is.
+    pub(crate) fn runner(&self) -> usize {
+        self.runner.load(Ordering::Acquire)
     }
 
     fn is_claimed(&self) -> bool {
@@ -69,64 +74,6 @@ impl Task {
     }
 }
 
-/// A thread asleep in `wait_for`: who, by `lock::this_thread` and by its
-/// stack, and the tasks it waits for.
-struct Sleeper {
-    thread: usize,
-    stack: (usize, usize),
-    tasks: Vec<Arc<Task>>,
-}
-
-/// The threads asleep in `wait_for` (see `lock::holder_waits_for_this_thread`).
-static SLEEPING: Mutex<Vec<Sleeper>> = Mutex::new(Vec::new());
-
-/// Lists this thread in `SLEEPING` until dropped.
-struct Asleep(usize);
-
-impl Asleep {
-    fn new(tasks: &[Arc<Task>]) -> Self {
-        let thread = crate::lock::this_thread();
-        SLEEPING
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Sleeper {
-                thread,
-                stack: crate::stack::range(),
-                tasks: tasks.to_vec(),
-            });
-        Self(thread)
-    }
-}
-
-impl Drop for Asleep {
-    fn drop(&mut self) {
-        // A signal handler run while waiting may wait again on this thread:
-        // the innermost wait ends first, and is listed last.
-        let mut sleeping = SLEEPING.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(i) = sleeping.iter().rposition(|s| s.thread == self.0) {
-            sleeping.remove(i);
-        }
-    }
-}
-
-/// If a thread `is` matches (given its `lock::this_thread` and its stack) is
-/// asleep in `wait_for`: the threads running the tasks it waits for.
-pub(crate) fn runners_awaited_by(is: &dyn Fn(usize, (usize, usize)) -> bool) -> Vec<usize> {
-    let sleeping = SLEEPING.lock().unwrap_or_else(PoisonError::into_inner);
-    sleeping
-        .iter()
-        .rev()
-        .find(|s| is(s.thread, s.stack))
-        .map(|s| {
-            s.tasks
-                .iter()
-                .map(|t| t.runner.load(Ordering::Acquire))
-                .filter(|&r| r != 0)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 struct Queue {
     tasks: VecDeque<Arc<Task>>,
     idle: usize,
@@ -145,9 +92,6 @@ struct Pool {
     finished: Condvar,
     max_threads: usize,
 }
-
-/// How long a waiter sleeps before re-checking for signals (Ctrl+C).
-const SIGNAL_POLL: Duration = Duration::from_millis(50);
 
 /// Bumped in a forked child: the parent's worker threads don't exist there.
 static FORK_GENERATION: AtomicUsize = AtomicUsize::new(0);
@@ -334,9 +278,12 @@ pub(crate) fn wait_for(
     if target.is_ready() {
         return Ok(());
     }
-    let _asleep = Asleep::new(own);
+    let _asleep = crate::lock::Waiting::new(
+        crate::lock::this_thread(),
+        crate::lock::WaitingOn::Tasks(own.to_vec()),
+    );
     while !target.is_ready() {
-        py.detach(|| target.wait_timeout(SIGNAL_POLL));
+        py.detach(|| target.wait_timeout(crate::lock::SIGNAL_POLL));
         py.check_signals()?;
     }
     Ok(())

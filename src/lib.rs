@@ -66,6 +66,12 @@ impl StreamPtr {
         Self(std::ptr::NonNull::from(stream))
     }
 
+    /// Whether this points at `node` (debug builds check compile()'s edges).
+    #[cfg(debug_assertions)]
+    pub(crate) fn is(self, node: &Stream) -> bool {
+        std::ptr::eq(self.0.as_ptr(), node)
+    }
+
     /// The node, for one update (see the type's safety notes). The caller
     /// picks the lifetime: keep it to the update.
     #[inline(always)]
@@ -130,7 +136,7 @@ pub struct Stream {
     /// A source's state: `lock::IDLE`, or a mark of the thread emitting into
     /// it or flushing it (see `lock::Emitting`). Refuses an emit() or flush()
     /// that re-enters the source.
-    pub(crate) emitting: std::sync::atomic::AtomicUsize,
+    pub(crate) emitting: std::sync::atomic::AtomicU8,
     /// Set while the compiled fast path updates this node (see
     /// `update_compiled`), when `guard_reentry`.
     pub(crate) busy: bool,

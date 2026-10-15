@@ -207,12 +207,12 @@ together with the quick tests and the documentation checks; run it before submit
     - `lib.rs`: the `Stream` type and module setup.
     - `operations.rs`, `combinators.rs`: the Python-facing operations (`map`, `filter`, `union`, ...).
     - `execution.rs`: propagating values through the graph.
-    - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas.
+    - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas. `optimize_topology_full()` lists the passes in order; debug builds check the graph's links after them (`assert_graph_consistent`), so a rewrite that forgets one panics in the tests.
     - `numeric.rs`: unboxed int/float arithmetic and comparisons for runs of numeric steps.
     - `call.rs`: calling functions with extra bound arguments (`map(f, *args, **kwargs)`) natively.
     - `node.rs`: the node and builtin-operation types.
     - `gc.rs`: garbage-collection support, so stream graphs are freed.
-    - `lock.rs`: the per-node lock behind `emit()`/`flush()` and shared children.
+    - `lock.rs`: the per-node lock behind `emit()`/`flush()` and shared children. It records its holder, and every waiting thread is listed with what it waits for, so a wait that would never end raises instead. Its header has the table of which flag refuses what.
     - `pool.rs`, `prefetch.rs`: the thread pool behind `par()` and `prefetch()`.
     - `stack.rs`: the native stack check that turns very deep graphs into `RecursionError`.
     - `profiling.rs`, `error.rs`, `helpers.rs`: profiling, errors and shared helpers.

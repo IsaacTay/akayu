@@ -63,13 +63,15 @@ impl Stream {
     /// lock, two threads can't be in the graph at once, so the `locks_children`
     /// edges that guard merges of several sources (union, zip, combine_latest)
     /// lock nothing new: they are cleared, and the compiled raw-pointer path
-    /// applies to them. Skipped when the graph has a par() node (its workers
-    /// update branches while the emitting thread holds the lock), when any
-    /// node is already frozen (another thread may be inside it through raw
-    /// pointers), or when any node is borrowed right now (in use). The GIL is
-    /// held throughout and no Python code runs, so nothing starts meanwhile.
+    /// applies to them. Skipped when the graph has a par() or prefetch() node
+    /// (pool threads run its branches or calls while the emitting thread
+    /// holds the lock and waits for them: one emitting into another source of
+    /// the graph would wait for that lock forever), when any node is already
+    /// compiled (another thread may be inside it through raw pointers), or
+    /// when any node is borrowed right now (in use). The GIL is held
+    /// throughout and no Python code runs, so nothing starts meanwhile.
     fn share_graph_lock(&mut self, py: Python, source_py_ptr: usize) {
-        if matches!(self.logic, NodeLogic::Parallel) || self.compiled {
+        if runs_on_the_pool(&self.logic) || self.compiled {
             return;
         }
         let mut seen = HashSet::from_iter([source_py_ptr]);
@@ -87,7 +89,7 @@ impl Stream {
             let Ok(node) = node_py.try_borrow_mut(py) else {
                 return; // in use by another thread (or re-entrantly)
             };
-            if node.compiled || matches!(node.logic, NodeLogic::Parallel) {
+            if node.compiled || runs_on_the_pool(&node.logic) {
                 return;
             }
             stack.extend(node.downstreams.iter().map(|d| d.node.clone_ref(py)));
@@ -386,24 +388,13 @@ impl Stream {
             if child.parents.lock().unwrap().len() != 1 {
                 return;
             }
-            let new_downstreams: Vec<Downstream> =
+            let edges: Vec<Downstream> =
                 child.downstreams.iter().map(|d| d.clone_edge(py)).collect();
-            // The child's edges keep their locking (see build_chain_at).
-            let child_locks_children = child.locks_children;
+            let locks_children = child.locks_children;
             drop(child);
-            // Their parent is this node now: later passes (chunk_by fusion)
-            // trace parents back, and must not reach the bypassed node.
-            for edge in &new_downstreams {
-                if let Ok(grandchild) = edge.node.try_borrow(py) {
-                    for parent in grandchild.parents.lock().unwrap().iter_mut() {
-                        if parent.is(&child_py) {
-                            *parent = self_py.clone_ref(py);
-                        }
-                    }
-                }
-            }
-            self.downstreams = new_downstreams.into();
-            self.locks_children |= child_locks_children;
+            // Later passes (chunk_by fusion) trace parents back, and must not
+            // reach the bypassed node.
+            adopt_edges(py, self, self_py, &child_py, edges, locks_children);
         }
     }
 
@@ -492,30 +483,10 @@ impl Stream {
         let mut steps: Vec<ChainNode> = Vec::new();
 
         for node_py in &chain_node_refs {
-            let mut node = node_py.borrow_mut(py);
-            let node_id = std::ptr::from_ref(&*node) as usize;
-            let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
-            let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember { was_sink });
             // Members keep their name and downstreams: data never reaches them
             // (the head propagates straight to the tail's downstreams), but a
             // flush() called on a member must still reach what lies below it.
-            let name = node.name.clone();
-            let source_location = node.source_location.clone();
-            let builtin_op = node.builtin_op.take();
-            let cached_vectorcall = node.cached_vectorcall.take();
-            let flush_target = node.flush_target.take();
-            let emit_target = node.emit_target.take();
-            steps.push(ChainNode {
-                logic,
-                name,
-                source_location,
-                builtin_op,
-                node_id,
-                cached_vectorcall,
-                flush_target,
-                emit_target,
-                numeric_run: None,
-            });
+            steps.push(ChainNode::take_from(&mut node_py.borrow_mut(py)));
         }
         annotate_numeric_runs(py, &mut steps);
 
@@ -529,32 +500,25 @@ impl Stream {
             .join(" -> ")
             .into();
         head.logic = NodeLogic::Chain { steps };
-        head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
-        // The edges are the tail's, and so is their locking: a tail feeding a
-        // merge (union, zip, ...) locks the shared node before updating it.
-        head.locks_children |= tail_locks_children;
-        drop(head);
-
         // The nodes after the chain now hang off the head. Their parent link
-        // to the last member was the only thing keeping the members alive, so
-        // point it at the head: members nobody else holds are then freed.
-        // (Members the user holds keep their downstreams for flush().)
+        // to the last member was the only thing keeping the members alive:
+        // members nobody else holds are then freed. (Members the user holds
+        // keep their downstreams for flush().)
         let tail_py = chain_node_refs.last().expect("chain has members");
-        for ds in &tail_downstreams {
-            let child = ds.node.borrow(py);
-            let mut parents = child.parents.lock().unwrap();
-            for parent in parents.iter_mut() {
-                if parent.is(tail_py) {
-                    *parent = start_py.clone_ref(py);
-                }
-            }
-        }
-
-        // Then the tail's downstreams and any branches from branching nodes
-        tail_downstreams
+        let next = tail_downstreams
             .iter()
             .map(|d| d.node.clone_ref(py))
-            .collect()
+            .collect();
+        adopt_edges(
+            py,
+            &mut head,
+            start_py,
+            tail_py,
+            tail_downstreams,
+            tail_locks_children,
+        );
+        // Then the tail's downstreams and any branches from branching nodes
+        next
     }
 
     /// Single-pass detection of builtins, flush/emit targets, and vectorcall caching.
@@ -802,27 +766,8 @@ impl Stream {
             let mut pre_buffer_chain: Vec<ChainNode> = Vec::new();
             for node_py_ref in &buffer_path[..buffer_path.len().saturating_sub(1)] {
                 let mut node = node_py_ref.borrow_mut(py);
-                let node_id = std::ptr::from_ref(&*node) as usize;
-                let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
-                let logic = std::mem::replace(&mut node.logic, NodeLogic::ChainMember { was_sink });
-                let name = std::mem::take(&mut node.name);
-                let source_location = std::mem::take(&mut node.source_location);
-                let builtin_op = node.builtin_op.take();
-                let cached_vectorcall = node.cached_vectorcall.take();
-                let flush_target = node.flush_target.take();
-                let emit_target = node.emit_target.take();
+                pre_buffer_chain.push(ChainNode::take_from(&mut node));
                 node.downstreams.clear();
-                pre_buffer_chain.push(ChainNode {
-                    logic,
-                    name,
-                    source_location,
-                    builtin_op,
-                    node_id,
-                    cached_vectorcall,
-                    flush_target,
-                    emit_target,
-                    numeric_run: None,
-                });
             }
 
             // The filter's predicate, with what `detect_and_cache_all` found
@@ -884,9 +829,14 @@ impl Stream {
                 chunk_node.cached_vectorcall = predicate_vectorcall;
                 chunk_node.name = format!("chunk_by[fused]({})", filter_name).into();
                 chunk_node.source_location = filter_source;
-                chunk_node.downstreams = collect_downstreams.into();
-                // The edges keep their locking (see build_chain_at).
-                chunk_node.locks_children |= collect_locks_children;
+                adopt_edges(
+                    py,
+                    &mut chunk_node,
+                    &chunk_node_py,
+                    &collect_py,
+                    collect_downstreams,
+                    collect_locks_children,
+                );
             }
 
             // If buffer_path had intermediate nodes, mark the Collect as orphaned
@@ -909,6 +859,141 @@ impl Stream {
             }
         }
     }
+}
+
+/// Hang `edges`, taken from below `old_parent`, below `new_parent`
+/// (`this`, borrowed by the caller), with what goes with them: each child's
+/// parent link now points at `new_parent`, and `locks_children` (the edges'
+/// locking: a tail feeding a merge locks the shared node) comes along.
+fn adopt_edges(
+    py: Python,
+    this: &mut Stream,
+    new_parent: &Py<Stream>,
+    old_parent: &Py<Stream>,
+    edges: Vec<Downstream>,
+    locks_children: bool,
+) {
+    for edge in &edges {
+        if let Ok(child) = edge.node.try_borrow(py) {
+            for parent in child.parents.lock().unwrap().iter_mut() {
+                if parent.is(old_parent) {
+                    *parent = new_parent.clone_ref(py);
+                }
+            }
+        }
+    }
+    this.downstreams = edges.into();
+    this.locks_children |= locks_children;
+}
+
+impl ChainNode {
+    /// A step made from `node`, whose logic and compile-time findings it
+    /// takes: `node` becomes a chain member, keeping its name and edges.
+    fn take_from(node: &mut Stream) -> Self {
+        let node_id = std::ptr::from_ref(&*node) as usize;
+        let was_sink = matches!(node.logic, NodeLogic::Sink { .. });
+        Self {
+            logic: std::mem::replace(&mut node.logic, NodeLogic::ChainMember { was_sink }),
+            name: Arc::clone(&node.name),
+            source_location: Arc::clone(&node.source_location),
+            builtin_op: node.builtin_op.take(),
+            node_id,
+            cached_vectorcall: node.cached_vectorcall.take(),
+            flush_target: node.flush_target.take(),
+            emit_target: node.emit_target.take(),
+            numeric_run: None,
+        }
+    }
+}
+
+/// A node whose work runs on pool threads while the emitting thread waits.
+fn runs_on_the_pool(logic: &NodeLogic) -> bool {
+    matches!(
+        logic,
+        NodeLogic::Parallel | NodeLogic::Prefetch { .. } | NodeLogic::Prefetched { .. }
+    )
+}
+
+/// Debug builds check, at the end of compile(), that its rewrites kept the
+/// graph's links consistent. For every node reachable from the compiled
+/// source:
+/// - no data path reaches a chain member, and `chainable` matches the logic;
+/// - each edge carries its child's lock, and (compiled) a pointer to it;
+/// - each child lists the node among its parents, and each parent lists the
+///   node among its downstreams.
+#[cfg(debug_assertions)]
+pub(crate) fn assert_graph_consistent(py: Python, source_py: &Py<Stream>, source: &Stream) {
+    let mut seen: HashSet<usize> = HashSet::from_iter([source_py.as_ptr() as usize]);
+    let mut todo = check_node(py, (source_py, source), source_py, source);
+    while let Some(node_py) = todo.pop() {
+        if !seen.insert(node_py.as_ptr() as usize) {
+            continue;
+        }
+        let Ok(node) = node_py.try_borrow(py) else {
+            continue; // in use by another thread: it isn't compile()'s to check
+        };
+        todo.extend(check_node(py, (source_py, source), &node_py, &node));
+    }
+}
+
+/// `assert_graph_consistent` for one node; returns its children.
+#[cfg(debug_assertions)]
+fn check_node(
+    py: Python,
+    (source_py, source): (&Py<Stream>, &Stream),
+    node_py: &Py<Stream>,
+    node: &Stream,
+) -> Vec<Py<Stream>> {
+    let name = &node.name;
+    // Another graph's node may be borrowed; the compiled source is `source`.
+    let with = |other: &Py<Stream>, f: &mut dyn FnMut(&Stream)| {
+        if other.is(source_py) {
+            f(source);
+        } else if let Ok(other) = other.try_borrow(py) {
+            f(&other);
+        }
+    };
+    assert!(
+        !matches!(node.logic, NodeLogic::ChainMember { .. }),
+        "compile(): data reaches '{name}', a member of a chain"
+    );
+    assert_eq!(
+        node.chainable,
+        node.logic.is_step(),
+        "compile(): '{name}'.chainable doesn't match its logic"
+    );
+    for edge in &node.downstreams {
+        with(&edge.node, &mut |child| {
+            let child_name = &child.name;
+            assert!(
+                Arc::ptr_eq(&edge.lock, &child.lock),
+                "compile(): the edge '{name}' -> '{child_name}' carries another node's lock"
+            );
+            if node.compiled {
+                assert!(
+                    edge.ptr.is_some_and(|ptr| ptr.is(child)),
+                    "compile(): the edge '{name}' -> '{child_name}' has no pointer to its child"
+                );
+            }
+            assert!(
+                child.parents.lock().unwrap().iter().any(|p| p.is(node_py)),
+                "compile(): '{child_name}' doesn't list its parent '{name}'"
+            );
+        });
+    }
+    for parent in node.parents.lock().unwrap().iter() {
+        with(parent, &mut |parent| {
+            let parent_name = &parent.name;
+            assert!(
+                parent.downstreams.iter().any(|d| d.node.is(node_py)),
+                "compile(): '{name}' lists '{parent_name}' as a parent, which doesn't lead to it"
+            );
+        });
+    }
+    node.downstreams
+        .iter()
+        .map(|d| d.node.clone_ref(py))
+        .collect()
 }
 
 /// See `Stream::mark_independent_fanouts`.

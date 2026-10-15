@@ -73,7 +73,7 @@ impl Stream {
             flush_target: None,
             emit_target: None,
             flushing: false,
-            emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
+            emitting: std::sync::atomic::AtomicU8::new(crate::lock::IDLE),
             busy: false,
             guard_reentry: false,
             lock: NodeLock::new(),
@@ -155,7 +155,7 @@ impl Stream {
             return Ok(());
         }
         let lock = std::sync::Arc::clone(&self.lock);
-        let _guard = lock.acquire(py);
+        let _guard = lock.acquire(py)?;
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
         }
@@ -1288,6 +1288,8 @@ impl Stream {
             }
         }
 
+        #[cfg(debug_assertions)]
+        crate::optimization::assert_graph_consistent(py, slf.as_unbound(), &this);
         drop(this);
         // A Ctrl+C during the analysis: the graph is compiled (what wasn't
         // analysed is called as is), and the interrupt goes on.

@@ -228,6 +228,21 @@ independent of machine load:
 - `compile()` could hand whole batches to branches whose lambdas change their items (`x.pop()`),
   reordering those changes when one object was emitted twice. Only methods known to change
   nothing count as independent now.
+- Compiled graphs hung when a `prefetch()` call on one source emitted into another source merged
+  with it: `compile()` had given them one lock, which the call waited for while its caller held
+  it and waited for the call. Graphs with `prefetch()` keep their own locks, like those with
+  `par()`.
+- A cycle of waits through a merge's lock held by a third thread deadlocked: only waits for a
+  source were checked, and only through sources and pool tasks. Every lock now records its holder
+  and every waiting thread what it waits for, so any cycle among akayu's locks and pool tasks is
+  caught: the thread whose wait would complete it raises `DeadlockError`, exactly one of them
+  (two threads emitting into each other's sources raised "Re-entrant emit", rarely both). A
+  `par()` branch or prefetched call emitting into the source it runs under still raises
+  `ReentrantError`. An item reaching a node that another thread is flushing waits for it as long
+  as needed, instead of guessing at a deadlock after 50 ms. Ctrl+C reaches a thread waiting for
+  any akayu lock, including those of merges.
+- `compile()`'s chunk_by fusion left the nodes after the fused node listing the old collect as
+  their parent.
 
 ## 1.0.0
 

@@ -191,8 +191,8 @@ Some checks are only needed when the graph could be used in a way `compile()` ca
 - **One lock for the graph.** Merges of several sources (`union`, `zip`, `combine_latest`) lock
   each item, in case the sources are emitted from different threads. Each `emit()` already takes
   a lock, so when every node in the connected graph shares one lock, two threads can't be in the
-  graph at once. `compile()` gives a graph without `par()` one shared lock and drops the per-item
-  merge locks.
+  graph at once. `compile()` gives a graph without `par()` or `prefetch()` one shared lock and drops the
+  per-item merge locks.
 - **Independent branches in batches.** Below a branch point, `emit_batch()` passes items through
   the branches one at a time (item 1 through every branch, then item 2, ...), so the branches'
   side effects interleave as with `emit()`. When every node in the branches is a native operation

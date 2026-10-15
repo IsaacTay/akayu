@@ -142,12 +142,13 @@ pub enum StreamError {
     BusySource,
 
     #[error(
-        "An item reached a node that another thread is flushing, and that flush is waiting for \
-         this thread: a callback of the flush emits into a source this thread is emitting into. \
-         compile() the graph (its one lock then lets the two take turns), or emit after the \
-         flush returns."
+        "Waiting here would never end: the thread holding what this thread needs waits, \
+         directly or through other threads, for this one. A prefetch() or par() call that emits \
+         into a graph its caller is emitting through, or threads whose callbacks emit into each \
+         other's graphs, do this. Emit after the other emit returns, or pass items between the \
+         threads through a queue."
     )]
-    FlushWaitCycle,
+    WaitCycle,
 
     #[error(
         "An item reached '{0}', which compile() folded into a chain of steps: emit into \
@@ -184,7 +185,7 @@ impl From<StreamError> for PyErr {
             StreamError::BusyNode | StreamError::BusyFlush | StreamError::BusySource => {
                 exc::BusyError::new_err(msg)
             }
-            StreamError::FlushWaitCycle => exc::DeadlockError::new_err(msg),
+            StreamError::WaitCycle => exc::DeadlockError::new_err(msg),
             StreamError::NotInitialized => exc::StreamError::new_err(msg),
         }
     }

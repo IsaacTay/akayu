@@ -36,21 +36,6 @@ pub(crate) fn check() -> PyResult<()> {
     check_slow(here)
 }
 
-thread_local! {
-    /// This thread's stack, (lowest, highest) address, once looked up.
-    static RANGE: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
-}
-
-/// This thread's stack as (lowest, highest) address; empty where unknown.
-pub(crate) fn range() -> (usize, usize) {
-    RANGE.with(|r| {
-        if r.get() == (0, 0) {
-            r.set(stack_bounds().map_or((1, 1), |(low, size)| (low, low + size)));
-        }
-        r.get()
-    })
-}
-
 /// Whether there is still room on the stack, for walks that can stop early
 /// instead of failing (compile()'s analysis).
 pub(crate) fn has_room() -> bool {

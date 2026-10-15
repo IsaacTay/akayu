@@ -1746,7 +1746,7 @@ impl Stream {
             );
         };
         if self.locks_children {
-            let _guard = child.lock.acquire(py);
+            let _guard = child.lock.acquire(py)?;
             return crate::helpers::enter_node(child, py)?.update_tagged_compiled(py, index, val);
         }
         if let Some(ptr) = child.ptr {
@@ -1775,7 +1775,7 @@ impl Stream {
             return self.propagate_batch(py, tagged);
         };
         if self.locks_children {
-            let _guard = child.lock.acquire(py);
+            let _guard = child.lock.acquire(py)?;
             return crate::helpers::enter_node(child, py)?
                 .update_batch_tagged_compiled(py, index, items);
         }

@@ -606,10 +606,10 @@ class Stream:
         batch_map, sink) becomes one node that calls its functions in turn;
         errors and profiles still name each step. Steps compile() recognizes
         (simple lambdas, builtins such as `len`) run natively, and a graph
-        without `par()` gets a single lock.
+        without `par()` or `prefetch()` gets a single lock.
 
         compile() freezes every node reachable downstream of this stream:
-        adding a node below any of them raises `RuntimeError`. Streams that
+        adding a node below any of them raises `FrozenGraphError`. Streams that
         only feed into the graph (another input of a `union()`, or the source
         above a derived node you compile) are neither frozen nor optimized, so
         call compile() on every source. State such as an `accumulate()`'s
