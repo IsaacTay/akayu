@@ -9,6 +9,7 @@ responsive to Ctrl+C, and work in a forked child.
 
 import contextvars
 import os
+import pathlib
 import signal
 import subprocess
 import sys
@@ -16,6 +17,7 @@ import threading
 import time
 
 import pytest
+from support import all_at_once
 
 import akayu
 
@@ -32,14 +34,12 @@ def slow(x):
 
 def test_par_branches_run_concurrently():
     s, out = akayu.Stream(), []
+    meet = all_at_once(4)  # times out unless the four branches overlap
     p = s.par()
     for k in range(4):
-        p.map(lambda x, k=k: slow(x + k)).sink(out.append)
-    start = time.perf_counter()
+        p.map(lambda x, k=k: meet(x + k)).sink(out.append)
     s.emit(0)
-    elapsed = time.perf_counter() - start
     assert sorted(out) == [0, 1, 2, 3]
-    assert elapsed < 3 * DELAY, f"branches ran one after another ({elapsed:.2f}s)"
 
 
 request_id = contextvars.ContextVar("request_id", default=None)
@@ -143,24 +143,24 @@ def test_waiting_for_par_branches_is_interruptible():
 
 @pytest.mark.parametrize("op", ["map", "filter", "batch_map"])
 def test_prefetch_overlaps_items_and_keeps_order(op):
+    """Four items in flight at once (each call waits for the other three, so
+    calls run one at a time would time out), results in input order."""
     s, out = akayu.Stream(), []
+    meet = all_at_once(4)
     pre = s.prefetch(4)
     if op == "map":
-        pre.map(lambda x: slow(x * 2)).sink(out.append)
+        pre.map(lambda x: meet(x * 2)).sink(out.append)
         expected = [x * 2 for x in range(8)]
     elif op == "filter":
-        pre.filter(lambda x: slow(x) % 2 == 0).sink(out.append)
+        pre.filter(lambda x: meet(x) % 2 == 0).sink(out.append)
         expected = [0, 2, 4, 6]
     else:
-        pre.batch_map(lambda xs: [slow(x) + 1 for x in xs]).sink(out.append)
+        pre.batch_map(lambda xs: [meet(x) + 1 for x in xs]).sink(out.append)
         expected = [x + 1 for x in range(8)]
-    start = time.perf_counter()
     for x in range(8):
         s.emit(x)
     s.flush()
-    elapsed = time.perf_counter() - start
     assert out == expected
-    assert elapsed < 6 * DELAY, f"prefetch did not overlap items ({elapsed:.2f}s)"
 
 
 def test_prefetch_sees_the_callers_context():
@@ -260,3 +260,33 @@ def test_running_branches_finish_before_the_interpreter_exits(tmp_path):
     r = subprocess.run(cmd, timeout=30, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
     assert out.read_text().count("done") == 4
+
+
+def test_every_branch_gets_a_worker_when_one_is_idle():
+    """A worker woken for one task still counted as idle until it took it,
+    so with one idle worker, branches submitted together got that one
+    worker: eight 0.1 s par() branches took 0.4 s instead of 0.1 s. Each
+    branch here waits for all the others, so they must run at once."""
+    from support import run_script
+
+    code, last = run_script(f"""
+        import sys
+        sys.path.insert(0, {str(pathlib.Path(__file__).parent)!r})
+        import akayu
+        from support import all_at_once
+        warm = akayu.Stream()
+        p = warm.par()
+        for _ in range(2):
+            p.map(lambda x: x).sink(lambda x: None)
+        warm.emit(0)  # the pool now has one idle worker
+        for n in (3, 4, 8):
+            meet = all_at_once(n, timeout=5)
+            s, out = akayu.Stream(), []
+            p = s.par()
+            for _ in range(n):
+                p.map(lambda x: meet(x)).sink(out.append)
+            s.emit(n)
+            assert out == [n] * n
+        print("ok")
+    """)
+    assert (code, last) == (0, "ok")

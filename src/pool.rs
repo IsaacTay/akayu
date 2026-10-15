@@ -77,6 +77,9 @@ impl Task {
 struct Queue {
     tasks: VecDeque<Arc<Task>>,
     idle: usize,
+    /// Workers started that haven't looked at the queue yet: like idle
+    /// ones, each will take a task.
+    starting: usize,
     threads: usize,
     /// Tasks a worker is running right now.
     running: usize,
@@ -115,6 +118,7 @@ fn pool() -> &'static Pool {
             queue: Mutex::new(Queue {
                 tasks: VecDeque::new(),
                 idle: 0,
+                starting: 0,
                 threads: 0,
                 running: 0,
                 shutdown: false,
@@ -161,7 +165,11 @@ pub(crate) fn _shutdown_pool(py: Python) {
     });
 }
 
-/// Queue `job`, starting a worker if none is idle and the pool isn't full.
+/// Queue `job`, starting a worker if there are more queued tasks than idle
+/// (or starting) workers to take them, and the pool isn't full. A worker
+/// woken for one task still counts as idle until it takes it: counting
+/// "none idle" instead left the second of two tasks submitted at once
+/// waiting for the first (par() branches ran two at a time).
 pub(crate) fn submit(job: Job) -> Arc<Task> {
     let task = Arc::new(Task {
         job: Mutex::new(Some(job)),
@@ -170,8 +178,9 @@ pub(crate) fn submit(job: Job) -> Arc<Task> {
     let pool = pool();
     let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
     q.tasks.push_back(Arc::clone(&task));
-    if q.idle == 0 && q.threads < pool.max_threads {
+    if q.tasks.len() > q.idle + q.starting && q.threads < pool.max_threads {
         q.threads += 1;
+        q.starting += 1;
         let spawned = std::thread::Builder::new()
             .name("akayu-worker".into())
             // As deep as the main thread's (Rust's default is 2 MiB): par()
@@ -179,7 +188,9 @@ pub(crate) fn submit(job: Job) -> Arc<Task> {
             .stack_size(8 * 1024 * 1024)
             .spawn(move || worker(pool));
         if spawned.is_err() {
-            q.threads -= 1; // The submitter runs the task itself instead.
+            // The submitter runs the task itself instead.
+            q.threads -= 1;
+            q.starting -= 1;
         }
     }
     drop(q);
@@ -191,9 +202,14 @@ fn worker(pool: &Pool) {
     // A worker started while the interpreter shuts down can't attach: it just
     // ends. Its tasks are run by whoever waits for them (`wait_for`).
     Python::try_attach(|py| {
+        let mut started = false;
         loop {
             let task = py.detach(|| {
                 let mut q = pool.queue.lock().unwrap_or_else(PoisonError::into_inner);
+                if !started {
+                    started = true;
+                    q.starting -= 1;
+                }
                 q.idle += 1;
                 loop {
                     if !q.shutdown
