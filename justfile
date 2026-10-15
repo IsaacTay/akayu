@@ -95,9 +95,10 @@ build-wheels:
     @echo "Wheels built:"
     @ls -la dist/*.whl
 
-# Built on this host, no CI: manylinux x86_64 and aarch64 (glibc 2.17+), macOS
-# arm64 and x86_64, Windows x64. Enters the `wheels` dev shell (flake.nix) when
-# its tools aren't on PATH.
+# The same wheels as the Wheels workflow builds on GitHub, cross-compiled on this
+# host: manylinux x86_64 and aarch64 (glibc 2.17+), macOS arm64 and x86_64,
+# Windows x64. Enters the `wheels` dev shell (flake.nix) when its tools aren't
+# on PATH.
 # Build wheels for every platform (CPython 3.13 and 3.14) and an sdist into dist/
 wheels:
     #!/usr/bin/env bash
@@ -123,6 +124,10 @@ wheels:
     echo ""
     ls -la dist
 
+# Test dist/'s wheel for this machine (after `just wheels`) in a fresh environment, as the Wheels workflow does on each platform
+test-wheel py="3.13":
+    scripts/test-wheel.sh {{py}} {{quick_select}}
+
 # Test dist/'s Windows x64 wheel on this host, under Wine (after `just wheels`)
 test-wheel-windows py="3.13":
     scripts/test-wheel-windows.sh {{py}} {{quick_select}}
@@ -131,44 +136,35 @@ test-wheel-windows py="3.13":
 test-wheel-aarch64 py="3.13":
     scripts/test-wheel-aarch64.sh {{py}} {{quick_select}}
 
-# Each wheel uploads under its own native filename, so different platforms
-# coexist on the server (no clobbering).
-# Build every platform's wheels (`just wheels`) and upload them to the copyparty share
-publish:
+# GitHub builds and tests the wheels on each platform (.github/workflows/wheels.yml)
+# and publishes them for a pushed version tag. This tags origin/main, which must
+# already have the version in Cargo.toml and its CHANGELOG.md section.
+# Tag the version in Cargo.toml on origin/main and push the tag, which releases it
+release:
     #!/usr/bin/env bash
     set -euo pipefail
-
-    just wheels
-
-    # --- Upload every wheel ----------------------------------------------
-    url="https://api-v2.precix.io/share/akayu_wheels/?replace"
-    # Enumerate wheels via find — glob expansion in `dist/*.whl` is unreliable
-    # under the bash 5.2 sandbox that `just` shells out to on some hosts.
-    wheels=()
-    while IFS= read -r -d '' w; do
-        wheels+=("$w")
-    done < <(find dist -maxdepth 1 -name "*.whl" -print0)
-    if [ "${#wheels[@]}" -eq 0 ]; then
-        echo "No wheels found in dist/. Build steps above failed?" >&2
+    # Both read all their input: under pipefail, `git show` killed by an early exit fails the check.
+    version() { awk -F '"' '/^version = / && !v {v = $2} END {print v}'; }
+    version=$(version < Cargo.toml)
+    tag="v$version"
+    git fetch -q origin main
+    remote=$(git show origin/main:Cargo.toml | version)
+    if [ "$remote" != "$version" ]; then
+        echo "origin/main is at version $remote, not $version: push the version change first" >&2
         exit 1
     fi
-    echo "Uploading ${#wheels[@]} wheel(s) to copyparty ..."
-    for wheel in "${wheels[@]}"; do
-        name=$(basename "$wheel")
-        printf "  %-55s " "$name"
-        status=$(curl -s -o /dev/null -w '%{http_code}' -F "f=@$wheel" "$url")
-        if [ "$status" = "201" ]; then
-            echo "OK"
-        else
-            echo "FAIL (HTTP $status)" >&2
-            exit 1
-        fi
-    done
-    echo ""
-    echo "Install (pick the wheel for your arch):"
-    for wheel in "${wheels[@]}"; do
-        echo "  uv add 'akayu @ https://api-v2.precix.io/share/akayu_wheels/$(basename "$wheel")'"
-    done
+    if ! git show origin/main:CHANGELOG.md | grep -x "## $version" >/dev/null; then
+        echo "CHANGELOG.md on origin/main has no '## $version' section (the release notes)" >&2
+        exit 1
+    fi
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null || git ls-remote -q --exit-code origin "refs/tags/$tag" >/dev/null; then
+        echo "$tag already exists" >&2
+        exit 1
+    fi
+    git tag -a "$tag" -m "akayu $version" origin/main
+    git push origin "$tag"
+    echo "Pushed $tag; the release appears when the Wheels workflow finishes:"
+    echo "  https://github.com/IsaacTay/akayu/actions/workflows/wheels.yml"
 
 # Sync docs dependencies and build module for mkdocstrings
 sync-docs:

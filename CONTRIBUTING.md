@@ -125,9 +125,19 @@ If you encounter unexpected behavior after changing Rust code, you may have a st
 
 The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebuild when `pyproject.toml`, `Cargo.toml` or `src/**/*.rs` change, but in some edge cases manual intervention may be needed. See [maturin#2314](https://github.com/PyO3/maturin/issues/2314) for more details.
 
-## Building Wheels
+## Building Wheels and Releasing
 
-`just wheels` builds every platform's wheels on this machine (no CI), for CPython 3.13 and 3.14, plus an sdist, into `dist/`:
+GitHub builds the wheels: `.github/workflows/wheels.yml` builds each platform's wheel for CPython 3.13 and 3.14 on that platform (Linux x86_64 and aarch64, macOS arm64 and x86_64, Windows x64) and runs the quick tests against it there, with `scripts/test-wheel.sh`. It runs for every push to `main` and every pull request, and the run's page has the wheels for a week.
+
+To release:
+
+1. Set the version in `Cargo.toml` (`pyproject.toml` takes it from there) and give it a `## <version>` section in `CHANGELOG.md`, which becomes the release notes.
+1. Push that to `main`.
+1. `just release` tags `origin/main` as `v<version>` and pushes the tag. It refuses if `origin/main` has another version, no CHANGELOG section, or the tag exists.
+
+For a version tag the workflow also builds the sdist, attests where every file was built (`gh attestation verify <file> --repo IsaacTay/akayu` checks it), publishes them all as the tag's GitHub release, and then runs the docs workflow. That adds the package index `scripts/wheel_index.py` writes to the docs site, at `https://isaactay.github.io/akayu/simple/`; uv, pip and pixi install from it (the [installation guide](docs/getting-started.md#installation) has the commands). With "Enable release immutability" on in the repository's settings, a published release's files can't be changed or replaced.
+
+`just wheels` builds the same wheels on this machine instead, cross-compiled, plus an sdist, into `dist/`:
 
 | Platform | How |
 |----------|-----|
@@ -135,18 +145,19 @@ The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebu
 | macOS arm64, x86_64 | linked with zig; an extension module needs only `libSystem`, so no Apple SDK is needed |
 | Windows x64 | `cargo-xwin` (clang-cl + lld-link), with PyO3 generating the `python3x.lib` import libraries |
 
-The tools come from the `wheels` dev shell in `flake.nix` (`nix develop .#wheels`), which `just wheels` enters by itself. On first use `cargo-xwin` downloads the MSVC C runtime and Windows SDK headers to `~/.cache/cargo-xwin`. `just publish` runs `just wheels`, uploads the wheels (not the sdist) to the project's copyparty share, and prints a `uv add 'akayu @ <url>'` line for each.
+The tools come from the `wheels` dev shell in `flake.nix` (`nix develop .#wheels`), which `just wheels` enters by itself. On first use `cargo-xwin` downloads the MSVC C runtime and Windows SDK headers to `~/.cache/cargo-xwin`.
 
 There are no free-threaded (3.13t/3.14t), musllinux or Windows arm64 wheels: the extension builds for free-threaded Python, but turns the GIL back on.
 
-The Windows and aarch64 wheels can be tested here too:
+The wheels in `dist/` can be tested here too:
 
 | Command | Description |
 |---------|-------------|
+| `just test-wheel [3.13\|3.14]` | the quick tests on this machine's wheel, installed in a fresh environment, as the workflow tests each platform's |
 | `just test-wheel-windows [3.13\|3.14]` | the quick tests on the Windows wheel, under Wine with the embeddable CPython from python.org. Tests that fail only under Wine skip themselves when `AKAYU_UNDER_WINE=1` (`tests/support.py`), among them the modules that import numpy, which calls a C runtime function Wine lacks |
 | `just test-wheel-aarch64 [3.13\|3.14]` | the quick tests on the aarch64 wheel, with an aarch64 CPython under qemu user-mode emulation (slow) |
 
-The macOS wheels can't be run here; test them on a Mac.
+The macOS wheels can't be run here; the workflow tests them on GitHub's Macs.
 
 ## Running Tests
 
@@ -207,6 +218,7 @@ to break; `tests/test_wacky_flows.py` holds the probing rounds' findings that fi
 | The lambda analyzer and native ops | `test_optimizer_recognition.py`, `test_analysis_cache.py`, `test_native_ops_fuzz.py` |
 | Batches | `test_batch_fanout.py`, `test_batch_in_place.py` |
 | Garbage collection and memory | `test_gc.py`, `test_node_memory.py` |
+| Packaging, the package index | `test_packaging.py`, `test_wheel_index.py` |
 
 `tests/support.py` has the shared helpers (`run_script` for a test that must run in a fresh
 interpreter, because it could hang or crash, `innermost`, `canon`, the fuzzers' seed handling),
@@ -251,7 +263,8 @@ together with the quick tests and the documentation checks; run it before submit
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
 - `docs/`: the documentation site (`mkdocs.yml`); `just docs` serves it locally with live reload, and `just docs-check` builds it strictly and runs its code blocks.
 - `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
-- `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, testing the Windows and aarch64 wheels under Wine and qemu).
+- `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, `stub_docs.py`, `test-wheel.sh` and testing the Windows and aarch64 wheels under Wine and qemu, `wheel_index.py` for the package index).
+- `.github/workflows/`: `wheels.yml` builds, tests and releases the wheels; `docs.yml` publishes the docs site and the package index.
 - `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
 
 ### Python Package Structure (maturin convention)

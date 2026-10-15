@@ -3,20 +3,86 @@
 ## System Requirements
 
 - CPython 3.13 or 3.14, on Linux, macOS or Windows
-- A Rust toolchain, from [rustup](https://rustup.rs/) (on Windows, with the Visual Studio C++
-  build tools it asks for): akayu isn't on PyPI, so installing it builds it from source, which
-  takes a minute or two
 
-akayu also builds for free-threaded Python (3.13t, 3.14t), but importing it turns the GIL back on.
+Each [release](https://github.com/IsaacTay/akayu/releases) has wheels for Linux x86_64 and
+aarch64 (glibc 2.17+), macOS arm64 and x86_64, and Windows x64, built and tested on each of those
+platforms. akayu isn't on PyPI: uv, pip and pixi install the wheels from akayu's own package
+index, `https://isaactay.github.io/akayu/simple/`.
 
-To install on machines without Rust, build wheels once with `just wheels` (Linux x86_64 and
-aarch64 for glibc 2.17+, macOS arm64 and x86_64, Windows x64; see
-[Building Wheels](https://github.com/IsaacTay/akayu/blob/main/CONTRIBUTING.md#building-wheels))
-and install the one for each machine's platform.
+On other platforms (Alpine's musl, Windows on Arm, ...), or to install a commit that isn't
+released yet, installing builds akayu from source, which takes a minute or two and needs a Rust
+toolchain from [rustup](https://rustup.rs/) (on Windows, with the Visual Studio C++ build tools it
+asks for). akayu also builds for free-threaded Python (3.13t, 3.14t), but importing it turns the
+GIL back on.
 
 ## Installation
 
+/// tab | uv
+
+<!--pytest.mark.skip-->
+
+```bash
+uv add akayu --index akayu=https://isaactay.github.io/akayu/simple/
+```
+
+This writes the index into `pyproject.toml` and takes akayu only from it. Add `explicit = true`
+so uv looks up nothing else there:
+
+<!--pytest.mark.skip-->
+
+```toml
+[project]
+requires-python = ">=3.13"
+dependencies = ["akayu>=2.0.0"]
+
+[tool.uv.sources]
+akayu = { index = "akayu" }
+
+[[tool.uv.index]]
+name = "akayu"
+url = "https://isaactay.github.io/akayu/simple/"
+explicit = true
+```
+
+`uv.lock` then lists akayu's wheels for every platform, each with its sha256, so `uv sync`
+installs the right one on Linux, macOS or Windows and refuses a file that changed. A project that
+also supports Python 3.12 or older depends on `"akayu>=2.0.0; python_version >= '3.13'"`
+instead.
+
+///
+
 /// tab | pip
+
+<!--pytest.mark.skip-->
+
+```bash
+pip install akayu --index-url https://isaactay.github.io/akayu/simple/
+```
+
+akayu has no dependencies, so its index can replace PyPI for this command.
+
+///
+
+/// tab | pixi
+
+Add the index to `pixi.toml`:
+
+<!--pytest.mark.skip-->
+
+```toml
+[pypi-options]
+extra-index-urls = ["https://isaactay.github.io/akayu/simple/"]
+```
+
+<!--pytest.mark.skip-->
+
+```bash
+pixi add --pypi akayu
+```
+
+///
+
+/// tab | from source
 
 <!--pytest.mark.skip-->
 
@@ -24,25 +90,8 @@ and install the one for each machine's platform.
 pip install "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
-///
-
-/// tab | uv
-
-<!--pytest.mark.skip-->
-
-```bash
-uv add "akayu @ git+https://github.com/IsaacTay/akayu"
-```
-
-///
-
-/// tab | pixi
-
-<!--pytest.mark.skip-->
-
-```bash
-pixi add --pypi "akayu @ git+https://github.com/IsaacTay/akayu"
-```
+Needs a Rust toolchain (see above). Add `@v2.0.0` (a release's tag) or a commit for a specific
+version.
 
 ///
 

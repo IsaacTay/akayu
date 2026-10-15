@@ -12,13 +12,13 @@ A Rust-powered Python library for high-performance stream data processing. Built
 
 ## Quick Install + Hello World
 
-akayu installs from GitHub and builds from source: you need CPython 3.13 or 3.14 and a Rust
-toolchain ([details](getting-started.md#system-requirements)).
+akayu needs CPython 3.13 or 3.14. Its wheels install from its own package index, not PyPI
+([pip, pixi and other platforms](getting-started.md#installation)):
 
 <!--pytest.mark.skip-->
 
 ```bash
-pip install "akayu @ git+https://github.com/IsaacTay/akayu"
+uv add akayu --index akayu=https://isaactay.github.io/akayu/simple/
 ```
 
 ```python
