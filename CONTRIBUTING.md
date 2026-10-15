@@ -198,6 +198,7 @@ together with the quick tests and the documentation checks; run it before submit
 | `just fmt-check` | Check formatting without changing files |
 | `just clippy` | Lint Rust, treating warnings as errors |
 | `just lint` | Lint all Python with ruff |
+| `just stub-docs` | Copy the runtime docstrings into the type stub |
 | `just check` | All of the above, plus `just test-quick` and `just docs-check` |
 | `just clean` | Clean build artifacts |
 
@@ -217,7 +218,7 @@ together with the quick tests and the documentation checks; run it before submit
     - `stack.rs`: the native stack check that turns very deep graphs into `RecursionError`.
     - `profiling.rs`, `error.rs`, `helpers.rs`: profiling, errors and shared helpers.
     - `akayu.py`: Python helpers embedded in the extension (lambda analysis, wrappers, profiler); importable as `akayu._helpers`.
-- `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`. The stub's docstrings are the API reference (`docs/api.md` renders them); `help()` shows the Rust `///` doc comments instead, so a behaviour change updates both. `tests/test_stubs.py` checks the stub against the runtime with mypy's stubtest (`tests/stubtest_allowlist.txt` lists the accepted differences).
+- `python/akayu/`: the Python package: `__init__.py` (`MultiStream`, `from_text_file`, ...) and the type stub `__init__.pyi`. The API is documented once, where it is implemented: the Rust `///` comments (written as Google-style docstrings, which `help()` shows as they are) and the docstrings in `__init__.py`. `just stub-docs` copies them into the stub, whose docstrings editors and the API reference (`docs/api.md`) read; `tests/test_stubs.py` fails when the copies differ. Docstrings of slot methods (`__repr__`, `Stream.__new__`) live only in the stub: the runtime shows CPython's own. `tests/test_stubs.py` checks the stub against the runtime with mypy's stubtest (`tests/stubtest_allowlist.txt` lists the accepted differences).
 - `tests/`: the `pytest` suite. Benchmarks (`test_*benchmark*.py`) and `test_memory_leak.py` are skipped by `just test-quick`.
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
 - `docs/`: the documentation site (`mkdocs.yml`); `just docs` serves it locally with live reload, and `just docs-check` builds it strictly and runs its code blocks.

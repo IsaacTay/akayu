@@ -26,3 +26,18 @@ def test_stub_passes_mypy():
 def test_stub_matches_runtime():
     code, out = _run("mypy.stubtest", "akayu", "--allowlist", "tests/stubtest_allowlist.txt")
     assert code == 0, out
+
+
+def test_stub_docstrings_are_the_runtime_ones():
+    """The API is documented once: Rust `///` comments (what `help()`
+    shows) and docstrings in `__init__.py`. The stub, which editors and the
+    API reference read, carries copies made by `just stub-docs`; the two
+    copies used to drift (22 of 31 methods' Raises sections disagreed)."""
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "stub_docs.py"), "--check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

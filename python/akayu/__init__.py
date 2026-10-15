@@ -118,9 +118,36 @@ def _check_keys(ms_list):
 
 
 class MultiStream:
+    """A batch of Stream instances with element-wise operations.
+
+    Applies operations to each stream in the batch. Supports broadcasting
+    for combinator operations (union, combine_latest, zip) where a single
+    Stream or length-1 MultiStream is expanded to match the batch size.
+
+    Example:
+        ```python
+        sources = [Stream() for _ in range(3)]
+        results = MultiStream(sources).map(lambda x: x * 2).to_list()
+        ```
+    """
+
     __slots__ = ("_keys", "_streams")
 
     def __init__(self, streams):
+        """Create a MultiStream batch from a sequence or dict of Stream instances.
+
+        Elements can also be MultiStreams: operations, `compile()` and
+        `to_list()` then apply to the streams inside, while `union()`, `zip()`
+        and `combine_latest()` raise `TypeError` for a nested MultiStream.
+
+        Args:
+            streams: List, tuple, or dict of Stream (or MultiStream) instances.
+                Use str dict keys: an int is always read as a position by
+                `ms[i]`.
+
+        Raises:
+            TypeError: If any element is not a Stream or MultiStream.
+        """
         if isinstance(streams, dict):
             keys = []
             stream_list = []
@@ -152,15 +179,33 @@ class MultiStream:
 
     @property
     def keyed(self):
+        """True if constructed with a dict, False if constructed with a list."""
         return self._keys is not None
 
     def __len__(self):
+        """Return the number of streams in the batch."""
         return len(self._streams)
 
     def __iter__(self):
+        """Iterate over the individual Stream instances (in dict mode, the values)."""
         return iter(self._streams)
 
     def __getitem__(self, key):
+        """Get stream(s) by index, slice, or key.
+
+        In list mode: supports int and slice only. str raises TypeError.
+        In dict mode: supports str (returns Stream, raises KeyError if missing) and int/slice.
+
+        Args:
+            key: int index, slice, or str key (dict mode only).
+
+        Returns:
+            Stream for single int/str key, MultiStream for slice.
+
+        Raises:
+            KeyError: If key not found in dict mode.
+            TypeError: If str key used in list mode, or wrong key type.
+        """
         if isinstance(key, str):
             if self._keys is None:
                 raise TypeError(
@@ -185,6 +230,14 @@ class MultiStream:
         return result
 
     def __setitem__(self, key, value):
+        """Replace the stream at an index or key.
+
+        In dict mode, assigning to a new str key appends it.
+
+        Raises:
+            TypeError: If value is not a Stream or MultiStream, or a str key
+                is used in list mode.
+        """
         if not isinstance(value, (Stream, MultiStream)):
             raise TypeError(f"Cannot assign {type(value).__name__} to MultiStream. Expected Stream or MultiStream.")
         if isinstance(key, str):
@@ -201,6 +254,7 @@ class MultiStream:
             self._streams[key] = value
 
     def __repr__(self):
+        """Return string representation."""
         if self._keys is not None:
             return f"MultiStream({{{', '.join(repr(k) for k in self._keys)}}})"
         return f"MultiStream({len(self._streams)})"
@@ -248,19 +302,35 @@ class MultiStream:
     # --- dict-like accessors ---
 
     def keys(self):
+        """Iterate over keys in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
         if self._keys is None:
             raise TypeError("keys() is only available on dict-backed MultiStream.")
         return iter(self._keys)
 
     def values(self):
+        """Iterate over the streams (in either mode)."""
         return iter(self._streams)
 
     def items(self):
+        """Iterate over (key, stream) pairs in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
         if self._keys is None:
             raise TypeError("items() is only available on dict-backed MultiStream.")
         return _builtins.zip(self._keys, self._streams, strict=True)
 
     def to_dict(self):
+        """Convert to dict of streams in dict mode.
+
+        Raises:
+            TypeError: If in list mode.
+        """
         if self._keys is None:
             raise TypeError("to_dict() is only available on dict-backed MultiStream.")
         return dict(_builtins.zip(self._keys, self._streams, strict=True))
@@ -268,18 +338,23 @@ class MultiStream:
     # --- transforms (return MultiStream, preserving keys) ---
 
     def map(self, func, *args, **kwargs):
+        """Apply a map to each stream in the batch."""
         return self._apply("map", func, *args, **kwargs)
 
     def filter(self, predicate, *args, **kwargs):
+        """Apply a filter to each stream in the batch."""
         return self._apply("filter", predicate, *args, **kwargs)
 
     def sink(self, func, *args, **kwargs):
+        """Apply a sink to each stream in the batch."""
         return self._apply("sink", func, *args, **kwargs)
 
     def starmap(self, func, *args, **kwargs):
+        """Apply a starmap to each stream in the batch."""
         return self._apply("starmap", func, *args, **kwargs)
 
     def accumulate(self, func, start, *, returns_state=False, stream_name=None):
+        """Apply an accumulate to each stream in the batch."""
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [
             s.accumulate(func, start, returns_state=returns_state, stream_name=stream_name) for s in self._streams
@@ -288,21 +363,25 @@ class MultiStream:
         return ms
 
     def flatten(self, *, stream_name=None):
+        """Flatten each stream in the batch."""
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [s.flatten(stream_name=stream_name) for s in self._streams]
         ms._keys = self._keys
         return ms
 
     def collect(self, *, stream_name=None):
+        """Apply collect to each stream in the batch."""
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [s.collect(stream_name=stream_name) for s in self._streams]
         ms._keys = self._keys
         return ms
 
     def batch_map(self, func, *args, **kwargs):
+        """Apply a batch_map to each stream in the batch."""
         return self._apply("batch_map", func, *args, **kwargs)
 
     def chunk_by(self, predicate, *, include_delimiter=False, stream_name=None, **kwargs):
+        """Apply chunk_by to each stream in the batch."""
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [
             s.chunk_by(predicate, include_delimiter=include_delimiter, stream_name=stream_name, **kwargs)
@@ -312,6 +391,7 @@ class MultiStream:
         return ms
 
     def chunks_between(self, open, close, *, stream_name=None, **kwargs):
+        """Apply chunks_between to each stream in the batch."""
         ms = MultiStream.__new__(MultiStream)
         ms._streams = [s.chunks_between(open, close, stream_name=stream_name, **kwargs) for s in self._streams]
         ms._keys = self._keys
@@ -320,49 +400,79 @@ class MultiStream:
     # --- collectors (return list or dict depending on mode) ---
 
     def to_list(self):
+        """Collect each stream into a list.
+
+        In list mode: returns list of lists.
+        In dict mode: returns dict of lists.
+        """
         results = [s.to_list() for s in self._streams]
         return _wrap_results(self._keys, results)
 
     def to_set(self):
+        """Collect each stream into a set.
+
+        In list mode: returns list of sets.
+        In dict mode: returns dict of sets.
+        """
         results = [s.to_set() for s in self._streams]
         return _wrap_results(self._keys, results)
 
     # --- actions (call on each) ---
 
     def flush(self, *args, **kwargs):
+        """Flush all streams in the batch."""
         for s in self._streams:
             s.flush(*args, **kwargs)
 
     def drain(self, *args, **kwargs):
+        """Drain all streams in the batch."""
         for s in self._streams:
             s.drain(*args, **kwargs)
 
     def compile(self):
+        """Compile all streams in the batch. Returns self for chaining."""
         for s in self._streams:
             s.compile()
         return self
 
     def profile(self):
+        """Return a profiler for each stream.
+
+        In list mode: returns a list of profilers.
+        In dict mode: returns a dict of profilers.
+        """
         profilers = [s.profile() for s in self._streams]
         if self._keys is not None:
             return dict(_builtins.zip(self._keys, profilers, strict=True))
         return profilers
 
     def par(self, **kwargs):
+        """Apply par() to each stream in the batch."""
         return self._apply("par", **kwargs)
 
     def parallel(self, **kwargs):
+        """Alias for `par()`."""
         return self._apply("parallel", **kwargs)
 
     def seq(self, **kwargs):
+        """Apply seq() to each stream in the batch."""
         return self._apply("seq", **kwargs)
 
     def prefetch(self, n, **kwargs):
+        """Apply prefetch(n) to each stream in the batch."""
         return self._apply("prefetch", n, **kwargs)
 
     # --- broadcasting combinators (lose keys, return list-backed) ---
 
     def union(self, *others):
+        """Pairwise union with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to union with.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
         if not others:
             raise ValueError(
                 "union() needs at least one other stream to merge with. Usage: ms.union(other) or ms.union(a, b, ...)"
@@ -386,6 +496,15 @@ class MultiStream:
         return MultiStream(results)
 
     def combine_latest(self, *others, emit_on=None):
+        """Pairwise combine_latest with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to combine with.
+            emit_on: Stream or MultiStream that triggers emission.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
         if not others:
             raise ValueError(
                 "combine_latest() needs at least one other stream. "
@@ -436,6 +555,14 @@ class MultiStream:
         return MultiStream(results)
 
     def zip(self, *others):
+        """Pairwise zip with broadcasting.
+
+        Args:
+            *others: Stream or MultiStream instances to zip with.
+
+        Returns:
+            Always MultiStream (instance methods always return MultiStream).
+        """
         if not others:
             raise ValueError(
                 "zip() needs at least one other stream to pair with. Usage: ms.zip(other) or ms.zip(a, b, ...)"
@@ -459,12 +586,26 @@ class MultiStream:
         return MultiStream(results)
 
 
-def union(*args):
-    if len(args) < 2:
+def union(*streams):
+    """Merge multiple streams into one with broadcasting support.
+
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs: returns Stream.
+    - Any MultiStream input: returns MultiStream.
+
+    Args:
+        *streams: Stream or MultiStream instances to merge.
+
+    Returns:
+        Stream if all inputs are Stream, otherwise MultiStream.
+    """
+    if len(streams) < 2:
         raise ValueError("akayu.union() needs at least two streams to merge. Usage: union(a, b) or union(a, b, c, ...)")
-    if all(isinstance(a, Stream) for a in args):
-        return _rust_union(*args)
-    converted = [_as_streams(a) for a in args]
+    if all(isinstance(a, Stream) for a in streams):
+        return _rust_union(*streams)
+    converted = [_as_streams(a) for a in streams]
     keys = _check_keys(converted)
     if keys is not None:
         expanded = [ms._expand(len(keys))._streams if len(ms) == 1 else ms._streams for ms in converted]
@@ -478,19 +619,39 @@ def union(*args):
     return MultiStream(results)
 
 
-def combine_latest(*args, emit_on=None):
-    if len(args) < 2:
+def combine_latest(*streams, emit_on=None):
+    """Combine the latest values from multiple streams with broadcasting support.
+
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs (and Stream/no emit_on): returns Stream.
+    - Any MultiStream input: returns MultiStream.
+
+    Args:
+        *streams: Stream or MultiStream instances to combine.
+        emit_on: Stream, MultiStream, or list thereof that triggers emission.
+            If None (default), emit on update from any stream.
+
+    Returns:
+        Stream if all inputs are Stream, otherwise MultiStream.
+
+    Raises:
+        ValueError: If `emit_on` names a stream that isn't an input, or is an
+            empty list.
+    """
+    if len(streams) < 2:
         raise ValueError(
             "akayu.combine_latest() needs at least two streams. "
             "Usage: combine_latest(a, b) or combine_latest(a, b, emit_on=c)"
         )
-    if all(isinstance(a, Stream) for a in args) and (
+    if all(isinstance(a, Stream) for a in streams) and (
         emit_on is None
         or isinstance(emit_on, Stream)
         or (isinstance(emit_on, list) and all(isinstance(s, Stream) for s in emit_on))
     ):
-        return _rust_combine_latest(*args, emit_on=emit_on)
-    converted = [_as_streams(a) for a in args]
+        return _rust_combine_latest(*streams, emit_on=emit_on)
+    converted = [_as_streams(a) for a in streams]
     keys = _check_keys(converted)
     if keys is not None:
         expanded = [ms._expand(len(keys))._streams if len(ms) == 1 else ms._streams for ms in converted]
@@ -526,12 +687,26 @@ def combine_latest(*args, emit_on=None):
     return MultiStream(results)
 
 
-def zip(*args):
-    if len(args) < 2:
+def zip(*streams):
+    """Zip multiple streams together with broadcasting support.
+
+    Requires at least two streams.
+
+    Return type is deterministic from input types:
+    - All Stream inputs: returns Stream.
+    - Any MultiStream input: returns MultiStream.
+
+    Args:
+        *streams: Stream or MultiStream instances to zip.
+
+    Returns:
+        Stream if all inputs are Stream, otherwise MultiStream.
+    """
+    if len(streams) < 2:
         raise ValueError("akayu.zip() needs at least two streams to pair. Usage: zip(a, b) or zip(a, b, c, ...)")
-    if all(isinstance(a, Stream) for a in args):
-        return _rust_zip(*args)
-    converted = [_as_streams(a) for a in args]
+    if all(isinstance(a, Stream) for a in streams):
+        return _rust_zip(*streams)
+    converted = [_as_streams(a) for a in streams]
     keys = _check_keys(converted)
     if keys is not None:
         expanded = [ms._expand(len(keys))._streams if len(ms) == 1 else ms._streams for ms in converted]
@@ -564,7 +739,11 @@ class TextFileSource(Stream):
         self._error = None
 
     def start(self):
-        """Start reading the file in a background thread. Returns self."""
+        """Start reading the file in a background thread. Returns self.
+
+        Raises:
+            RuntimeError: If already started.
+        """
         if self._thread is not None:
             raise RuntimeError(f"from_text_file({self.path!r}) was already started")
         self._thread = _threading.Thread(target=self._read, name=f"akayu-from_text_file({self.path})", daemon=True)
@@ -572,7 +751,18 @@ class TextFileSource(Stream):
         return self
 
     def join(self, timeout=None):
-        """Wait until every line has been emitted, re-raising any error."""
+        """Wait until every line has been emitted, re-raising any error.
+
+        Args:
+            timeout: Seconds to wait; None waits for the last line.
+
+        Raises:
+            RuntimeError: If `start()` wasn't called.
+            TimeoutError: If `timeout` passes first.
+            Exception: The error that stopped the reader: from opening or
+                reading the file (such as `FileNotFoundError`), or from the
+                pipeline.
+        """
         if self._thread is None:
             raise RuntimeError(f"from_text_file({self.path!r}) was never started; call start() first")
         self._thread.join(timeout)
@@ -605,9 +795,6 @@ def from_text_file(path, interval=None):
         path: The file to read (UTF-8).
         interval: Optional delay in seconds between emitting lines. The file
             is read once; lines appended later are not picked up.
-
-    Returns:
-        A `TextFileSource`.
     """
     return TextFileSource(path, interval)
 
