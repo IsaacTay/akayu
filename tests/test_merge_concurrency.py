@@ -9,7 +9,6 @@ those per-item locks with one lock for the whole graph when that is provably
 enough (no par() in it).
 """
 
-import sys
 import threading
 
 import pytest
@@ -20,13 +19,8 @@ N = 5000
 
 
 @pytest.fixture(autouse=True)
-def _switch_threads_often():
-    """Make the GIL switch threads every few microseconds, so races between
-    the feeding threads show up reliably instead of rarely."""
-    old = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    yield
-    sys.setswitchinterval(old)
+def _fast_switching(fast_switching):
+    """Every test here runs with threads switching every microsecond."""
 
 
 def _slow_add(acc, x):
@@ -64,7 +58,6 @@ MERGES = {
 }
 
 
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
 @pytest.mark.parametrize("merge", MERGES)
 def test_concurrent_inputs_lose_nothing(merge, compiled):
     a, b = akayu.Stream(), akayu.Stream()

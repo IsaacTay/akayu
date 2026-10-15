@@ -38,6 +38,7 @@ testpaths = ["tests"]
 # A test still running after this long has hung: dump every thread's stack,
 # so a deadlock shows where it waits instead of stalling the run silently.
 faulthandler_timeout = 300
+markers = ["slow: too slow for `just test-quick` (`-m 'not slow'` skips it)"]
 
 [tool.maturin]
 python-source = "python"

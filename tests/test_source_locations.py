@@ -10,10 +10,15 @@ import inspect
 import re
 
 import pytest
+from support import UNDER_WINE
 
 import akayu
 
 HERE = __file__
+
+unix_paths_under_wine = pytest.mark.skipif(
+    UNDER_WINE, reason="under Wine pytest imports modules by their Unix paths, while __file__ is a Z:\\ path"
+)
 
 
 def _report_locations(source, emit=1):
@@ -27,6 +32,7 @@ def _line():
     return inspect.currentframe().f_back.f_lineno
 
 
+@unix_paths_under_wine
 def test_method_nodes_point_at_the_calling_line():
     s = akayu.Stream()
     line = _line() + 1  # the next line
@@ -36,6 +42,7 @@ def test_method_nodes_point_at_the_calling_line():
     assert locs["sink(<lambda>)"] == f"{HERE}:{line}"
 
 
+@unix_paths_under_wine
 @pytest.mark.parametrize("combinator", ["zip", "union", "combine_latest"])
 def test_wrapper_built_nodes_point_at_user_code(combinator):
     a, b = akayu.Stream(), akayu.Stream()
@@ -49,6 +56,7 @@ def test_wrapper_built_nodes_point_at_user_code(combinator):
     assert not any("akayu/__init__.py" in loc for loc in locs.values())
 
 
+@unix_paths_under_wine
 def test_multistream_nodes_point_at_user_code():
     ms = akayu.MultiStream([akayu.Stream(), akayu.Stream()])
     line = _line() + 1  # the next line
@@ -57,6 +65,7 @@ def test_multistream_nodes_point_at_user_code():
     assert locs["map(abs)"] == f"{HERE}:{line}"
 
 
+@unix_paths_under_wine
 def test_error_message_names_the_user_line():
     s = akayu.Stream()
     line = _line() + 1  # the next line

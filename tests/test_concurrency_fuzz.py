@@ -14,11 +14,11 @@ AKAYU_CONCURRENCY_FUZZ_SEEDS sets the number of seeds (default 40).
 import collections
 import os
 import random
-import sys
 import threading
 import time
 
 import pytest
+from support import seed_chunks, seed_ids
 
 import akayu
 
@@ -192,15 +192,11 @@ def problems(seed, compiled):
 
 
 @pytest.fixture(autouse=True)
-def frequent_thread_switches():
-    old = sys.getswitchinterval()
-    sys.setswitchinterval(1e-5)
-    yield
-    sys.setswitchinterval(old)
+def _fast_switching(fast_switching):
+    """Every test here runs with threads switching every microsecond."""
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-@pytest.mark.parametrize("start", range(0, SEEDS, CHUNK))
-def test_concurrent_emits_and_flushes_deliver_every_item(start, compiled):
-    found = {seed: p for seed in range(start, min(start + CHUNK, SEEDS)) if (p := problems(seed, compiled))}
+@pytest.mark.parametrize("seeds", seed_chunks(SEEDS, CHUNK), ids=seed_ids)
+def test_concurrent_emits_and_flushes_deliver_every_item(seeds, compiled):
+    found = {seed: p for seed in seeds if (p := problems(seed, compiled))}
     assert not found, found

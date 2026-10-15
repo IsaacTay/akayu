@@ -5,8 +5,8 @@
 #
 # usage: scripts/test-wheel-windows.sh [3.13|3.14] [pytest args...]
 #
-# The modules that import numpy are skipped: numpy's Windows build calls a C
-# runtime function (ucrtbase crealf) that Wine doesn't implement, and they
+# The modules that import numpy skip themselves: numpy's Windows build calls a
+# C runtime function (ucrtbase crealf) that Wine doesn't implement, and they
 # test nothing Windows-specific. The Wine prefix is kept between runs in
 # ${XDG_CACHE_HOME:-~/.cache}/akayu-wine (its first setup takes minutes).
 set -euo pipefail
@@ -53,39 +53,25 @@ if [ ! -d "$WINEPREFIX/drive_c/windows/system32" ]; then
     "$xvfb_run" -a wineboot -i
 fi
 
-# The test files to run, listed: under Wine, pytest sees them by their Unix
-# paths, so neither --ignore nor --ignore-glob with a Z:\ path matches.
-skip=" test_numpy_flows.py test_pipeline_flows.py test_pipeline_patterns.py test_streamz_vs_akayu.py "
-args=()
-for arg in "$@"; do
-    case $arg in
-        --ignore=tests/*) skip+="${arg#--ignore=tests/} " ;;
-        *) args+=("$arg") ;;
-    esac
-done
+# Tests that fail only because of this setup, not on Windows itself, skip
+# themselves under AKAYU_UNDER_WINE (tests/support.py has the list): the
+# modules that import numpy; the source-location tests, which compare a
+# node's recorded file with __file__ (pytest imports the modules by their
+# Unix paths, /mnt/..., while __file__ is the Z:\ path); a user module next
+# to the script (the embeddable CPython ignores the current directory); and
+# concurrent to_text_file() appends, which Wine doesn't make atomic as
+# Windows does (worth confirming on a real Windows machine).
+export AKAYU_UNDER_WINE=1
+# The test files, listed by their Z:\ paths.
 files=()
 for file in tests/test_*.py; do
-    [[ $skip == *" ${file#tests/} "* ]] || files+=("Z:$PWD/$file")
+    files+=("Z:$PWD/$file")
 done
-# Tests that fail only because of this setup, not on Windows itself:
-#   - the source-location tests compare a node's recorded file with __file__;
-#     under Wine pytest imports the modules by their Unix paths (/mnt/...),
-#     while __file__ is the Z:\ path;
-#   - the embeddable CPython ignores the current directory (its ._pth file),
-#     so a user module next to the script isn't importable;
-#   - the batch-processing example imports numpy (see above);
-#   - Wine doesn't apply appends to an append-only handle atomically, as
-#     Windows does, so concurrent to_text_file() lines can interleave. (Worth
-#     confirming on a real Windows machine.)
-not_here="test_method_nodes_point_at_the_calling_line or test_wrapper_built_nodes_point_at_user_code"
-not_here+=" or test_multistream_nodes_point_at_user_code or test_error_message_names_the_user_line"
-not_here+=" or test_user_helpers_module_is_not_shadowed or batch_processing"
-not_here+=" or test_concurrent_appends_keep_lines_whole"
 # Output goes to a file, not a pipe: Wine's services outlive python.exe and
 # would hold a pipe open.
 status=0
 (cd "$work/python" && "$xvfb_run" -a wine python.exe -m pytest -q -p no:cacheprovider \
-    -k "not ($not_here)" "${files[@]}" "${args[@]}" > "$work/pytest.log" 2>&1) || status=$?
+    "${files[@]}" "$@" > "$work/pytest.log" 2>&1) || status=$?
 wineserver -k || true
 grep -avE '^(Xlib: |X connection)' "$work/pytest.log"
 exit "$status"

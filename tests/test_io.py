@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 
 import pytest
+from support import UNDER_WINE
 
 from akayu import Stream, TextFileSource, from_text_file, to_text_file
 
@@ -34,6 +35,7 @@ def test_write_file_sink_append(tmp_path):
     assert Path(path).read_text() == "Line 1\nLine 2\n3\n"
 
 
+@pytest.mark.skipif(UNDER_WINE, reason="Wine doesn't apply appends to an append-only handle atomically; Windows does")
 def test_concurrent_appends_keep_lines_whole(tmp_path):
     """to_text_file releases the GIL for its file I/O, so threads write
     concurrently; each line is one append, so lines never interleave."""

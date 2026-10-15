@@ -57,7 +57,6 @@ def test_batch_matches_per_item(stages, data, compiled):
     assert batch_out == item_out
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize(
     "stage",
     [

@@ -18,18 +18,23 @@ import time
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
+from support import UNDER_WINE
+
+if UNDER_WINE:
+    pytest.skip("numpy crashes under Wine (ucrtbase crealf)", allow_module_level=True)
+
 import numpy as np
 import pytest
-from test_native_ops_fuzz import (
+from native_ops_fuzzer import (
     CHUNK,
     SEEDS,
     accumulate_mismatches,
-    canon,
     expr_mismatches,
-    innermost,
     mismatches,
     per_item,
 )
+from support import canon, innermost, seed_chunks, seed_ids
 
 import akayu
 
@@ -67,20 +72,18 @@ def test_native_forms_on_numpy_values_match_python(src):
     assert not found, "\n".join(found)
 
 
-@pytest.mark.parametrize("start", range(0, SEEDS, CHUNK))
-def test_native_ops_fuzz_on_numpy_values(start):
-    found = [m for seed in range(start, min(start + CHUNK, SEEDS)) for m in mismatches(seed, NP_VALUES)]
+@pytest.mark.parametrize("seeds", seed_chunks(SEEDS, CHUNK), ids=seed_ids)
+def test_native_ops_fuzz_on_numpy_values(seeds):
+    found = [m for seed in seeds for m in mismatches(seed, NP_VALUES)]
     assert not found, "\n".join(found[:10])
 
 
-@pytest.mark.parametrize("start", range(0, SEEDS * 4, CHUNK * 4))
-def test_native_accumulate_fuzz_on_numpy_values(start):
-    seeds = range(start, min(start + CHUNK * 4, SEEDS * 4))
+@pytest.mark.parametrize("seeds", seed_chunks(SEEDS * 4, CHUNK * 4), ids=seed_ids)
+def test_native_accumulate_fuzz_on_numpy_values(seeds):
     found = [m for seed in seeds for m in accumulate_mismatches(seed, NP_ACC_SEQS)]
     assert not found, "\n".join(found[:10])
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_native_numeric_run_hands_numpy_scalars_back_unchanged(compiled):
     """Consecutive native steps run unboxed on exact ints and floats only."""
 
@@ -122,7 +125,6 @@ def test_accumulating_arrays_never_aliases_them(mode):
     assert len({id(o) for o in out}) == len(out)
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("data", [np.arange(10), np.arange(12).reshape(4, 3), np.array([], dtype=float)])
 def test_emit_batch_takes_an_array(compiled, data):
     """Its items are the array's rows (numpy scalars for a 1-D array)."""

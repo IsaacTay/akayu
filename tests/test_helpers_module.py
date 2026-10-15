@@ -7,6 +7,9 @@ so after `import akayu` a user's own helpers.py was silently shadowed.
 import subprocess
 import sys
 
+import pytest
+from support import UNDER_WINE
+
 
 def _run(code, cwd):
     result = subprocess.run([sys.executable, "-c", code], cwd=cwd, capture_output=True, text=True, check=False)
@@ -14,6 +17,7 @@ def _run(code, cwd):
     return result.stdout.strip()
 
 
+@pytest.mark.skipif(UNDER_WINE, reason="the embeddable CPython under Wine ignores the current directory")
 def test_user_helpers_module_is_not_shadowed(tmp_path):
     (tmp_path / "helpers.py").write_text("def greet():\n    return 'user helpers'\n")
     assert _run("import akayu, helpers; print(helpers.greet())", tmp_path) == "user helpers"

@@ -6,36 +6,15 @@ that used to crash the interpreter run in a subprocess.
 import gc
 import operator
 import signal
-import subprocess
 import sys
-import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from support import innermost, run_script
 
 import akayu
-
-
-def run_script(code, timeout=120):
-    """Run `code` in a fresh interpreter: (exit code, last line of output)."""
-    r = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(code)],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    lines = (r.stdout + r.stderr).strip().splitlines()
-    return r.returncode, lines[-1] if lines else ""
-
-
-def innermost(e):
-    while e.__cause__ is not None:
-        e = e.__cause__
-    return e
-
 
 # --- Deep graphs: a clean RecursionError, never a native stack overflow ---
 
@@ -157,7 +136,6 @@ def test_compile_with_a_sink_emitting_into_its_own_source():
     assert "Re-entrant emit" in str(innermost(info.value))
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_feedback_loop_through_another_source_is_refused(compiled):
     """compile() turns `lambda x: fb.emit(x)` into a direct emit, which used
     to skip the re-entrancy check and recurse until the stack overflowed."""
@@ -171,7 +149,6 @@ def test_a_feedback_loop_through_another_source_is_refused(compiled):
         a.emit(5000)
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_an_item_coming_back_into_a_busy_node(compiled):
     """A callback below a union emits into the union's other source: the
     union is re-entered mid-update. Refused in both modes (compiled mode
@@ -199,7 +176,6 @@ def test_an_item_coming_back_into_a_busy_node(compiled):
 
 
 @pytest.mark.parametrize("exc", [KeyboardInterrupt, SystemExit, GeneratorExit])
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("batch", [False, True])
 def test_stop_requests_are_not_wrapped(exc, compiled, batch):
     s, out = akayu.Stream(), []
@@ -233,7 +209,6 @@ def test_sys_exit_in_a_callback_keeps_its_code():
 # --- flush() ---
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_one_flush_reaches_a_node_below_a_merge_once(compiled):
     s, out = akayu.Stream(), []
     akayu.union(s.map(lambda x: x), s.map(lambda x: x * 10)).collect().sink(out.append)
@@ -244,9 +219,8 @@ def test_one_flush_reaches_a_node_below_a_merge_once(compiled):
     assert out == [(1, 10)]  # used to add an empty () per extra path
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("kind", ["source", "collect"])
-def test_flush_from_another_thread_waits_for_emits(compiled, kind):
+def test_flush_from_another_thread_waits_for_emits(compiled, kind, fast_switching):
     s, out = akayu.Stream(), []
     collected = s.map(lambda x: x).collect()
     collected.sink(out.extend)
@@ -263,26 +237,20 @@ def test_flush_from_another_thread_waits_for_emits(compiled, kind):
             except Exception as e:
                 errors.append(e)
 
-    old = sys.getswitchinterval()
-    sys.setswitchinterval(1e-6)
-    try:
-        t = threading.Thread(target=flusher)
-        t.start()
-        emitters = [threading.Thread(target=lambda k=k: [s.emit(k * 300 + i) for i in range(300)]) for k in range(3)]
-        for e in emitters:
-            e.start()
-        for e in emitters:
-            e.join()
-        stop.set()
-        t.join()
-    finally:
-        sys.setswitchinterval(old)
+    t = threading.Thread(target=flusher)
+    t.start()
+    emitters = [threading.Thread(target=lambda k=k: [s.emit(k * 300 + i) for i in range(300)]) for k in range(3)]
+    for e in emitters:
+        e.start()
+    for e in emitters:
+        e.join()
+    stop.set()
+    t.join()
     s.flush()
     assert errors == []
     assert sorted(out) == list(range(900))
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_flush_while_another_thread_emits_nonstop(compiled):
     # The callback releases the GIL mid-item. flush() waited for the emit's
     # lock, let go of it, and found the next emit had taken it: forever.
@@ -333,7 +301,6 @@ def test_flush_at_exit_while_a_daemon_thread_emits():
     assert (code, last) == (0, "flushed")
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_emit_from_another_thread_waits_for_a_flush(compiled):
     s, got = akayu.Stream(), []
     flushing = threading.Event()
@@ -365,7 +332,6 @@ def test_emit_from_another_thread_waits_for_a_flush(compiled):
     assert got == [(1, 2), (3,)]
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_timer_flushes_a_collect_while_a_thread_emits(compiled):
     # Uncompiled, an item reaching the collect mid-flush failed as having
     # "re-entered" it: nearly every item was lost.
@@ -395,7 +361,6 @@ def test_a_timer_flushes_a_collect_while_a_thread_emits(compiled):
     assert out == list(range(1000))
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_timer_flush_feeding_back_into_a_busy_source(compiled):
     # The flush's callback emits into the source another thread is emitting
     # into, while that thread's item waits for the flush. Uncompiled, the
@@ -440,7 +405,6 @@ def test_a_timer_flush_feeding_back_into_a_busy_source(compiled):
     assert (code, last) == (0, "True True 0" if compiled else "True True -")
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_emit_into_a_source_from_its_own_flush(compiled):
     s, got = akayu.Stream(), []
     s.collect().sink(lambda t: (got.append(t), s.emit(0)))
@@ -475,7 +439,6 @@ def test_flushing_a_very_deep_graph_raises_recursion_error(entry):
 
 
 @pytest.mark.parametrize("prefetch", [False, True])
-@pytest.mark.parametrize("compiled", [False, True])
 def test_batch_map_results_per_item(prefetch, compiled):
     s, out = akayu.Stream(), []
     node = s.prefetch(4) if prefetch else s
@@ -596,7 +559,6 @@ ANALYZED = [
 
 
 @pytest.mark.parametrize(("func", "item"), ANALYZED)
-@pytest.mark.parametrize("compiled", [False, True])
 def test_analyzed_lambdas_match_python(func, item, compiled):
     s, out = akayu.Stream(), []
     s.map(func).sink(out.append)
@@ -620,7 +582,6 @@ class Expr:
     __hash__ = object.__hash__
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_comparisons_return_what_the_operator_returns(compiled):
     s, out = akayu.Stream(), []
     s.map(lambda x: x > 3).sink(out.append)
@@ -633,7 +594,6 @@ def test_comparisons_return_what_the_operator_returns(compiled):
 SENTINEL = Expr()
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_equality_has_no_identity_shortcut(compiled):
     s, out = akayu.Stream(), []
     s.filter(lambda x: x == SENTINEL).sink(out.append)
@@ -646,7 +606,6 @@ def test_equality_has_no_identity_shortcut(compiled):
 # --- Errors name the node in every mode ---
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize("batch", [False, True])
 def test_flatten_errors_name_the_node(compiled, batch):
     s = akayu.Stream()
@@ -663,7 +622,6 @@ class BadBool:
         raise ValueError("no truth")
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_failing_truth_test_names_the_filter(compiled):
     s = akayu.Stream()
     s.filter(lambda x: x.value).sink(lambda x: None)
@@ -678,7 +636,6 @@ def test_a_failing_truth_test_names_the_filter(compiled):
 # --- Round 3: odd callables, API misuse, environments ---
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 @pytest.mark.parametrize(
     ("src", "item"),
     [("abs(x) + 1 + 2", -5), ("repr(x)[0][:2]", "ab"), ("sorted(x)[0][1]", [[3, 4], [1, 2]])],
@@ -735,7 +692,6 @@ def test_combine_latest_emit_on_must_name_an_input(bad):
         a.combine_latest(b, emit_on=emit_on)
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_prefetched_batch_map_takes_the_whole_batch(compiled):
     s, out = akayu.Stream(), []
     s.prefetch(2).batch_map(lambda batch: [len(batch)]).sink(out.append)
@@ -747,7 +703,6 @@ def test_a_prefetched_batch_map_takes_the_whole_batch(compiled):
     assert out == [3, 1]  # as batch_map() without prefetch()
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_returns_state_errors_name_the_node(compiled):
     s = akayu.Stream()
     s.accumulate(lambda acc, x: acc + x, 0, returns_state=True).sink(lambda x: None)
@@ -773,7 +728,6 @@ def test_an_object_with_async_call_is_refused():
         akayu.Stream().map(Fetcher())
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_chunk_by_flushed_from_its_own_sink(compiled):
     # Compiled, the flush ran on the chunk_by while it was mid-update.
     s, out = akayu.Stream(), []
@@ -813,8 +767,7 @@ def test_the_stream_type_names_its_module():
 # --- Round 4: many threads at once ---
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-def test_a_flush_and_an_emit_from_different_sources_of_a_union(compiled):
+def test_a_flush_and_an_emit_from_different_sources_of_a_union(compiled, fast_switching):
     # Below a union, an emit holds the union's lock, not the flushed source's:
     # the flush has to take the union's lock too, or it meets the emit there.
     # Compiled, a union input fused into a chain (here after flatten) lost
@@ -849,19 +802,14 @@ def test_a_flush_and_an_emit_from_different_sources_of_a_union(compiled):
                 except Exception as e:
                     errors.append(e)
 
-    old = sys.getswitchinterval()
-    sys.setswitchinterval(1e-5)
-    try:
-        threads = [threading.Thread(target=emitter, args=(t,)) for t in range(2)]
-        f = threading.Thread(target=flusher)
-        for t in [*threads, f]:
-            t.start()
-        for t in threads:
-            t.join()
-        done.set()
-        f.join()
-    finally:
-        sys.setswitchinterval(old)
+    threads = [threading.Thread(target=emitter, args=(t,)) for t in range(2)]
+    f = threading.Thread(target=flusher)
+    for t in [*threads, f]:
+        t.start()
+    for t in threads:
+        t.join()
+    done.set()
+    f.join()
     assert errors == []
     assert sorted(outs[0]) == sorted(outs[1]) == sorted((t, i) for t in range(2) for i in range(300))
 
@@ -908,7 +856,6 @@ def test_the_flush_idiom_below_seq_compiles():
     assert out == [(5, 0)]
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_seq_below_par_stays_sequential(compiled):
     s, log = akayu.Stream(), []
     q = s.par().seq()
@@ -931,7 +878,6 @@ def test_seq_below_par_stays_sequential(compiled):
     assert len({thread for _, thread in log}) == 1
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_failing_branch_below_par_seq_stops_the_next(compiled):
     s, out = akayu.Stream(), []
     q = s.par().seq()
@@ -962,7 +908,6 @@ def test_reentry_is_refused_when_only_one_source_is_compiled(compiled):
 
 
 @pytest.mark.parametrize("call", ["emit", "flush"])
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_par_branch_on_a_pool_thread_feeding_back_raises(call, compiled):
     # On the calling thread's branch this raised; on a pool thread it waited
     # for the source's lock, held by the thread waiting for that branch.
@@ -995,7 +940,6 @@ def test_a_par_branch_on_a_pool_thread_feeding_back_raises(call, compiled):
     assert (code, last) == (0, "{'refused'}")
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_a_failed_prefetched_batch_keeps_the_finished_results(compiled):
     def boom3(x):
         if x == 3:
@@ -1221,7 +1165,6 @@ def shared_stream():
     return log, logged
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_par_branches_emitting_into_a_shared_stream(compiled):
     """The calling thread runs one branch itself; its emit into the stream
     made a pool thread's emit fail as a feedback loop: every emit() failed."""
@@ -1240,7 +1183,6 @@ def test_par_branches_emitting_into_a_shared_stream(compiled):
     assert sorted(logged) == sorted((k, i) for i in range(30) for k in "ab")
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_prefetched_calls_emitting_into_a_shared_stream(compiled):
     """A thread waiting for its oldest prefetched call runs it itself if no
     worker has started it, and so held the stream while workers ran later
@@ -1257,7 +1199,6 @@ def test_prefetched_calls_emitting_into_a_shared_stream(compiled):
     assert sorted(logged, key=repr) == sorted([*range(30), *(("call", i) for i in range(30))], key=repr)
 
 
-@pytest.mark.parametrize("compiled", [False, True])
 def test_threads_emitting_into_each_others_sources_raise_instead_of_deadlocking(compiled):
     """Each holds its own source and waits for the other's: the thread that
     completes the cycle raises DeadlockError, exactly one of them. Both used
@@ -1300,7 +1241,6 @@ def test_threads_emitting_into_each_others_sources_raise_instead_of_deadlocking(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
-@pytest.mark.parametrize("compiled", [False, True])
 def test_ctrl_c_reaches_a_thread_waiting_for_a_source(compiled):
     """It used to take effect only once the other thread let go."""
     s = akayu.Stream()
