@@ -30,9 +30,14 @@ select = ["E", "F", "W", "I", "UP", "SIM", "B", "C4", "PERF", "RUF", "ARG", "PLC
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG", "PLC0415", "PERF", "RUF001", "RUF002", "B017", "B007", "B011", "C414", "C417", "SIM"]
+# Benchmark bodies: sinks that ignore their item, and streamz imported only by the runs that need it
+"scripts/bench_complex.py" = ["ARG", "PLC0415", "B007", "SIM113"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A test still running after this long has hung: dump every thread's stack,
+# so a deadlock shows where it waits instead of stalling the run silently.
+faulthandler_timeout = 300
 
 [tool.maturin]
 python-source = "python"

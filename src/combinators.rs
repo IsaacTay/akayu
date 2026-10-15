@@ -1,11 +1,14 @@
 //! Multi-stream combinators (union, zip, combine_latest, par)
+//!
+//! Each merge has one builder, `merge()`: the methods (`a.zip(b)`) and the
+//! module functions (`akayu.zip(a, b)`) only collect its inputs.
 
 use pyo3::prelude::*;
 use std::collections::VecDeque;
 
 use crate::Stream;
 use crate::error::StreamError;
-use crate::helpers::{capture_source_location, check_not_compiled};
+use crate::helpers::{capture_source_location, check_not_compiled, graph_node_mut};
 use crate::lock::Downstream;
 use crate::node::{CombineLatestState, NodeLogic};
 
@@ -45,15 +48,16 @@ impl Stream {
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(name = "par")]
     pub fn par(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
-        let mut this = crate::helpers::graph_node_mut(slf)?;
+        let mut this = graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
-        let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(py, NodeLogic::Parallel, "par".to_string(), source_location)?;
-        this.downstreams.push(Downstream::new(py, &node));
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        Self::attach(
+            slf,
+            &mut this,
+            NodeLogic::Parallel,
+            "par".to_string(),
+            source_location,
+        )
     }
 
     /// Alias for `par()`.
@@ -89,15 +93,16 @@ impl Stream {
     ///
     /// * `RuntimeError` - If the stream graph is already compiled.
     pub fn seq(slf: &Bound<'_, Self>, py: Python) -> PyResult<Py<Self>> {
-        let mut this = crate::helpers::graph_node_mut(slf)?;
+        let mut this = graph_node_mut(slf)?;
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
-        let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(py, NodeLogic::Source, "seq".to_string(), source_location)?;
-        this.downstreams.push(Downstream::new(py, &node));
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        Self::attach(
+            slf,
+            &mut this,
+            NodeLogic::Source,
+            "seq".to_string(),
+            source_location,
+        )
     }
 
     /// Merge multiple streams into one.
@@ -131,38 +136,7 @@ impl Stream {
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (*others))]
     pub fn union(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        let mut this = crate::helpers::graph_node_mut(slf)?;
-        check_not_compiled(this.compiled, &this.name)?;
-        for other in &others {
-            if let Ok(other_ref) = other.try_borrow(py) {
-                check_not_compiled(other_ref.compiled, &other_ref.name)?;
-            }
-        }
-        let source_location = capture_source_location(py);
-        let self_py: Py<Self> = slf.clone().unbind();
-        let node = Self::make_node(py, NodeLogic::Source, "union".to_string(), source_location)?;
-        // Like akayu.union(): the inputs may be emitted from different
-        // threads into the shared node (compile() can remove these locks).
-        node.borrow_mut(py).needs_lock = true;
-
-        this.downstreams.push(Downstream::new(py, &node));
-        this.needs_lock = true;
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-
-        for other in others {
-            if let Ok(mut other_ref) = other.try_borrow_mut(py) {
-                other_ref.needs_lock = true;
-                other_ref.downstreams.push(Downstream::new(py, &node));
-                node.borrow(py)
-                    .parents
-                    .lock()
-                    .unwrap()
-                    .push(other.clone_ref(py));
-            }
-        }
-
-        Ok(node)
+        merge(py, Merge::Union, &with_self(slf, others))
     }
 
     /// Combine the latest values from multiple streams.
@@ -207,65 +181,7 @@ impl Stream {
         others: Vec<Py<Self>>,
         emit_on: Option<Py<PyAny>>,
     ) -> PyResult<Py<Self>> {
-        {
-            let this = crate::helpers::graph_node(slf)?;
-            check_not_compiled(this.compiled, &this.name)?;
-        }
-        for other in &others {
-            if let Ok(other_ref) = other.try_borrow(py) {
-                check_not_compiled(other_ref.compiled, &other_ref.name)?;
-            }
-        }
-        let source_location = capture_source_location(py);
-        let total_sources = 1 + others.len();
-
-        let inputs: Vec<_> = std::iter::once(slf.as_ptr())
-            .chain(others.iter().map(Py::as_ptr))
-            .collect();
-        let emit_on_indices = emit_on_positions(py, emit_on, &inputs)?;
-
-        let node = Self::make_node(
-            py,
-            NodeLogic::CombineLatest(Box::new(CombineLatestState {
-                state: (0..total_sources).map(|_| None).collect(),
-                emit_on_indices,
-            })),
-            "combine_latest".to_string(),
-            source_location.clone(),
-        )?;
-
-        let self_py: Py<Self> = slf.clone().unbind();
-        crate::helpers::graph_node_mut(slf)?.add_tag_node(
-            py,
-            0,
-            &node,
-            self_py.clone_ref(py),
-            &source_location,
-        )?;
-        for (i, other) in others.iter().enumerate() {
-            match other.try_borrow_mut(py) {
-                Ok(mut other_ref) => {
-                    other_ref.add_tag_node(
-                        py,
-                        i + 1,
-                        &node,
-                        other.clone_ref(py),
-                        &source_location,
-                    )?;
-                }
-                Err(_) => {
-                    crate::helpers::graph_node_mut(slf)?.add_tag_node(
-                        py,
-                        i + 1,
-                        &node,
-                        self_py.clone_ref(py),
-                        &source_location,
-                    )?;
-                }
-            }
-        }
-
-        Ok(node)
+        merge(py, Merge::CombineLatest(emit_on), &with_self(slf, others))
     }
 
     /// Zip multiple streams together element-by-element.
@@ -303,60 +219,94 @@ impl Stream {
     /// * `RuntimeError` - If the stream graph is already compiled.
     #[pyo3(signature = (*others))]
     pub fn zip(slf: &Bound<'_, Self>, py: Python, others: Vec<Py<Self>>) -> PyResult<Py<Self>> {
-        {
-            let this = crate::helpers::graph_node(slf)?;
-            check_not_compiled(this.compiled, &this.name)?;
-        }
-        for other in &others {
-            if let Ok(other_ref) = other.try_borrow(py) {
-                check_not_compiled(other_ref.compiled, &other_ref.name)?;
-            }
-        }
-
-        let source_location = capture_source_location(py);
-        let total_sources = 1 + others.len();
-        let node = Self::make_node(
-            py,
-            NodeLogic::Zip {
-                buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
-            },
-            "zip".to_string(),
-            source_location.clone(),
-        )?;
-
-        let self_py: Py<Self> = slf.clone().unbind();
-        crate::helpers::graph_node_mut(slf)?.add_tag_node(
-            py,
-            0,
-            &node,
-            self_py.clone_ref(py),
-            &source_location,
-        )?;
-        for (i, other) in others.iter().enumerate() {
-            match other.try_borrow_mut(py) {
-                Ok(mut other_ref) => {
-                    other_ref.add_tag_node(
-                        py,
-                        i + 1,
-                        &node,
-                        other.clone_ref(py),
-                        &source_location,
-                    )?;
-                }
-                Err(_) => {
-                    crate::helpers::graph_node_mut(slf)?.add_tag_node(
-                        py,
-                        i + 1,
-                        &node,
-                        self_py.clone_ref(py),
-                        &source_location,
-                    )?;
-                }
-            }
-        }
-
-        Ok(node)
+        merge(py, Merge::Zip, &with_self(slf, others))
     }
+}
+
+/// `slf` followed by `others`: a method's inputs.
+fn with_self(slf: &Bound<'_, Stream>, others: Vec<Py<Stream>>) -> Vec<Py<Stream>> {
+    std::iter::once(slf.clone().unbind())
+        .chain(others)
+        .collect()
+}
+
+/// The kind of node `merge()` builds.
+enum Merge {
+    Union,
+    Zip,
+    /// With the streams `emit_on` names, if any.
+    CombineLatest(Option<Py<PyAny>>),
+}
+
+/// Merge `inputs`, in order, into a new node. Every input is borrowed and
+/// checked before the graph changes, so the merge is built whole or not at
+/// all: an input that is processing an item (a callback building on it
+/// mid-emit) raises `BusyError`, a compiled one `FrozenGraphError`.
+///
+/// Every input may be emitted from a different thread, so the edges into
+/// the merge lock it (compile() removes those locks when it can).
+fn merge(py: Python, kind: Merge, inputs: &[Py<Stream>]) -> PyResult<Py<Stream>> {
+    let count = inputs.len();
+    // emit_on first: reading a list of streams can run Python code.
+    let (logic, name) = match kind {
+        Merge::Union => (NodeLogic::Source, "union"),
+        Merge::Zip => (
+            NodeLogic::Zip {
+                buffers: (0..count).map(|_| VecDeque::new()).collect(),
+            },
+            "zip",
+        ),
+        Merge::CombineLatest(emit_on) => {
+            let ptrs: Vec<_> = inputs.iter().map(Py::as_ptr).collect();
+            let emit_on_indices = emit_on_positions(py, emit_on, &ptrs)?;
+            let state = CombineLatestState {
+                state: (0..count).map(|_| None).collect(),
+                emit_on_indices,
+            };
+            (NodeLogic::CombineLatest(Box::new(state)), "combine_latest")
+        }
+    };
+    let is_union = matches!(logic, NodeLogic::Source);
+
+    // Each distinct input borrowed once (`a.zip(a)` names one twice).
+    let mut distinct: Vec<&Py<Stream>> = Vec::with_capacity(count);
+    for input in inputs {
+        if !distinct.iter().any(|d| d.is(input)) {
+            distinct.push(input);
+        }
+    }
+    let mut held = distinct
+        .iter()
+        .map(|input| graph_node_mut(input.bind(py)))
+        .collect::<PyResult<Vec<_>>>()?;
+    for node in &held {
+        check_not_compiled(node.compiled, &node.name)?;
+    }
+
+    let source_location = capture_source_location(py);
+    let node = Stream::make_node(py, logic, name.to_string(), source_location.clone())?;
+    for (index, input) in inputs.iter().enumerate() {
+        let at = distinct
+            .iter()
+            .position(|d| d.is(input))
+            .expect("every input is among the distinct ones");
+        let held = &mut held[at];
+        if is_union {
+            held.locks_children = true;
+            held.downstreams.push(Downstream::new(py, &node));
+            node.borrow(py)
+                .parents
+                .lock()
+                .unwrap()
+                .push(input.clone_ref(py));
+        } else {
+            held.add_tag_node(py, index, &node, input.clone_ref(py), &source_location)?;
+        }
+    }
+    if is_union {
+        node.borrow_mut(py).locks_children = true;
+    }
+    Ok(node)
 }
 
 // Helper method for tagging (used by combinators)
@@ -380,7 +330,7 @@ impl Stream {
             tag.downstreams.push(Downstream::new(py, target));
             // The combinator is shared by every input, which may be emitted
             // from different threads (compile() can remove this lock).
-            tag.needs_lock = true;
+            tag.locks_children = true;
         }
         target
             .borrow(py)
@@ -431,30 +381,7 @@ pub fn union(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
         return Err(StreamError::UnionEmpty(0).into());
     }
-
-    for stream in &streams {
-        let stream_ref = stream.borrow(py);
-        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
-    }
-
-    let source_location = capture_source_location(py);
-    let node = Stream::make_node(py, NodeLogic::Source, "union".to_string(), source_location)?;
-
-    for stream in &streams {
-        let stream_py: Py<Stream> = stream.clone_ref(py);
-        let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.needs_lock = true;
-        stream_ref.downstreams.push(Downstream::new(py, &node));
-        drop(stream_ref);
-        node.borrow(py).parents.lock().unwrap().push(stream_py);
-    }
-
-    {
-        let mut node_ref = node.borrow_mut(py);
-        node_ref.needs_lock = true;
-    }
-
-    Ok(node)
+    merge(py, Merge::Union, &streams)
 }
 
 /// Combine the latest values from multiple streams.
@@ -505,37 +432,7 @@ pub fn combine_latest(
     if streams.is_empty() {
         return Err(StreamError::CombineLatestEmpty(0).into());
     }
-
-    for stream in &streams {
-        let stream_ref = stream.borrow(py);
-        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
-    }
-
-    let source_location = capture_source_location(py);
-
-    let inputs: Vec<_> = streams.iter().map(Py::as_ptr).collect();
-    let emit_on_indices = emit_on_positions(py, emit_on, &inputs)?;
-
-    let total_sources = streams.len();
-    let node = Stream::make_node(
-        py,
-        NodeLogic::CombineLatest(Box::new(CombineLatestState {
-            state: (0..total_sources).map(|_| None).collect(),
-            emit_on_indices,
-        })),
-        "combine_latest".to_string(),
-        source_location.clone(),
-    )?;
-
-    for (i, stream) in streams.iter().enumerate() {
-        let stream_py: Py<Stream> = stream.clone_ref(py);
-        let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node, stream_py.clone_ref(py), &source_location)?;
-        drop(stream_ref);
-        node.borrow(py).parents.lock().unwrap().push(stream_py);
-    }
-
-    Ok(node)
+    merge(py, Merge::CombineLatest(emit_on), &streams)
 }
 
 /// Zip multiple streams together.
@@ -574,49 +471,9 @@ pub fn combine_latest(
 #[pyo3(signature = (*streams))]
 pub fn zip(py: Python, streams: Vec<Py<Stream>>) -> PyResult<Py<Stream>> {
     if streams.is_empty() {
-        return Err(StreamError::ZipTooFew(0).into());
+        return Err(StreamError::ZipEmpty(0).into());
     }
-
-    if streams.len() == 1 {
-        let stream = &streams[0];
-        let stream_ref = stream.borrow(py);
-        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
-        let source_location = capture_source_location(py);
-        let stream_py: Py<Stream> = stream.clone_ref(py);
-        drop(stream_ref);
-        let node = Stream::make_node(py, NodeLogic::Source, "zip".to_string(), source_location)?;
-        stream
-            .borrow_mut(py)
-            .downstreams
-            .push(Downstream::new(py, &node));
-        node.borrow(py).parents.lock().unwrap().push(stream_py);
-        return Ok(node);
-    }
-
-    for stream in &streams {
-        let stream_ref = stream.borrow(py);
-        check_not_compiled(stream_ref.compiled, &stream_ref.name)?;
-    }
-
-    let source_location = capture_source_location(py);
-    let total_sources = streams.len();
-    let node = Stream::make_node(
-        py,
-        NodeLogic::Zip {
-            buffers: (0..total_sources).map(|_| VecDeque::new()).collect(),
-        },
-        "zip".to_string(),
-        source_location.clone(),
-    )?;
-
-    for (i, stream) in streams.iter().enumerate() {
-        let stream_py: Py<Stream> = stream.clone_ref(py);
-        let mut stream_ref = stream.borrow_mut(py);
-        stream_ref.add_tag_node(py, i, &node, stream_py, &source_location)?;
-        drop(stream_ref);
-    }
-
-    Ok(node)
+    merge(py, Merge::Zip, &streams)
 }
 
 /// The positions among `inputs` of the streams `emit_on` names: a stream or

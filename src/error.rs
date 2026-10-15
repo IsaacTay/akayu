@@ -1,7 +1,65 @@
 //! Structured error types for stream operations.
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+
+/// The exception classes `akayu` exports. Every error about a graph's state
+/// is a `StreamError`, itself a `RuntimeError`, so `except RuntimeError` code
+/// keeps working; invalid arguments stay `ValueError`/`TypeError`.
+pub(crate) mod exc {
+    use pyo3::exceptions::PyRuntimeError;
+
+    pyo3::create_exception!(
+        akayu,
+        StreamError,
+        PyRuntimeError,
+        "Base class of the errors akayu raises about a stream graph.\n\n\
+         A subclass of RuntimeError. Invalid arguments raise ValueError or\n\
+         TypeError instead."
+    );
+    pyo3::create_exception!(
+        akayu,
+        CallbackError,
+        StreamError,
+        "A function given to a node (map, filter, sink, ...) raised.\n\n\
+         The function's exception is `__cause__`. `node` is the node's name\n\
+         and `location` the file and line that built it."
+    );
+    pyo3::create_exception!(
+        akayu,
+        FrozenGraphError,
+        StreamError,
+        "The graph was changed after compile() froze it, or compiled twice."
+    );
+    pyo3::create_exception!(
+        akayu,
+        NotASourceError,
+        StreamError,
+        "emit(), emit_batch() or profiling was used on a node that isn't a source."
+    );
+    pyo3::create_exception!(
+        akayu,
+        ReentrantError,
+        StreamError,
+        "A callback re-entered the graph it runs in.\n\n\
+         It emitted into a source its own item came from, or flushed a node\n\
+         that is mid-flush: the graph has a loop. Restructure the pipeline."
+    );
+    pyo3::create_exception!(
+        akayu,
+        BusyError,
+        StreamError,
+        "A node was changed or flushed while it was processing an item.\n\n\
+         Build the graph before emitting, and flush after emit() returns."
+    );
+    pyo3::create_exception!(
+        akayu,
+        DeadlockError,
+        StreamError,
+        "Waiting would never end: whoever holds what this thread needs is\n\
+         waiting for this thread."
+    );
+}
 
 /// Errors that can occur during stream graph construction and execution.
 #[derive(Debug, thiserror::Error)]
@@ -23,11 +81,11 @@ pub enum StreamError {
     #[error("union() requires at least one stream, got {0}")]
     UnionEmpty(usize),
 
-    #[error("combine_latest() requires at least two streams, got {0}")]
+    #[error("combine_latest() requires at least one stream, got {0}")]
     CombineLatestEmpty(usize),
 
-    #[error("zip() requires at least two streams, got {0}")]
-    ZipTooFew(usize),
+    #[error("zip() requires at least one stream, got {0}")]
+    ZipEmpty(usize),
 
     #[error(
         "Re-entrant flush detected on node '{0}'. \
@@ -92,20 +150,55 @@ pub enum StreamError {
     FlushWaitCycle,
 
     #[error(
+        "An item reached '{0}', which compile() folded into a chain of steps: emit into \
+         the compiled graph's source instead"
+    )]
+    ChainMemberReached(String),
+
+    #[error(
         "akayu module not properly initialized. \
-         This is an internal error — please report this issue at https://github.com/user/akayu/issues"
+         This is an internal error — please report this issue at https://github.com/IsaacTay/akayu/issues"
     )]
     NotInitialized,
 }
 
 impl From<StreamError> for PyErr {
     fn from(err: StreamError) -> Self {
-        match &err {
+        let msg = err.to_string();
+        match err {
             StreamError::InvalidPrefetchSize(_)
             | StreamError::UnionEmpty(_)
             | StreamError::CombineLatestEmpty(_)
-            | StreamError::ZipTooFew(_) => PyValueError::new_err(err.to_string()),
-            _ => PyRuntimeError::new_err(err.to_string()),
+            | StreamError::ZipEmpty(_) => PyValueError::new_err(msg),
+            StreamError::FrozenStream(_) | StreamError::AlreadyCompiled(_) => {
+                exc::FrozenGraphError::new_err(msg)
+            }
+            StreamError::EmitOnNonSource(_) | StreamError::ChainMemberReached(_) => {
+                exc::NotASourceError::new_err(msg)
+            }
+            StreamError::ReentrantFlush(_)
+            | StreamError::ReentrantEmit(_)
+            | StreamError::ReentrantFlushCall
+            | StreamError::Reentered
+            | StreamError::EmitDuringFlush(_) => exc::ReentrantError::new_err(msg),
+            StreamError::BusyNode | StreamError::BusyFlush | StreamError::BusySource => {
+                exc::BusyError::new_err(msg)
+            }
+            StreamError::FlushWaitCycle => exc::DeadlockError::new_err(msg),
+            StreamError::NotInitialized => exc::StreamError::new_err(msg),
         }
     }
+}
+
+/// Add the exception classes to the native module.
+pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    m.add("StreamError", py.get_type::<exc::StreamError>())?;
+    m.add("CallbackError", py.get_type::<exc::CallbackError>())?;
+    m.add("FrozenGraphError", py.get_type::<exc::FrozenGraphError>())?;
+    m.add("NotASourceError", py.get_type::<exc::NotASourceError>())?;
+    m.add("ReentrantError", py.get_type::<exc::ReentrantError>())?;
+    m.add("BusyError", py.get_type::<exc::BusyError>())?;
+    m.add("DeadlockError", py.get_type::<exc::DeadlockError>())?;
+    Ok(())
 }

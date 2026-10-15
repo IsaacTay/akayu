@@ -46,6 +46,18 @@ impl Prefetcher {
         }
     }
 
+    /// For the GC (see `gc.rs`): the function. Items in flight change on
+    /// every update, so they are not visited.
+    pub(crate) fn traverse(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        let Self {
+            func,
+            kind: _,
+            size: _,
+            pending: _,
+        } = self;
+        visit.call(func)
+    }
+
     /// Start `item`; once `size` items are in flight, finish the oldest.
     /// Errors are the function's own (the caller names the node).
     pub(crate) fn update(&mut self, py: Python, item: Py<PyAny>) -> PyResult<Vec<Py<PyAny>>> {

@@ -9,6 +9,7 @@ this pins that every path still produces exactly the reference output.
 import itertools
 from collections import deque
 
+import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -96,3 +97,52 @@ def test_combinator_profile_counts():
     rows = {r["name"]: r for r in p.report.to_list()}
     assert (rows["tag(0)"]["items_in"], rows["tag(0)"]["items_out"]) == (5, 5)
     assert (rows["zip"]["items_in"], rows["zip"]["items_out"]) == (5, 0)
+
+
+MERGES = ["union", "zip", "combine_latest"]
+
+
+def build_merge(form, kind, first, second):
+    if form == "function":
+        return getattr(akayu, kind)(first, second)
+    return getattr(first, kind)(second)
+
+
+@pytest.mark.parametrize("kind", MERGES)
+@pytest.mark.parametrize("form", ["function", "method"])
+def test_a_merge_of_an_input_that_is_mid_emit_is_refused(form, kind):
+    """Built from a callback while one input is emitting, the function form
+    panicked; the method form built the wrong graph (union left the busy
+    input out, zip and combine_latest paired the other input with itself)."""
+    s, t = akayu.Stream(), akayu.Stream()
+    built = []
+    s.sink(lambda _: built.append(build_merge(form, kind, t, s)))
+    with pytest.raises(akayu.CallbackError) as info:
+        s.emit(1)
+    assert isinstance(info.value.__cause__, akayu.BusyError)
+    assert built == []
+    # Nothing was attached to either input: they still work on their own.
+    out = []
+    t.sink(out.append)
+    t.emit("t")
+    assert out == ["t"]
+
+
+@pytest.mark.parametrize("kind", MERGES)
+def test_method_and_function_forms_build_the_same_graph(kind):
+    results = []
+    for form in ("function", "method"):
+        a, b = akayu.Stream(), akayu.Stream()
+        out = build_merge(form, kind, a, b).to_list()
+        for src, x in [(a, 1), (b, "x"), (a, 2), (b, "y")]:
+            src.emit(x)
+        results.append(out)
+    assert results[0] == results[1]
+
+
+def test_a_merge_may_name_an_input_twice():
+    a = akayu.Stream()
+    out = a.zip(a).to_list()
+    a.emit(1)
+    a.emit(2)
+    assert out == [(1, 1), (2, 2)]

@@ -60,8 +60,8 @@ deep-pipeline benchmark takes 100 ms instead of 137 ms) and little below a fan-o
 
 ## Internal Mechanics
 
-Internally, `emit_batch()` hands each node the whole batch (the private `_update_batch()`)
-where `emit()` hands it one item (`_update()`). For `map(lambda x: x * 2).filter(lambda x: x > 2).sink(...)`:
+Internally, `emit_batch()` hands each node the whole batch (`update_batch`) where `emit()`
+hands it one item (`update`). For `map(lambda x: x * 2).filter(lambda x: x > 2).sink(...)`:
 
 ```mermaid
 sequenceDiagram

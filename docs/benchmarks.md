@@ -4,7 +4,7 @@
 described under [Benchmark Details](#benchmark-details).
 
 **Environment:** Python 3.13.11, Linux x86_64 (AMD Ryzen 7 PRO 4750G, shared machine),
-500,000 items per run, mean of 5 runs after a warm-up, `tests/bench_complex.py`.
+500,000 items per run, mean of 5 runs after a warm-up, `scripts/bench_complex.py`.
 
 ## Summary
 
@@ -23,8 +23,8 @@ it, while the other sources stay uncompiled. "Pure Python" is a hand-written loo
 operations inlined: no functions are called, so it is a floor rather than an equivalent
 program.
 
-| Topology                                        | akayu (ms) | akayu `emit_batch` (ms) | streamz (ms) | Pure Python (ms) | vs streamz     |
-| ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | -------------- |
+| Topology                                        | akayu (ms) | akayu `emit_batch` (ms) | streamz (ms) | Pure Python (ms) | vs streamz      |
+| ----------------------------------------------- | ---------: | ----------------------: | -----------: | ---------------: | --------------- |
 | [Deep pipeline (10 maps)](#deep-pipeline)       |        137 |                     100 |       19,463 |              255 | **142x faster** |
 | [Diamond (split → union)](#diamond)             |        224 |                     207 |        9,726 |               79 | **44x faster**  |
 | [Fan-out (5 branches)](#fan-out)                |        323 |                     309 |       17,422 |              263 | **54x faster**  |
@@ -51,7 +51,7 @@ Wall-clock comparisons with streamz and plain Python (the tables above):
 
 ```bash
 just build-release
-uv run python tests/bench_complex.py
+uv run python scripts/bench_complex.py
 ```
 
 Instructions per item for every workload and mode, plus memory per node. Instruction counts don't

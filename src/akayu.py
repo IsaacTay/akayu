@@ -1,7 +1,11 @@
 import builtins as _builtins
 import dis
 import inspect
+import os
+import sys
+import warnings
 import weakref
+from types import BuiltinFunctionType as _BuiltinFunctionType
 from types import FunctionType as _FunctionType
 
 _NOISE_OPCODES = frozenset(
@@ -22,10 +26,57 @@ _NOISE_OPCODES = frozenset(
 # by avoiding Instruction namedtuple creation and inline cache traversal overhead.
 
 _OP_NAME = {v: k for k, v in dis.opmap.items()}  # opcode int -> name string
-_OP_CACHE = {}  # opcode int -> inline cache entry count
-for _on, _oc in dis._inline_cache_entries.items():
-    if _on in dis.opmap:
-        _OP_CACHE[dis.opmap[_on]] = _oc
+
+
+def _inline_cache_counts():
+    """opcode int -> inline cache entry count, or None when this Python
+    doesn't say (a private `dis` table): bytecode can't be read then."""
+    try:
+        entries = dis._inline_cache_entries.items()
+        return {dis.opmap[name]: count for name, count in entries if name in dis.opmap}
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+_OP_CACHE = _inline_cache_counts()
+
+# The Python versions the bytecode patterns below were written and tested
+# for. On any other, a new bytecode spelling could make a pattern match
+# something it shouldn't, so lambdas aren't analysed (they run as Python)
+# unless AKAYU_ANALYZER=1. AKAYU_ANALYZER=0 turns it off everywhere.
+_TESTED_VERSIONS = ((3, 13), (3, 14))
+
+
+def _analyzer_enabled():
+    setting = os.environ.get("AKAYU_ANALYZER", "")
+    if setting in ("0", "1"):
+        return setting == "1" and _OP_CACHE is not None
+    return sys.version_info[:2] in _TESTED_VERSIONS and _OP_CACHE is not None
+
+
+_ANALYZER_ON = _analyzer_enabled()
+_warned_off = False
+
+
+def _warn_analyzer_off():
+    """Say once why compile() runs lambdas as Python on this version."""
+    global _warned_off  # noqa: PLW0603 - a once-per-process flag
+    if _warned_off or os.environ.get("AKAYU_ANALYZER") == "0":
+        return
+    _warned_off = True
+    version = ".".join(map(str, sys.version_info[:2]))
+    if _OP_CACHE is None:
+        why, hint = f"can't read Python {version}'s bytecode (no dis._inline_cache_entries)", ""
+    else:
+        why = f"hasn't been tested on Python {version}"
+        hint = " Set AKAYU_ANALYZER=1 to try the native forms anyway."
+    warnings.warn(
+        f"akayu {why}, so it runs lambdas as plain Python calls instead of natively: "
+        f"results are the same, only slower.{hint}",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+
 
 try:
     import _opcode as _opcode_mod
@@ -241,24 +292,16 @@ def _resolve(instr, func):
 def _clean_instructions(func):
     """Get cleaned instruction list: no noise opcodes, no RETURN_VALUE suffix.
 
-    Uses _fast_extract for ~19x faster bytecode reading than dis.get_instructions.
-    Returns a list of (opname, argval) tuples instead of Instruction namedtuples.
-    Falls back to dis.get_instructions() if _fast_extract fails.
+    Returns a list of (opname, argval) tuples (see _fast_extract), or None
+    for bytecode that can't be read: then nothing is recognised.
     """
     code = getattr(func, "__code__", None)
-    if code is None:
+    if code is None or _OP_CACHE is None:
         return None
     try:
         return _fast_extract(code)
-    except Exception:
-        # Fallback for edge cases (e.g. unusual code objects)
-        try:
-            instrs = list(dis.get_instructions(func))
-        except TypeError:
-            return None
-        clean = [i for i in instrs if i.opname not in _NOISE_OPCODES and i.opname != "RETURN_VALUE"]
-        # Convert to tuple format for compatibility
-        return _finish_instructions([(i.opname, i.argval) for i in clean], [i.offset for i in clean])
+    except (IndexError, KeyError, TypeError):
+        return None
 
 
 def _analyze_simple(instrs, func):
@@ -721,6 +764,33 @@ _accumulate_cache = {}
 # lookup table) adds one per distinct binding, so the oldest are dropped.
 _MAX_RESULTS_PER_CODE = 8
 
+# A cached result keeps the values it was resolved from alive. Only values
+# that are cheap to keep and don't hold user data are cached: a result that
+# captured a Stream (an emit target), a list or an instance is analysed again
+# on every compile() instead of pinning its graph or its data.
+_PINNABLE_TYPES = frozenset((type(None), bool, int, float, complex, str, bytes, range, _BuiltinFunctionType))
+_MAX_PINNED_ITEMS = 64
+
+
+def _pinnable(value):
+    """Whether a cached result may keep `value` alive (see above)."""
+    kind = type(value)
+    if kind in _PINNABLE_TYPES or isinstance(value, type):
+        return True
+    if kind is _FunctionType:  # a module-level function, not a closure over data
+        return value.__closure__ is None
+    if kind is tuple or kind is frozenset:
+        return len(value) <= _MAX_PINNED_ITEMS and all(_pinnable(v) for v in value)
+    return False
+
+
+def _remember(results, deps, result):
+    """Cache `result` for `deps` if keeping them alive is harmless."""
+    if all(_pinnable(value) for _, value in deps):
+        results.append((deps, result))
+        del results[:-_MAX_RESULTS_PER_CODE]
+
+
 # Maximum bytecode length for analyzable patterns.
 # The most complex analyzable pattern (compound and/or with chained sub-expressions)
 # is ~80 bytes. Anything longer is definitely too complex for our pattern matcher.
@@ -753,25 +823,31 @@ def _analyze_lambda(func):
             return result
     ctx = _Bindings(func)
     result = _analyze_code(func, code, ctx)
-    results.append((tuple(ctx.deps), result))
-    del results[:-_MAX_RESULTS_PER_CODE]
+    _remember(results, tuple(ctx.deps), result)
     return result
 
 
 def _analyze_for_compile(func, accumulate):
-    """compile()'s analysis of a plain function: (result, code_only, is_lambda).
+    """compile()'s analysis of a plain function: (result, code_only, is_lambda, kept).
 
     code_only: the result depends on nothing but func.__code__ (no closure,
     default or global value was read), so compile() reuses it for every
     function with that code without calling here again.
+    kept: the result is cached here, so the same object comes back for the
+    same function: compile() may share what it builds from it.
     """
+    code = func.__code__
+    is_lambda = code.co_name == "<lambda>"
+    if not _ANALYZER_ON:
+        _warn_analyzer_off()
+        return None, True, is_lambda, True
     if accumulate:
         result, cache = _analyze_accumulate(func), _accumulate_cache
     else:
         result, cache = _analyze_lambda(func), _analysis_cache
-    code = func.__code__
-    code_only = any(not deps and r is result for deps, r in _cached_results(code, cache))
-    return result, code_only, code.co_name == "<lambda>"
+    kept = [deps for deps, r in _cached_results(code, cache) if r is result]
+    code_only = any(not deps for deps in kept)
+    return result, code_only, is_lambda, bool(kept)
 
 
 def _cached_results(code, cache=_analysis_cache):
@@ -870,8 +946,7 @@ def _analyze_accumulate(func):
             return result
     ctx = _Bindings(func)
     result = _analyze_accumulate_code(func, code, ctx)
-    results.append((tuple(ctx.deps), result))
-    del results[:-_MAX_RESULTS_PER_CODE]
+    _remember(results, tuple(ctx.deps), result)
     return result
 
 

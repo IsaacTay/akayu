@@ -187,8 +187,8 @@ docs-build: sync-docs
     uv run mkdocs build
 
 # Format markdown documentation
-docs-fmt: sync-docs
-    uv run mdformat docs/ README.md
+docs-fmt:
+    uv run --isolated --only-group docs mdformat docs/ README.md
 
 # Validate Mermaid diagrams in documentation
 docs-check-mermaid:
@@ -204,8 +204,8 @@ docs-check-site:
     uv run --isolated --only-group docs mkdocs build --strict -d target/docs-site
 
 # Run all documentation checks
-docs-check: docs-check-mermaid docs-check-site docs-test-examples
+docs-check: docs-check-mermaid docs-fmt-check docs-check-site docs-test-examples
 
-# Check markdown formatting (no changes)
-docs-fmt-check: sync-docs
-    uv run mdformat --check docs/ README.md
+# Check markdown formatting (no changes), in an isolated env like docs-check-site
+docs-fmt-check:
+    uv run --isolated --only-group docs mdformat --check docs/ README.md

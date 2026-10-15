@@ -88,7 +88,7 @@ pub fn start_session() -> PyResult<()> {
     PROFILE.with(|p| {
         let mut state = p.borrow_mut();
         if state.active {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(crate::error::exc::StreamError::new_err(
                 "Profiling is already active. Call stop_profiling() before starting a new session.",
             ));
         }

@@ -89,3 +89,61 @@ def test_defaulted_parameters_are_constants(func, expected):
 )
 def test_step_chains_recognized(func, expected):
     assert _analyze_lambda(func) == expected
+
+
+def run_python(code, **env):
+    """Run `code` in a fresh interpreter (the analyzer is set up at import)."""
+    import os
+    import subprocess
+
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip(), result.stderr
+
+
+COUNT_CALLS = """
+import warnings
+warnings.simplefilter("always")
+import akayu
+calls = []
+k = 2
+def f(x):
+    calls.append(x)
+    return x * k
+s = akayu.Stream()
+out = s.map(lambda x: f(x) and x * k).to_list()
+native = s.map(lambda x: x * k).to_list()
+s.compile()
+k = 3
+s.emit(5)
+print(out, native, len(calls))
+"""
+
+
+def test_analyzer_can_be_switched_off():
+    """AKAYU_ANALYZER=0: every lambda runs as Python (late binding), quietly."""
+    stdout, stderr = run_python(COUNT_CALLS, AKAYU_ANALYZER="0")
+    assert stdout == "[15] [15] 1"
+    assert "RuntimeWarning" not in stderr
+
+
+def test_analyzer_runs_on_tested_versions():
+    stdout, stderr = run_python(COUNT_CALLS)
+    assert stdout == "[15] [10] 1"  # the native lambda read k once, at compile()
+    assert "RuntimeWarning" not in stderr
+
+
+def test_a_python_without_the_bytecode_table_still_imports():
+    """`dis._inline_cache_entries` is private: without it akayu used to fail
+    at import. Now lambdas run as Python, with one warning."""
+    stdout, stderr = run_python("import dis\ndel dis._inline_cache_entries\n" + COUNT_CALLS)
+    assert stdout == "[15] [15] 1"
+    assert stderr.count("RuntimeWarning") == 1
+    assert "can't read" in stderr

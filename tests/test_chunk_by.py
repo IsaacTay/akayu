@@ -319,3 +319,45 @@ class TestChunkByFusion:
             s2.emit(c)
 
         assert results1 == results2
+
+
+class TestFusedPreBufferSteps:
+    """Steps between the branch point and a collect() that compile() fuses
+    into a chunk_by node run as they would unfused."""
+
+    def run(self, build, items, compiled):
+        s = Stream()
+        out = build(s)
+        if compiled:
+            s.compile()
+        for item in items:
+            s.emit(item)
+        return out
+
+    def test_flatten_before_the_collect_buffers_every_item(self):
+        """Fused, a flatten's items were dropped: every chunk came out empty."""
+
+        def build(s):
+            c = s.flatten().collect()
+            out = c.to_list()
+            s.filter(lambda x: x == []).sink(lambda _: c.flush())
+            return out
+
+        items = [[1, 2], [3], [], [4, 5, 6], []]
+        expected = [(1, 2, 3), (4, 5, 6)]
+        assert self.run(build, items, compiled=False) == expected
+        assert self.run(build, items, compiled=True) == expected
+
+    def test_lambdas_before_the_collect_read_globals_once(self):
+        """compile() reads a lambda's globals once, at compile(); fused
+        pre-buffer steps used to skip that analysis and read them per item."""
+        ns = {"k": 2}
+        exec("double = lambda x: x * k", ns)
+        s = Stream()
+        c = s.map(ns["double"]).collect()
+        out = c.to_list()
+        s.filter(lambda x: x >= 100).sink(lambda _: c.flush())
+        s.compile()
+        ns["k"] = 3
+        s.emit(100)
+        assert out == [(200,)]

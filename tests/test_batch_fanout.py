@@ -75,3 +75,19 @@ def test_branches_that_merge_keep_the_item_order():
         s.compile()
         emit_all(s, [1, 2], batch)
         assert out == [10, 100, 20, 200]
+
+
+def test_branches_that_change_their_items_keep_the_item_order():
+    """`x.pop()` changes the item, so the branches aren't independent: with
+    the same list emitted twice, the second branch must see each pop of the
+    first one in emit() order."""
+    results = []
+    for batch in (False, True):
+        s, popped, sizes = akayu.Stream(), [], []
+        s.map(lambda x: x.pop()).sink(popped.append)
+        s.map(lambda x: len(x)).sink(sizes.append)
+        s.compile()
+        shared = [1, 2, 3, 4]
+        emit_all(s, [shared, shared], batch)
+        results.append((popped, sizes))
+    assert results[0] == results[1] == ([4, 3], [3, 2])

@@ -39,14 +39,23 @@ pub use node::{BuiltinOp, NodeLogic};
 pub(crate) type Downstreams = smallvec::SmallVec<[lock::Downstream; 1]>;
 pub(crate) type Parents = smallvec::SmallVec<[Py<Stream>; 1]>;
 
-/// A raw pointer to a downstream `Stream`, cached at freeze time to bypass
+/// A raw pointer to a downstream `Stream`, cached by compile() to bypass
 /// PyCell's atomic borrow checks in the propagation hot path.
 ///
 /// # Safety
-/// Valid only while the parent `Py<Stream>` in `downstreams` keeps the Python object alive.
-/// Must only be dereferenced while holding the GIL, with no other `&mut` to the same `Stream`.
-/// These invariants hold because: the graph is a DAG (no cycles), processing is sequential
-/// (one subtree completes before the next starts), and topology is frozen after compile().
+/// The pointer stays valid: the `Py<Stream>` beside it in the edge
+/// (`lock::Downstream`) keeps the node alive, and compile() froze the graph.
+/// A `&mut` from `get_mut` is the only one to its node because:
+/// - the GIL is held, and an update reaches a node only under a lock that
+///   serializes the updates of that node: its source's (one lock for a whole
+///   compiled graph without par(); a par() branch runs under its source's
+///   lock, each branch on one thread), or, below a `locks_children` edge,
+///   the node's own;
+/// - a second update of the same node on this thread (a callback emitting
+///   into another source that leads back here) is refused by `busy`, which
+///   compile() arms (`guard_reentry`) wherever that can happen;
+/// - Python code can't reach a node's update directly (it isn't a method),
+///   and flush()/drain() refuse a node that is `busy`.
 #[derive(Clone, Copy)]
 pub(crate) struct StreamPtr(std::ptr::NonNull<Stream>);
 unsafe impl Send for StreamPtr {}
@@ -57,8 +66,10 @@ impl StreamPtr {
         Self(std::ptr::NonNull::from(stream))
     }
 
+    /// The node, for one update (see the type's safety notes). The caller
+    /// picks the lifetime: keep it to the update.
     #[inline(always)]
-    pub(crate) unsafe fn get_mut(self) -> &'static mut Stream {
+    pub(crate) unsafe fn get_mut<'a>(self) -> &'a mut Stream {
         unsafe { &mut *self.0.as_ptr() }
     }
 }
@@ -83,11 +94,12 @@ pub struct Stream {
     pub(crate) downstreams: Downstreams,
     pub(crate) parents: std::sync::Mutex<Parents>,
     pub(crate) name: std::sync::Arc<str>,
-    /// True if topology has been frozen/optimized on first emit
-    pub(crate) frozen: bool,
-    /// True if this node needs thread-safe locking (convergence point from parallel branches)
-    pub(crate) needs_lock: bool,
-    /// True if compile() was explicitly called (prevents modifications)
+    /// Take each child's lock before updating it (`Downstream::locked_update`):
+    /// a child may be reached from another thread meanwhile (a merge's inputs,
+    /// par() branches that converge). compile() clears it when the whole graph
+    /// shares one lock.
+    pub(crate) locks_children: bool,
+    /// Set by compile() on every node it froze: the graph can't change now.
     pub(crate) compiled: bool,
     /// Source location where this node was created (e.g., "pipeline.py:42")
     pub(crate) source_location: std::sync::Arc<str>,
@@ -97,12 +109,9 @@ pub struct Stream {
     /// Cached vectorcall function pointer, extracted at compile time.
     /// Bypasses per-call type flag check + offset dereference in the hot loop.
     pub(crate) cached_vectorcall: Option<pyo3::ffi::vectorcallfunc>,
-    /// Set at freeze time. True if update() should route through apply_logic
-    /// (non-filter chainable: Map/Flatten/Accumulate/Sink/BatchMap, or compiled Chain).
-    pub(crate) compiled_chainable: bool,
-    /// Set at freeze time. True if this is a Filter whose predicate can skip the
-    /// async check (has builtin_op), so update() routes through apply_logic.
-    pub(crate) compiled_filter_fast: bool,
+    /// `logic.is_step()`, cached: update() runs the node through `apply_logic`.
+    /// Set when the node is built, and again by compile(), which changes logic.
+    pub(crate) chainable: bool,
     /// Set by compile() on a branch point whose branches it proved can't
     /// observe each other: emit_batch hands each branch the whole batch.
     pub(crate) batch_fanout: bool,
@@ -118,8 +127,9 @@ pub struct Stream {
     /// actively being flushed/drained. Prevents cycles and undefined behavior
     /// in the compiled raw-pointer path.
     pub(crate) flushing: bool,
-    /// Guard against re-entrant emit calls. True while this node is
-    /// actively propagating from an emit(). Prevents cycles in the data graph.
+    /// A source's state: `lock::IDLE`, or a mark of the thread emitting into
+    /// it or flushing it (see `lock::Emitting`). Refuses an emit() or flush()
+    /// that re-enters the source.
     pub(crate) emitting: std::sync::atomic::AtomicUsize,
     /// Set while the compiled fast path updates this node (see
     /// `update_compiled`), when `guard_reentry`.
@@ -128,7 +138,7 @@ pub struct Stream {
     /// (only then can an item come back into a node mid-update), and on
     /// nodes that run callbacks mid-update (one may flush the node).
     pub(crate) guard_reentry: bool,
-    /// Serializes emit()/flush() on this node and updates through `needs_lock` edges.
+    /// Serializes emit()/flush() on this node and updates through `locks_children` edges.
     pub(crate) lock: std::sync::Arc<lock::NodeLock>,
 }
 
@@ -142,6 +152,7 @@ fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(union, m)?)?;
     m.add_function(wrap_pyfunction!(combine_latest, m)?)?;
     m.add_function(wrap_pyfunction!(zip, m)?)?;
+    error::register(m)?;
 
     // Initialize Python helpers
     helpers::init_helpers(py, HELPERS)?;

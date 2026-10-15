@@ -70,6 +70,67 @@ pub(crate) struct NodeCtx<'a> {
     pub emit_target: &'a Option<Py<crate::Stream>>,
 }
 
+/// The `NodeCtx` of a node or a chain step: borrows its fields one by one,
+/// so the caller can still borrow its `logic` mutably.
+macro_rules! node_ctx {
+    ($node:expr, $node_id:expr) => {
+        NodeCtx {
+            builtin_op: &$node.builtin_op,
+            cached_vc: &$node.cached_vectorcall,
+            name: &$node.name,
+            source_location: &$node.source_location,
+            node_id: $node_id,
+            flush_target: &$node.flush_target,
+            emit_target: &$node.emit_target,
+        }
+    };
+}
+
+/// A map step on one item: its native op, or its function.
+#[inline(always)]
+fn map_one(py: Python, func: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let res = match ctx.builtin_op {
+        Some(op) => apply_builtin(py, op, x),
+        None => vcall1(py, func, x, ctx.cached_vc),
+    };
+    wrap_error(py, res, ctx.name, ctx.source_location)
+}
+
+/// A filter step on one item: whether it passes.
+#[inline(always)]
+fn filter_one(py: Python, predicate: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -> PyResult<bool> {
+    let res = match ctx.builtin_op {
+        Some(op) => apply_builtin_as_filter(py, op, x),
+        None => vcall1(py, predicate, x, ctx.cached_vc).and_then(|r| truth(py, r)),
+    };
+    wrap_error(py, res, ctx.name, ctx.source_location)
+}
+
+/// A sink step on one item, for a sink without a flush or emit target.
+#[inline(always)]
+fn sink_one(py: Python, func: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -> PyResult<()> {
+    let res = match ctx.builtin_op.as_deref() {
+        Some(BuiltinOp::ListAppend(list)) => list_append(py, list, x),
+        Some(BuiltinOp::Print) => print_one(py, x),
+        _ => vcall1(py, func, x, ctx.cached_vc).map(drop),
+    };
+    wrap_error(py, res, ctx.name, ctx.source_location)
+}
+
+/// `print(x)`, through the cached builtin.
+#[inline(never)]
+fn print_one(py: Python, x: &Py<PyAny>) -> PyResult<()> {
+    crate::helpers::get_builtin_print()?.call1(py, (x,))?;
+    Ok(())
+}
+
+/// A sink's `collect.flush()` shortcut: what `collect.flush()` called from
+/// Python does, without the call.
+#[inline(never)]
+fn flush_target_node(py: Python, target: &Py<crate::Stream>) -> PyResult<()> {
+    crate::helpers::with_node_mut(target.bind(py), py, |node| node.flush_guarded(py, true))
+}
+
 /// Call a Python callable, using the cached vectorcall pointer if available.
 #[inline(always)]
 fn vcall1(
@@ -172,14 +233,9 @@ fn emit_into_target(
     let t = target
         .try_borrow(py)
         .map_err(|_| PyErr::from(crate::error::StreamError::BusySource))?;
-    let _guard = t.lock.acquire_checked(py, || {
-        crate::lock::Emitting::check_not_waited_on(&t.emitting, |state| {
-            crate::lock::refused(state, &t.name)
-        })
-    })?;
-    // Marked emitting like target.emit() does: a feedback loop back into a
-    // source that is mid-emit is rejected, not run as unbounded recursion.
-    let _emitting = crate::lock::Emitting::enter(&t.emitting, &t.name)?;
+    // Entered like target.emit() does: a feedback loop back into a source
+    // that is mid-emit is rejected, not run as unbounded recursion.
+    let _entered = t.enter_source(py, false)?;
     for x in items {
         t.propagate(py, x)?;
     }
@@ -534,7 +590,7 @@ fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResult<Py<PyAny
         | BuiltinOp::AccumBinOpConst(..)
         | BuiltinOp::AccumMax
         | BuiltinOp::AccumMin
-        | BuiltinOp::ListAppend(_) => Err(pyo3::exceptions::PyRuntimeError::new_err(
+        | BuiltinOp::ListAppend(_) => Err(crate::error::exc::StreamError::new_err(
             "akayu internal error: accumulate/sink op applied to a single value",
         )),
     }
@@ -600,51 +656,17 @@ pub(crate) fn apply_logic(
     if !profiling {
         match logic {
             NodeLogic::Map { func } => {
-                let res = match ctx.builtin_op {
-                    Some(op) => apply_builtin(py, op, &x),
-                    None => vcall1(py, func, &x, ctx.cached_vc),
-                };
-                return Ok(StepResult::Value(wrap_error(
-                    py,
-                    res,
-                    ctx.name,
-                    ctx.source_location,
-                )?));
+                return Ok(StepResult::Value(map_one(py, func, ctx, &x)?));
             }
             NodeLogic::Filter { predicate } => {
-                let passes = match ctx.builtin_op {
-                    Some(op) => wrap_error(
-                        py,
-                        apply_builtin_as_filter(py, op, &x),
-                        ctx.name,
-                        ctx.source_location,
-                    )?,
-                    None => {
-                        let res = vcall1(py, predicate, &x, ctx.cached_vc);
-                        wrap_error(
-                            py,
-                            res.and_then(|r| truth(py, r)),
-                            ctx.name,
-                            ctx.source_location,
-                        )?
-                    }
-                };
-                return Ok(if passes {
+                return Ok(if filter_one(py, predicate, ctx, &x)? {
                     StepResult::Value(x)
                 } else {
                     StepResult::Filtered
                 });
             }
-            NodeLogic::Sink { func }
-                if ctx.flush_target.is_none()
-                    && ctx.emit_target.is_none()
-                    && !matches!(ctx.builtin_op.as_deref(), Some(BuiltinOp::Print)) =>
-            {
-                let res = match ctx.builtin_op.as_deref() {
-                    Some(BuiltinOp::ListAppend(list)) => list_append(py, list, &x),
-                    _ => vcall1(py, func, &x, ctx.cached_vc).map(drop),
-                };
-                wrap_error(py, res, ctx.name, ctx.source_location)?;
+            NodeLogic::Sink { func } if ctx.flush_target.is_none() && ctx.emit_target.is_none() => {
+                sink_one(py, func, ctx, &x)?;
                 return Ok(StepResult::Terminal);
             }
             NodeLogic::Chain { steps } => return apply_chain(py, steps, x, false),
@@ -678,15 +700,7 @@ fn apply_chain(
         }
         let step = &mut steps[i];
         i += 1;
-        let step_ctx = NodeCtx {
-            builtin_op: &step.builtin_op,
-            cached_vc: &step.cached_vectorcall,
-            name: &step.name,
-            source_location: &step.source_location,
-            node_id: step.node_id,
-            flush_target: &step.flush_target,
-            emit_target: &step.emit_target,
-        };
+        let step_ctx = node_ctx!(step, step.node_id);
         match apply_logic(py, &mut step.logic, &step_ctx, val, profiling)? {
             StepResult::Value(v) => val = v,
             StepResult::Filtered => return Ok(StepResult::Filtered),
@@ -695,15 +709,7 @@ fn apply_chain(
                 // Flatten mid-chain: switch remaining steps to batch mode
                 let mut batch = items;
                 for s in &mut steps[i..] {
-                    let s_ctx = NodeCtx {
-                        builtin_op: &s.builtin_op,
-                        cached_vc: &s.cached_vectorcall,
-                        name: &s.name,
-                        source_location: &s.source_location,
-                        node_id: s.node_id,
-                        flush_target: &s.flush_target,
-                        emit_target: &s.emit_target,
-                    };
+                    let s_ctx = node_ctx!(s, s.node_id);
                     match apply_logic_batch(py, &mut s.logic, &s_ctx, batch, profiling)? {
                         BatchStepResult::Items(out) => batch = out,
                         BatchStepResult::Terminal => return Ok(StepResult::Terminal),
@@ -728,18 +734,9 @@ fn apply_logic_general(
     match logic {
         NodeLogic::Map { func } => {
             let t = prof_start(profiling);
-            let res: PyResult<Py<PyAny>> = match ctx.builtin_op {
-                Some(op) => apply_builtin(py, op, &x),
-                None => vcall1(py, func, &x, ctx.cached_vc),
-            };
-            let result = wrap_error(py, res, ctx.name, ctx.source_location)?;
-            let ft = if let Some(t) = t {
-                t.elapsed()
-            } else {
-                Duration::ZERO
-            };
-            if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, 1);
+            let result = map_one(py, func, ctx, &x)?;
+            if let Some(t) = t {
+                profiling::record_node(ctx.node_id, t.elapsed(), 1, 1);
             }
             Ok(StepResult::Value(result))
         }
@@ -755,28 +752,9 @@ fn apply_logic_general(
 
         NodeLogic::Filter { predicate } => {
             let t = prof_start(profiling);
-            let passes = match ctx.builtin_op {
-                Some(op) => {
-                    let res = apply_builtin_as_filter(py, op, &x);
-                    wrap_error(py, res, ctx.name, ctx.source_location)?
-                }
-                None => {
-                    let res = vcall1(py, predicate, &x, ctx.cached_vc);
-                    wrap_error(
-                        py,
-                        res.and_then(|r| truth(py, r)),
-                        ctx.name,
-                        ctx.source_location,
-                    )?
-                }
-            };
-            let ft = if let Some(t) = t {
-                t.elapsed()
-            } else {
-                Duration::ZERO
-            };
-            if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, u64::from(passes));
+            let passes = filter_one(py, predicate, ctx, &x)?;
+            if let Some(t) = t {
+                profiling::record_node(ctx.node_id, t.elapsed(), 1, u64::from(passes));
             }
             if passes {
                 Ok(StepResult::Value(x))
@@ -791,8 +769,7 @@ fn apply_logic_general(
                 if profiling {
                     profiling::record_node(ctx.node_id, Duration::ZERO, 1, 0);
                 }
-                let mut t = crate::helpers::enter_node(target, py)?;
-                t.flush_guarded(py, true)?;
+                flush_target_node(py, target)?;
                 return Ok(StepResult::Terminal);
             }
             // Fast path: direct Rust emit (no Python dispatch)
@@ -804,26 +781,9 @@ fn apply_logic_general(
                 return Ok(StepResult::Terminal);
             }
             let t = prof_start(profiling);
-            match ctx.builtin_op.as_deref() {
-                Some(BuiltinOp::Print) => {
-                    let print_fn = crate::helpers::get_builtin_print()?;
-                    print_fn.call1(py, (&x,))?;
-                }
-                Some(BuiltinOp::ListAppend(list)) => {
-                    wrap_error(py, list_append(py, list, &x), ctx.name, ctx.source_location)?;
-                }
-                _ => {
-                    let res = vcall1(py, func, &x, ctx.cached_vc);
-                    wrap_error(py, res, ctx.name, ctx.source_location)?;
-                }
-            }
-            let ft = if let Some(t) = t {
-                t.elapsed()
-            } else {
-                Duration::ZERO
-            };
-            if profiling {
-                profiling::record_node(ctx.node_id, ft, 1, 0);
+            sink_one(py, func, ctx, &x)?;
+            if let Some(t) = t {
+                profiling::record_node(ctx.node_id, t.elapsed(), 1, 0);
             }
             Ok(StepResult::Terminal)
         }
@@ -894,11 +854,18 @@ fn apply_logic_general(
 
         NodeLogic::Chain { steps } => apply_chain(py, steps, x, profiling),
 
-        NodeLogic::ChainMember { .. } => {
-            unreachable!("ChainMember should never be executed directly")
-        }
-
-        _ => unreachable!("apply_logic called with non-chainable variant"),
+        // Not steps (`NodeLogic::is_step`): update() runs them itself.
+        NodeLogic::Source
+        | NodeLogic::Collect { .. }
+        | NodeLogic::Tag { .. }
+        | NodeLogic::CombineLatest(_)
+        | NodeLogic::Zip { .. }
+        | NodeLogic::Parallel
+        | NodeLogic::Prefetch { .. }
+        | NodeLogic::Prefetched { .. }
+        | NodeLogic::ChainMember { .. }
+        | NodeLogic::ChunkBy(_)
+        | NodeLogic::ExtractBetween(_) => unreachable!("apply_logic called with a non-step node"),
     }
 }
 
@@ -1067,8 +1034,7 @@ pub(crate) fn apply_logic_batch(
                     profiling::record_node(ctx.node_id, Duration::ZERO, items_in, 0);
                 }
                 for _x in items {
-                    let mut t = crate::helpers::enter_node(target, py)?;
-                    t.flush_guarded(py, true)?;
+                    flush_target_node(py, target)?;
                 }
                 return Ok(BatchStepResult::Terminal);
             }
@@ -1081,23 +1047,14 @@ pub(crate) fn apply_logic_batch(
                 return Ok(BatchStepResult::Terminal);
             }
             let t = prof_start(profiling);
-            match ctx.builtin_op.as_deref() {
-                Some(BuiltinOp::Print) => {
-                    let print_fn = crate::helpers::get_builtin_print()?;
-                    for x in items {
-                        print_fn.call1(py, (&x,))?;
-                    }
+            // The common list sink keeps its own loop.
+            if let Some(BuiltinOp::ListAppend(list)) = ctx.builtin_op.as_deref() {
+                for x in &items {
+                    wrap_error(py, list_append(py, list, x), ctx.name, ctx.source_location)?;
                 }
-                Some(BuiltinOp::ListAppend(list)) => {
-                    for x in &items {
-                        wrap_error(py, list_append(py, list, x), ctx.name, ctx.source_location)?;
-                    }
-                }
-                _ => {
-                    for x in items {
-                        let res = vcall1(py, func, &x, ctx.cached_vc);
-                        wrap_error(py, res, ctx.name, ctx.source_location)?;
-                    }
+            } else {
+                for x in &items {
+                    sink_one(py, func, ctx, x)?;
                 }
             }
             if let Some(t) = t {
@@ -1122,15 +1079,7 @@ pub(crate) fn apply_logic_batch(
                 }
                 let step = &mut steps[i];
                 i += 1;
-                let step_ctx = NodeCtx {
-                    builtin_op: &step.builtin_op,
-                    cached_vc: &step.cached_vectorcall,
-                    name: &step.name,
-                    source_location: &step.source_location,
-                    node_id: step.node_id,
-                    flush_target: &step.flush_target,
-                    emit_target: &step.emit_target,
-                };
+                let step_ctx = node_ctx!(step, step.node_id);
                 match apply_logic_batch(py, &mut step.logic, &step_ctx, batch, profiling)? {
                     BatchStepResult::Items(out) => batch = out,
                     BatchStepResult::Terminal => return Ok(BatchStepResult::Terminal),
@@ -1139,11 +1088,20 @@ pub(crate) fn apply_logic_batch(
             Ok(BatchStepResult::Items(batch))
         }
 
-        NodeLogic::ChainMember { .. } => {
-            unreachable!("ChainMember should never be executed directly")
+        // Not steps (`NodeLogic::is_step`): update_batch() runs them itself.
+        NodeLogic::Source
+        | NodeLogic::Collect { .. }
+        | NodeLogic::Tag { .. }
+        | NodeLogic::CombineLatest(_)
+        | NodeLogic::Zip { .. }
+        | NodeLogic::Parallel
+        | NodeLogic::Prefetch { .. }
+        | NodeLogic::Prefetched { .. }
+        | NodeLogic::ChainMember { .. }
+        | NodeLogic::ChunkBy(_)
+        | NodeLogic::ExtractBetween(_) => {
+            unreachable!("apply_logic_batch called with a non-step node")
         }
-
-        _ => unreachable!("apply_logic_batch called with non-chainable variant"),
     }
 }
 
@@ -1176,10 +1134,7 @@ macro_rules! compiled_entry {
 #[cold]
 #[inline(never)]
 fn chain_member_reached(name: &str) -> PyErr {
-    pyo3::exceptions::PyRuntimeError::new_err(format!(
-        "An item reached '{name}', which compile() folded into a chain of steps: emit into \
-         the compiled graph's source instead"
-    ))
+    crate::error::StreamError::ChainMemberReached(name.to_string()).into()
 }
 
 /// The error for a re-entered node: out of line, it is never the hot path.
@@ -1265,26 +1220,20 @@ fn chunk_by_item(
     }
 }
 
-/// Buffer an item in a chunk_by node, through the steps fused before it.
+/// Buffer an item in a chunk_by node, through the steps fused before it,
+/// as a chain runs them: a flatten (or batch_map) among them buffers every
+/// item it yields.
 #[inline]
 fn chunk_buffer(py: Python, state: &mut ChunkByState, x: Py<PyAny>) -> PyResult<()> {
-    let mut val = x;
-    for step in &mut state.pre_buffer_chain {
-        let step_ctx = NodeCtx {
-            builtin_op: &step.builtin_op,
-            cached_vc: &step.cached_vectorcall,
-            name: &step.name,
-            source_location: &step.source_location,
-            node_id: step.node_id,
-            flush_target: &step.flush_target,
-            emit_target: &step.emit_target,
-        };
-        match apply_logic(py, &mut step.logic, &step_ctx, val, false)? {
-            StepResult::Value(v) => val = v,
-            _ => return Ok(()),
-        }
+    if state.pre_buffer_chain.is_empty() {
+        state.buffer.push(x);
+        return Ok(());
     }
-    state.buffer.push(val);
+    match apply_chain(py, &mut state.pre_buffer_chain, x, false)? {
+        StepResult::Value(v) => state.buffer.push(v),
+        StepResult::Batch(items) => state.buffer.extend(items),
+        StepResult::Filtered | StepResult::Terminal => {}
+    }
     Ok(())
 }
 
@@ -1305,13 +1254,47 @@ pub(crate) fn chunk_take(
     ))
 }
 
-#[pymethods]
+// A node's update, for one item or a batch. Not methods Python can call:
+// compiled updates reach a node through a raw pointer (`StreamPtr`), and a
+// call from Python could start a second one on a node mid-update.
 impl Stream {
+    /// A step (`chainable`) on one item.
+    #[inline(always)]
+    fn update_step(
+        &mut self,
+        py: Python,
+        x: Py<PyAny>,
+        profiling_active: bool,
+        node_id: usize,
+    ) -> PyResult<()> {
+        let ctx = node_ctx!(self, node_id);
+        match apply_logic(py, &mut self.logic, &ctx, x, profiling_active)? {
+            StepResult::Value(v) => self.propagate(py, v),
+            StepResult::Filtered | StepResult::Terminal => Ok(()),
+            StepResult::Batch(items) => self.propagate_batch(py, items),
+        }
+    }
+
+    /// A step (`chainable`) on a batch.
+    #[inline(always)]
+    fn update_batch_step(
+        &mut self,
+        py: Python,
+        items: Vec<Py<PyAny>>,
+        profiling_active: bool,
+        node_id: usize,
+    ) -> PyResult<()> {
+        let ctx = node_ctx!(self, node_id);
+        match apply_logic_batch(py, &mut self.logic, &ctx, items, profiling_active)? {
+            BatchStepResult::Items(output) => self.propagate_batch(py, output),
+            BatchStepResult::Terminal => Ok(()),
+        }
+    }
+
     // Complexity is inherent to dispatching across 20+ NodeLogic variants;
     // each arm is simple and independent.
     #[allow(clippy::cognitive_complexity)]
-    #[pyo3(name = "_update_batch")]
-    pub fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
+    pub(crate) fn update_batch(&mut self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
             std::ptr::from_ref(&*self) as usize
@@ -1319,44 +1302,8 @@ impl Stream {
             0
         };
 
-        // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
-        if let Some(ref target) = self.flush_target {
-            if profiling_active {
-                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0);
-            }
-            // Call flush once per item (matching unfused behavior: filter passes each delimiter individually)
-            for _x in items {
-                crate::helpers::enter_node(target, py)?.flush_guarded(py, true)?;
-            }
-            return Ok(());
-        }
-
-        // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
-        if let Some(ref target) = self.emit_target {
-            if profiling_active {
-                profiling::record_node(node_id, Duration::ZERO, items.len() as u64, 0);
-            }
-            emit_into_target(py, target, items)?;
-            return Ok(());
-        }
-
-        // Chainable variants: delegate to apply_logic_batch
-        // compiled_chainable is set at freeze_all() time; includes all chainable except Filter.
-        // Batch path routes ALL filters through apply_logic_batch (no async check needed for batch).
-        if self.compiled_chainable || matches!(&self.logic, NodeLogic::Filter { .. }) {
-            let ctx = NodeCtx {
-                builtin_op: &self.builtin_op,
-                cached_vc: &self.cached_vectorcall,
-                name: &self.name,
-                source_location: &self.source_location,
-                node_id,
-                flush_target: &self.flush_target,
-                emit_target: &self.emit_target,
-            };
-            match apply_logic_batch(py, &mut self.logic, &ctx, items, profiling_active)? {
-                BatchStepResult::Items(output) => return self.propagate_batch(py, output),
-                BatchStepResult::Terminal => return Ok(()),
-            }
+        if self.chainable {
+            return self.update_batch_step(py, items, profiling_active, node_id);
         }
 
         // Non-chainable variants
@@ -1507,15 +1454,26 @@ impl Stream {
                 };
             }
 
-            // Chainable variants handled above
-            _ => unreachable!("chainable variant should have been handled by apply_logic_batch"),
+            // Steps run above; `chainable` only caches `is_step()`.
+            NodeLogic::Map { .. }
+            | NodeLogic::StarMap { .. }
+            | NodeLogic::Filter { .. }
+            | NodeLogic::Flatten
+            | NodeLogic::Accumulate { .. }
+            | NodeLogic::Sink { .. }
+            | NodeLogic::BatchMap { .. }
+            | NodeLogic::Chain { .. } => {
+                return self.update_batch_step(py, items, profiling_active, node_id);
+            }
+            // A chain member only gets here from a node compile() bypassed
+            // (an emit into a seq() node it skipped): its chain does its work.
+            NodeLogic::ChainMember { .. } => return Err(chain_member_reached(&self.name)),
         }
 
         self.propagate_batch(py, output_batch)
     }
 
-    #[pyo3(name = "_update")]
-    pub fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<()> {
+    pub(crate) fn update(&mut self, py: Python, x: Py<PyAny>) -> PyResult<()> {
         let profiling_active = profiling::is_profiling();
         let node_id = if profiling_active {
             std::ptr::from_ref(&*self) as usize
@@ -1523,61 +1481,14 @@ impl Stream {
             0
         };
 
-        // Fast path: Sink that calls .flush() on a Collect — bypass Python dispatch entirely
-        if let Some(ref target) = self.flush_target {
-            if profiling_active {
-                profiling::record_node(node_id, Duration::ZERO, 1, 0);
-            }
-            let mut t = crate::helpers::enter_node(target, py)?;
-            return t.flush_guarded(py, true);
+        if self.chainable {
+            return self.update_step(py, x, profiling_active, node_id);
         }
 
-        // Fast path: Sink that calls .emit() on a Source — bypass Python dispatch entirely
-        if let Some(ref target) = self.emit_target {
-            if profiling_active {
-                profiling::record_node(node_id, Duration::ZERO, 1, 0);
-            }
-            return emit_into_target(py, target, [x]);
-        }
-
-        // Chainable variants: delegate to apply_logic
-        // (except Filter when async check is needed — that stays here)
-        // compiled_chainable / compiled_filter_fast are set once at freeze_all() time
-        if self.compiled_chainable || self.compiled_filter_fast {
-            let ctx = NodeCtx {
-                builtin_op: &self.builtin_op,
-                cached_vc: &self.cached_vectorcall,
-                name: &self.name,
-                source_location: &self.source_location,
-                node_id,
-                flush_target: &self.flush_target,
-                emit_target: &self.emit_target,
-            };
-            match apply_logic(py, &mut self.logic, &ctx, x, profiling_active)? {
-                StepResult::Value(v) => return self.propagate(py, v),
-                StepResult::Filtered => return Ok(()),
-                StepResult::Terminal => return Ok(()),
-                StepResult::Batch(items) => return self.propagate_batch(py, items),
-            }
-        }
-
-        // Non-chainable variants + Filter with async check
         let mut ft = Duration::ZERO;
 
         let result = match &mut self.logic {
             NodeLogic::Source => Some(x),
-
-            // Filter: generic predicate path
-            NodeLogic::Filter { predicate } => {
-                let t = prof_start(profiling_active);
-                let res = vectorcall1(py, predicate, &x);
-                if let Some(t) = t {
-                    ft = t.elapsed();
-                }
-                let res = res.and_then(|r| truth(py, r));
-                let passes = wrap_error(py, res, &self.name, &self.source_location)?;
-                if passes { Some(x) } else { None }
-            }
 
             NodeLogic::Collect { buffer } => {
                 if profiling_active {
@@ -1678,10 +1589,20 @@ impl Stream {
                 return Ok(());
             }
 
-            // Chainable variants are handled above. A chain member only gets
-            // here from a node compile() bypassed (an emit() into a seq()
-            // node it skipped): the member's work is done by its chain now.
-            _ => return Err(chain_member_reached(&self.name)),
+            // Steps run above; `chainable` only caches `is_step()`.
+            NodeLogic::Map { .. }
+            | NodeLogic::StarMap { .. }
+            | NodeLogic::Filter { .. }
+            | NodeLogic::Flatten
+            | NodeLogic::Accumulate { .. }
+            | NodeLogic::Sink { .. }
+            | NodeLogic::BatchMap { .. }
+            | NodeLogic::Chain { .. } => {
+                return self.update_step(py, x, profiling_active, node_id);
+            }
+            // A chain member only gets here from a node compile() bypassed
+            // (an emit into a seq() node it skipped): its chain does its work.
+            NodeLogic::ChainMember { .. } => return Err(chain_member_reached(&self.name)),
         };
 
         // Record for nodes that fall through (non-early-return, non-terminal)
@@ -1713,7 +1634,7 @@ impl Stream {
         // If THIS node needs locking (par() branches, union inputs), take each
         // child's lock before updating it: the child may be shared with another
         // thread's branch.
-        let use_lock = self.needs_lock;
+        let use_lock = self.locks_children;
 
         if n == 1 {
             if use_lock {
@@ -1778,7 +1699,7 @@ impl Stream {
         // If THIS node needs locking (par() branches, union inputs), take each
         // child's lock before updating it: the child may be shared with another
         // thread's branch.
-        if self.needs_lock {
+        if self.locks_children {
             for child in self.downstreams.iter().take(n - 1) {
                 child.locked_update(py, val.clone_ref(py))?;
             }
@@ -1824,7 +1745,7 @@ impl Stream {
                     .unbind(),
             );
         };
-        if self.needs_lock {
+        if self.locks_children {
             let _guard = child.lock.acquire(py);
             return crate::helpers::enter_node(child, py)?.update_tagged_compiled(py, index, val);
         }
@@ -1853,7 +1774,7 @@ impl Stream {
                 .collect::<PyResult<Vec<_>>>()?;
             return self.propagate_batch(py, tagged);
         };
-        if self.needs_lock {
+        if self.locks_children {
             let _guard = child.lock.acquire(py);
             return crate::helpers::enter_node(child, py)?
                 .update_batch_tagged_compiled(py, index, items);

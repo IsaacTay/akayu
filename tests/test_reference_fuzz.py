@@ -257,7 +257,7 @@ class Model:
 
     def emit(self, src, x):
         if src in self.busy_src:
-            raise RuntimeError("Re-entrant emit")
+            raise akayu.ReentrantError("Re-entrant emit")
         self.busy_src.add(src)
         try:
             self._down(src, x)
@@ -270,7 +270,7 @@ class Model:
 
     def _node(self, i, slot, v):
         if i in self.active:
-            raise RuntimeError("Reentered")
+            raise akayu.ReentrantError("Reentered")
         self.active.add(i)
         try:
             self._update(i, slot, v)

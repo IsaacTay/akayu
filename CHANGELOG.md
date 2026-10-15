@@ -13,7 +13,15 @@
   `join()` waits for the last line and re-raises any error.
 - `stream_name` and `returns_state` are keyword-only on every operation, and
   `MultiStream.filter()`'s argument is named `predicate`, like `Stream.filter()`.
-- `Stream.update()` / `update_batch()` are internal and renamed `_update()` / `_update_batch()`.
+- `Stream.update()` / `update_batch()` are internal and can't be called from Python any more.
+- Errors are typed. Everything akayu raises about a graph's state is an `akayu.StreamError`, a
+  `RuntimeError` subclass, so `except RuntimeError` still catches it. An exception from your
+  function arrives as `akayu.CallbackError` (with `node`, `location` and the original as
+  `__cause__`); `FrozenGraphError`, `NotASourceError`, `ReentrantError`, `BusyError` and
+  `DeadlockError` name the other cases. Invalid arguments still raise `ValueError`/`TypeError`.
+- On a Python version akayu hasn't been tested on (3.15 and later), lambdas run as plain Python
+  calls instead of natively, with one `RuntimeWarning`: results are the same, only slower.
+  `AKAYU_ANALYZER=1` turns the native forms on anyway, `AKAYU_ANALYZER=0` off everywhere.
 - numpy and scipy are no longer installed with akayu; it never used them.
 - `prefetch()` functions run in a copy of the caller's `contextvars` context (they used to see
   the worker thread's), like `par()` branches. The last `par()` branch runs on the calling thread.
@@ -80,7 +88,7 @@ independent of machine load:
 - 45% less memory per node (565 -> 309 bytes; compiled 518 -> 304); `compile()` frees the nodes
   it fuses into chains unless you hold them; `emit_batch()` map/filter/accumulate stages reuse one buffer instead of
   allocating one per stage.
-- Wall clock, `tests/bench_complex.py` on the same machine: compiled pipelines are 3.3x - 16.3x
+- Wall clock, `scripts/bench_complex.py` on the same machine: compiled pipelines are 3.3x - 16.3x
   faster per item than before this work, and 28x - 142x faster than streamz.
 - `to_text_file()` writes each line as one append with the GIL released, so other threads keep
   running during the file I/O and concurrent writers never interleave within a line.
@@ -123,7 +131,7 @@ independent of machine load:
   graphs of 100,000+ nodes, and no longer takes exponential time on stacked diamonds.
 - Adding nodes, compiling or profiling from a callback mid-emit raised `PanicException` (which
   `except Exception` doesn't catch) and could leave the source refusing every later `emit()`;
-  these are `RuntimeError`s now and the source recovers. `compile()` of a graph whose sink emits
+  these raise `akayu.BusyError` (a `RuntimeError`) now and the source recovers. `compile()` of a graph whose sink emits
   into or flushes its own source panicked.
 - Compiled graphs: a feedback loop through `sink(lambda x: other.emit(x))` skipped the
   re-entrancy check and recursed until it crashed, and an item coming back into a node still
@@ -200,6 +208,26 @@ independent of machine load:
   thread pool's size and the GIL cap concurrency, and several threading limits. The API reference
   shows `union()`, `zip()`, `combine_latest()` and `ProfileReport`, and the stub's docstrings say
   what each method raises.
+- `akayu.union()`, `zip()` and `combine_latest()` called from a callback while one of their inputs
+  was emitting raised `PanicException`; the method forms (`a.zip(b)`) silently built the wrong
+  graph (`union` left the busy input out, `zip` and `combine_latest` paired the other input with
+  itself). Both forms share one builder now, which raises `BusyError` and leaves the graph as it was.
+- A compiled `sink(print)` let the error of an item that can't be printed through unwrapped.
+- `compile()` kept what its lambda analysis captured alive: up to 8 graphs per lambda (a sink's
+  emit target, with everything it buffered), or captured lists. Results that capture anything
+  but plain values (numbers, strings, types, builtins) are no longer cached.
+- Steps before a `collect()` that `compile()` fuses into a chunk_by node read their globals on
+  every item instead of once at `compile()`, unlike every other compiled lambda, and a
+  `flatten()` among them lost every item (each chunk came out empty).
+- `import akayu` read a private table of the `dis` module outside any `try`: on a Python without
+  it, the import failed. Lambdas now run as plain Python there, with a warning.
+- `emit_batch()` into a source whose child `compile()` folded into a chain panicked; it raises
+  `NotASourceError` like `emit()`.
+- A callback calling a compiled node's `_update()` while that node was mid-update started a second,
+  nested update of it: undefined behaviour in Rust. The method is gone.
+- `compile()` could hand whole batches to branches whose lambdas change their items (`x.pop()`),
+  reordering those changes when one object was emitted twice. Only methods known to change
+  nothing count as independent now.
 
 ## 1.0.0
 
