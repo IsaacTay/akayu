@@ -30,3 +30,13 @@ def fast_switching():
     sys.setswitchinterval(1e-6)
     yield
     sys.setswitchinterval(old)
+
+
+@pytest.fixture(autouse=True)
+def _benchmarks_need_a_release_build(request):
+    """A benchmark of a debug build measures the debug build: skip it."""
+    if "benchmark" in request.fixturenames:
+        from akayu import akayu as native
+
+        if native._build != "release":
+            pytest.skip("benchmarks need a release build: run `just build-release`")

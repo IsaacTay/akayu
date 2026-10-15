@@ -562,6 +562,12 @@ def combine_latest_python():
 # ============================================================
 
 if __name__ == "__main__":
+    import sys
+
+    import akayu.akayu
+
+    if akayu.akayu._build != "release":
+        sys.exit("akayu is a debug build: run `just build-release` first")
     topologies = [
         (
             "Deep Pipeline (10 maps)",
