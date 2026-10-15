@@ -51,9 +51,11 @@ its streams. Likewise, compiling a node below the source leaves the source open.
 
 ### Example of Modifying a Compiled Graph
 
-<!--pytest.mark.skip-->
+<!--pytest.mark.xfail(strict=True)-->
 
 ```python
+import akayu
+
 source = akayu.Stream()
 branch = source.map(lambda x: x + 1)
 
