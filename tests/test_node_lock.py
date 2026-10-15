@@ -164,8 +164,10 @@ def test_a_cycle_through_a_merge_lock_held_by_a_third_thread_raises():
     inside a union (its lock) and emits into d, T1 holds d and emits into c,
     T2 holds c and emits into the union's other input. The waits used to be
     checked only through sources, and a merge's lock held by a third thread
-    ended the search: all three waited forever. Now the thread that
-    completes the cycle raises DeadlockError, and the other two finish."""
+    ended the search: all three waited forever. The callbacks form a loop
+    across threads; an emit into a source raises, as a re-entrant emit, and
+    the rest go on. (Which one raises decides whether the union's other item
+    later meets the same loop again: one or two errors, never a hang.)"""
     code, last = run_script("""
         import threading, time, akayu
         a, z, c, d = (akayu.Stream() for _ in range(4))
@@ -191,10 +193,10 @@ def test_a_cycle_through_a_merge_lock_held_by_a_third_thread_raises():
         for t in threads:
             t.join(20)
         hung = any(t.is_alive() for t in threads)
-        deadlock = [type(e.__cause__ or e).__name__ for e in errors]
-        print(hung, deadlock)
+        kinds = {type(e.__cause__ or e).__name__ for e in errors}
+        print(hung, sorted(kinds), 1 <= len(errors) <= 2)
     """)
-    assert (code, last) == (0, "False ['DeadlockError']")
+    assert (code, last) == (0, "False ['ReentrantError'] True")
 
 
 def test_a_prefetched_call_may_emit_into_a_source_merged_with_its_own(compiled):

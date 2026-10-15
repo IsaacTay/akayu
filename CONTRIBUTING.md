@@ -154,7 +154,7 @@ The project includes a comprehensive test suite using `pytest`.
 
 | Command | Description |
 |---------|-------------|
-| `just test-quick` | Build + run tests, skipping benchmarks (`--benchmark-skip`) and tests marked `slow`; about 3 minutes |
+| `just test-quick` | Build + run tests, skipping benchmarks (`--benchmark-skip`) and tests marked `slow`; about 3 minutes. Tests marked `timing` measure CPU time: on a heavily loaded machine, deselect them with `-m 'not timing'` |
 | `just test` | Build + run all tests, including benchmarks |
 | `just test-py314` | Build a cp314 wheel and run the quick tests on Python 3.14 |
 | `just bench` | Build release + run benchmarks only |

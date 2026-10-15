@@ -180,6 +180,7 @@ def in_parallel(attempt, tries=3):
     pytest.fail("it took turns every time: " + ", ".join(seen))
 
 
+@pytest.mark.timing
 def test_numpy_par_branches_run_at_the_same_time():
     """They do because numpy releases the GIL and akayu doesn't hold it."""
 
@@ -207,6 +208,7 @@ def test_numpy_par_branches_run_at_the_same_time():
     assert in_parallel(attempt)
 
 
+@pytest.mark.timing
 def test_prefetched_numpy_work_runs_at_the_same_time_and_stays_in_order():
     def attempt():
         cpu, lock = [], threading.Lock()

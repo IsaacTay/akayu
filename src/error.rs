@@ -43,7 +43,8 @@ pub(crate) mod exc {
         StreamError,
         "A callback re-entered the graph it runs in.\n\n\
          It emitted into a source its own item came from, or flushed a node\n\
-         that is mid-flush: the graph has a loop. Restructure the pipeline."
+         that is mid-flush: the graph has a loop, maybe across threads (their\n\
+         callbacks emitting into each other's sources). Restructure the pipeline."
     );
     pyo3::create_exception!(
         akayu,
@@ -56,8 +57,10 @@ pub(crate) mod exc {
         akayu,
         DeadlockError,
         StreamError,
-        "Waiting would never end: whoever holds what this thread needs is\n\
-         waiting for this thread."
+        "Waiting would never end: whoever holds the lock this thread needs is\n\
+         waiting for this thread, and no callback closes a loop (that would be\n\
+         a ReentrantError): two emits sharing a lock compile() gave their graph,\n\
+         say."
     );
 }
 
@@ -142,11 +145,10 @@ pub enum StreamError {
     BusySource,
 
     #[error(
-        "Waiting here would never end: the thread holding what this thread needs waits, \
-         directly or through other threads, for this one. A prefetch() or par() call that emits \
-         into a graph its caller is emitting through, or threads whose callbacks emit into each \
-         other's graphs, do this. Emit after the other emit returns, or pass items between the \
-         threads through a queue."
+        "Waiting here would never end: the thread holding the lock this thread needs waits, \
+         directly or through other threads, for this one (a par() or prefetch() call emitting \
+         into a stream that merges into the graph its caller is emitting through, say). Emit \
+         after the other emit returns, or pass items between the threads through a queue."
     )]
     WaitCycle,
 

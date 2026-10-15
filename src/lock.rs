@@ -15,11 +15,23 @@
 //! waiting for a lock follows the chain: the lock's holder, what the holder
 //! waits for (a lock's holder, or the threads running its tasks), and so on.
 //! A chain that comes back to this thread is a wait that would never end:
-//! the thread raises instead of waiting (`DeadlockError`, or the re-entrancy
-//! error of the source it waited for), and drops what it holds. It takes
+//! the thread raises instead of waiting, and drops what it holds. It takes
 //! itself off the list in the same step, under `WAITING`'s mutex, so of the
-//! threads in a cycle exactly one gives up. A thread waiting for tasks never
-//! gives up: the task's thread waiting for a lock does.
+//! threads in a cycle exactly one gives up. Which one:
+//!
+//! - A thread waiting for a source's lock (an emit or flush called from a
+//!   callback) gives up first. A source that is busy is being emitted into
+//!   by an emit that waits, through the cycle, for this callback: the
+//!   callback closes a loop in the data, as a callback emitting into its own
+//!   source does on one thread, and gets the same re-entrancy error
+//!   (`ReentrantError`). A source that is idle only shares a lock (compile()
+//!   gives a graph one): `DeadlockError`.
+//! - A thread waiting for any other lock (a merge's, a flushed node's) gives
+//!   up only if no thread in the cycle waits for a source; otherwise it
+//!   keeps waiting and that one gives up at its next check. Then it raises
+//!   `DeadlockError`.
+//! - A thread waiting for pool tasks never gives up: the task's thread
+//!   waiting for a lock does.
 //!
 //! # What refuses what
 //!
@@ -29,7 +41,7 @@
 //! | PyO3's borrow flag | a node | an update or flush of it (uncompiled) | an item re-entering it (`ReentrantError`); a change mid-emit (`BusyError`) |
 //! | `Stream::busy` | a compiled node, if `guard_reentry` | a compiled update | as the borrow flag, which raw pointers bypass |
 //! | `Stream::flushing` | a node | its flush() or drain() | a flush re-entering it (`ReentrantError`) |
-//! | `NodeLock` | a node (one per compiled graph without par()/prefetch()) | an emit, flush or locked update | other threads: they wait, unless that would never end (`DeadlockError`) |
+//! | `NodeLock` | a node (one per compiled graph without par()/prefetch()) | an emit, flush or locked update | other threads: they wait, unless that would never end (see above) |
 
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -72,22 +84,34 @@ impl NodeLock {
     /// it with their error.
     #[inline]
     pub(crate) fn acquire(self: &Arc<Self>, py: Python) -> PyResult<NodeLockGuard<'_>> {
-        self.acquire_or(py, |_| StreamError::WaitCycle.into())
+        self.acquire_as(py, false, &|| StreamError::WaitCycle.into())
     }
 
-    /// `acquire`, raising `on_cycle(cycle)` for a wait that would never end.
+    /// `acquire` for a source's lock (`Stream::enter_source`), raising
+    /// `on_cycle()` for a wait that would never end. Such a wait gives up
+    /// before the other waits of its cycle (see the module's notes).
     #[inline]
-    pub(crate) fn acquire_or(
+    pub(crate) fn acquire_source(
         self: &Arc<Self>,
         py: Python,
-        on_cycle: impl Fn(Cycle) -> PyErr,
+        on_cycle: &dyn Fn() -> PyErr,
+    ) -> PyResult<NodeLockGuard<'_>> {
+        self.acquire_as(py, true, on_cycle)
+    }
+
+    #[inline(always)]
+    fn acquire_as(
+        self: &Arc<Self>,
+        py: Python,
+        source: bool,
+        on_cycle: &dyn Fn() -> PyErr,
     ) -> PyResult<NodeLockGuard<'_>> {
         let me = this_thread();
         if self.owner.load(Relaxed) == me {
             self.depth.store(self.depth.load(Relaxed) + 1, Relaxed);
         } else {
             if !self.raw.try_lock() {
-                self.wait(py, me, &on_cycle)?;
+                self.wait(py, me, source, on_cycle)?;
             }
             self.owner.store(me, Relaxed);
             self.depth.store(1, Relaxed);
@@ -101,12 +125,14 @@ impl NodeLock {
         self: &Arc<Self>,
         py: Python,
         me: usize,
-        on_cycle: &dyn Fn(Cycle) -> PyErr,
+        source: bool,
+        on_cycle: &dyn Fn() -> PyErr,
     ) -> PyResult<()> {
-        let waiting = Waiting::new(me, WaitingOn::Lock(Arc::clone(self)));
+        let lock = Arc::clone(self);
+        let waiting = Waiting::new(me, WaitingOn::Lock { lock, source });
         loop {
-            if let Some(cycle) = waiting.would_wait_forever() {
-                return Err(on_cycle(cycle));
+            if waiting.would_wait_forever() {
+                return Err(on_cycle());
             }
             if py.detach(|| self.raw.try_lock_for(RECHECK)) {
                 return Ok(());
@@ -148,8 +174,8 @@ pub(crate) fn this_thread() -> usize {
 
 /// What a waiting thread waits for.
 pub(crate) enum WaitingOn {
-    /// A lock: its holder.
-    Lock(Arc<NodeLock>),
+    /// A lock: its holder. `source`: a source's lock.
+    Lock { lock: Arc<NodeLock>, source: bool },
     /// Pool tasks it submitted: the threads running them.
     Tasks(Vec<Arc<crate::pool::Task>>),
 }
@@ -158,7 +184,7 @@ impl WaitingOn {
     /// The threads this waits for (0 for none).
     fn holders(&self) -> impl Iterator<Item = usize> + '_ {
         let (lock, tasks) = match self {
-            Self::Lock(lock) => (Some(lock.owner()), &[][..]),
+            Self::Lock { lock, .. } => (Some(lock.owner()), &[][..]),
             Self::Tasks(tasks) => (None, &tasks[..]),
         };
         lock.into_iter()
@@ -179,18 +205,6 @@ struct Waiter {
 static WAITING: Mutex<Vec<Waiter>> = Mutex::new(Vec::new());
 static NEXT_WAIT: AtomicU64 = AtomicU64::new(0);
 
-/// How a wait that would never end comes back to the waiting thread.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Cycle {
-    /// The lock's holder waits for pool tasks this thread runs (directly, or
-    /// through tasks those run): this thread is doing part of the holder's
-    /// work, a par() branch or prefetched call of its emit.
-    Tasks,
-    /// Through another lock: independent emits (or flushes) waiting for each
-    /// other.
-    Locks,
-}
-
 /// Lists this thread in `WAITING` until dropped.
 pub(crate) struct Waiting(u64);
 
@@ -201,33 +215,42 @@ impl Waiting {
         Self(id)
     }
 
-    /// Whether the threads this one waits for wait, directly or through
-    /// other waiting threads, for this one. If so, this wait is taken off the
-    /// list right away: its thread gives up, and the others in the cycle,
-    /// checking after it, see the cycle broken.
-    fn would_wait_forever(&self) -> Option<Cycle> {
+    /// Whether this thread should give up its wait: the threads it waits
+    /// for wait, directly or through other waiting threads, for this one, and
+    /// (unless this is a source's lock) none of them waits for a source's
+    /// lock, which gives up first (see the module's notes). If so, this wait
+    /// is taken off the list right away: the others in the cycle, checking
+    /// after it, see the cycle broken.
+    fn would_wait_forever(&self) -> bool {
         let mut waiting = lock_waiting();
-        let at = waiting.iter().position(|w| w.id == self.0)?;
+        let Some(at) = waiting.iter().position(|w| w.id == self.0) else {
+            return false;
+        };
         let me = waiting[at].thread;
-        // (thread, whether the chain to it went through another lock)
+        let i_wait_for_a_source = matches!(waiting[at].on, WaitingOn::Lock { source: true, .. });
+        // (thread, whether the chain to it passed a thread waiting for a source)
         let mut todo: Vec<(usize, bool)> = waiting[at].on.holders().map(|t| (t, false)).collect();
         let mut seen = Vec::new();
-        while let Some((thread, via_lock)) = todo.pop() {
+        while let Some((thread, via_source)) = todo.pop() {
             if thread == me {
-                waiting.remove(at);
-                return Some(if via_lock { Cycle::Locks } else { Cycle::Tasks });
+                if i_wait_for_a_source || !via_source {
+                    waiting.remove(at);
+                    return true;
+                }
+                continue; // that source's waiter gives up instead
             }
-            if thread == 0 || seen.contains(&(thread, via_lock)) {
+            if thread == 0 || seen.contains(&(thread, via_source)) {
                 continue;
             }
-            seen.push((thread, via_lock));
+            seen.push((thread, via_source));
             // What it waits for now: its innermost wait, listed last.
             if let Some(waiter) = waiting.iter().rev().find(|w| w.thread == thread) {
-                let via_lock = via_lock || matches!(waiter.on, WaitingOn::Lock(_));
-                todo.extend(waiter.on.holders().map(|t| (t, via_lock)));
+                let via_source =
+                    via_source || matches!(waiter.on, WaitingOn::Lock { source: true, .. });
+                todo.extend(waiter.on.holders().map(|t| (t, via_source)));
             }
         }
-        None
+        false
     }
 }
 
@@ -344,20 +367,19 @@ pub(crate) struct EnteredSource<'a> {
 impl Stream {
     /// Enter this source to emit into it (`flush`: to flush or drain it).
     /// Every way into a source goes through here: lock, check the node is a
-    /// source, mark it. A wait for the lock that would never end raises: as
-    /// a re-entrant emit or flush when this thread is doing part of the
-    /// source's own emit (a par() branch or prefetched call emitting into the
-    /// source it runs under), as `DeadlockError` otherwise (threads emitting
-    /// into each other's sources).
+    /// source, mark it. A wait for the lock that would never end raises the
+    /// error a re-entrant emit or flush gets when the source is busy (a
+    /// callback closing a loop, across threads), `DeadlockError` when it is
+    /// idle (see the notes on waiting above).
     #[inline(always)]
     pub(crate) fn enter_source(&self, py: Python, flush: bool) -> PyResult<EnteredSource<'_>> {
-        let guard =
-            self.lock
-                .acquire_or(py, |cycle| match (cycle, self.emitting.load(Relaxed)) {
-                    (Cycle::Locks, _) | (_, IDLE) => StreamError::WaitCycle.into(),
-                    (Cycle::Tasks, state) if flush => refused_flush(state),
-                    (Cycle::Tasks, state) => refused(state, &self.name),
-                })?;
+        let guard = self
+            .lock
+            .acquire_source(py, &|| match self.emitting.load(Relaxed) {
+                IDLE => StreamError::WaitCycle.into(),
+                state if flush => refused_flush(state),
+                state => refused(state, &self.name),
+            })?;
         if !matches!(self.logic, crate::node::NodeLogic::Source) {
             return Err(not_a_source(&self.name));
         }

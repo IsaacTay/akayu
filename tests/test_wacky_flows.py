@@ -368,9 +368,10 @@ def test_a_timer_flushes_a_collect_while_a_thread_emits(compiled):
 def test_a_timer_flush_feeding_back_into_a_busy_source(compiled):
     # The flush's callback emits into the source another thread is emitting
     # into, while that thread's item waits for the flush. Uncompiled, the
-    # thread completing that cycle raises DeadlockError instead of waiting
-    # (the item's emit, or the flush) and every item is accounted for;
-    # compiled, the graph's one lock lets the two take turns.
+    # callback's emit closes the loop and is refused (a ReentrantError the
+    # flush raises), while the item goes on: no item is lost. (It used to be
+    # the other way round, after the item had waited 50 ms.) Compiled, the
+    # graph's one lock lets the two take turns.
     code, last = run_script(
         f"""
         import akayu, threading, time
@@ -400,9 +401,8 @@ def test_a_timer_flush_feeding_back_into_a_busy_source(compiled):
             while e.__cause__ is not None:
                 e = e.__cause__
             return e
-        lost = len(errors)
-        named = all(isinstance(root(e), akayu.DeadlockError) for e in errors + flush_errors)
-        print(sum(sizes) + lost == 1000, named, lost + len(flush_errors) if {compiled} else "-")
+        named = all(isinstance(root(e), akayu.ReentrantError) for e in flush_errors)
+        print(sum(sizes) == 1000 and not errors, named, len(flush_errors) if {compiled} else "-")
     """,
         timeout=60,
     )
@@ -1204,9 +1204,10 @@ def test_prefetched_calls_emitting_into_a_shared_stream(compiled):
 
 
 def test_threads_emitting_into_each_others_sources_raise_instead_of_deadlocking(compiled):
-    """Each holds its own source and waits for the other's: the thread that
-    completes the cycle raises DeadlockError, exactly one of them. Both used
-    to wait forever; then one (rarely both) raised as a re-entrant emit."""
+    """Each holds its own source and waits for the other's: a loop through
+    the two callbacks, across threads. Exactly one raises, as a re-entrant
+    emit; the other finishes. Both used to wait forever, then one (rarely
+    both) raised."""
     code, last = run_script(
         f"""
         import threading, time, akayu
@@ -1235,9 +1236,9 @@ def test_threads_emitting_into_each_others_sources_raise_instead_of_deadlocking(
         for t in threads:
             t.join(20)
         hung = any(t.is_alive() for t in threads)
-        deadlock = all(isinstance(e.__cause__ or e, akayu.DeadlockError) for e in errors)
+        reentrant = all(isinstance(e.__cause__ or e, akayu.ReentrantError) for e in errors)
         # One raises and the other finishes.
-        print(hung, len(errors) == 1 and sorted(got) == ["crossed", "first"], deadlock)
+        print(hung, len(errors) == 1 and sorted(got) == ["crossed", "first"], reentrant)
     """,
         timeout=60,
     )
