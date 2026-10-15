@@ -203,7 +203,7 @@ impl Stream {
             NodeLogic::ChunkBy(boxed) => {
                 let ChunkByState { buffer, order, .. } = &mut **boxed;
                 let emit_empty = matches!(order, ChunkOrder::Fused { .. });
-                if let Some(chunk) = crate::execution::chunk_take(py, buffer, emit_empty)? {
+                if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
                     self.propagate(py, chunk)?;
                 }
             }
@@ -284,7 +284,7 @@ impl Stream {
             NodeLogic::ChunkBy(boxed) => {
                 let ChunkByState { buffer, order, .. } = &mut **boxed;
                 let emit_empty = matches!(order, ChunkOrder::Fused { .. });
-                if let Some(chunk) = crate::execution::chunk_take(py, buffer, emit_empty)? {
+                if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
                     self.propagate(py, chunk)?;
                 }
             }

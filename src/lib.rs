@@ -20,6 +20,7 @@ mod execution;
 mod gc;
 mod helpers;
 mod lock;
+mod native;
 mod node;
 mod numeric;
 mod operations;
@@ -28,6 +29,7 @@ mod pool;
 mod prefetch;
 mod profiling;
 mod stack;
+mod steps;
 
 // Re-exports
 pub use combinators::{combine_latest, union, zip};
