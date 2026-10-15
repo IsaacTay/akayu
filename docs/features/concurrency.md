@@ -336,16 +336,20 @@ Where the locks are:
   threads.
 - Each item entering a `par()` branch takes that branch's lock.
 - When `par()` branches converge, `compile()` marks every node in those branches to lock per item.
-- In a graph without `par()`, `compile()` gives every node one shared lock instead: each `emit()`
-  already takes it, so the per-item locks on merges are dropped.
+- In a graph without `par()` or `prefetch()`, `compile()` gives every node one shared lock
+  instead: each `emit()` already takes it, so the per-item locks on merges are dropped. (With
+  `par()` or `prefetch()`, pool threads do part of an emit while the emitting thread holds its
+  lock and waits for them; one of them emitting into another source of the graph would wait for
+  that lock forever, so those graphs keep their locks.)
 
 ### Callbacks, Re-entrancy and Limits
 
 - `flush()` and `drain()` may be called from another thread (a timer flushing a `collect()`, an
   `atexit` handler) while other threads emit: they wait for a running emit to finish, and an
   `emit()`, or an item reaching the node being flushed, waits for a running flush. In an
-  uncompiled graph, if that flush's callbacks emit into the source the waiting item came from,
-  the item fails with an error instead of deadlocking; `compile()` lets the two take turns.
+  uncompiled graph, if that flush's callbacks emit into the source the waiting item came from, the
+  two would wait for each other: the one whose wait completes that cycle (the item's `emit()`, or
+  the flush) raises `akayu.DeadlockError` instead. `compile()` lets the two take turns.
 - Known limitation: in an uncompiled graph, `flush()` / `drain()` called on a node other than a
   source waits at most half a second for another thread's item inside that node, then raises
   `akayu.BusyError` saying the node "is still processing an item (a callback flushed mid-emit…)",
@@ -360,16 +364,18 @@ Where the locks are:
   running, raises `akayu.BusyError`; the graph keeps working afterwards. The same goes for another
   thread doing so while an item passes through: build the graph before threads emit into it.
 - Two threads whose callbacks emit into each other's sources would each wait for the other's
-  source forever. Instead, the thread that finds the other one waiting for it fails with
-  "Re-entrant emit detected" (rarely, both do), and the other finishes. The same goes for a `par()`
-  branch or prefetched call that emits into, or flushes, the source it runs under. Sources that
-  merge (`union`, `zip`, `combine_latest`) in a graph without `par()`, compiled, share one lock, so
-  there the threads take turns. To pass items between such threads without failures, hand them to
-  a queue instead of emitting them from the callback.
-- akayu sees who waits for whom through sources and `par()`/`prefetch()` work only. A cycle that
-  also runs through a thread waiting for a lock inside a graph (where branches or sources merge),
-  held by a third thread, can still deadlock. Ctrl+C interrupts a thread waiting to emit into or
-  flush a source, but one waiting for a lock inside a graph sees it only once it has the lock.
+  source forever. Instead, the thread whose wait would complete the cycle raises
+  `akayu.DeadlockError`, and the other finishes. A `par()` branch or prefetched call that emits
+  into, or flushes, the source it runs under is part of that source's own emit: it raises
+  `akayu.ReentrantError`, as a callback emitting into its own source does. Sources that merge
+  (`union`, `zip`, `combine_latest`) in a compiled graph without `par()` or `prefetch()` share one
+  lock, so there the threads take turns. To pass items between such threads without failures,
+  hand them to a queue instead of emitting them from the callback.
+- Every akayu lock records the thread holding it, and every thread waiting for one, or for
+  `par()`/`prefetch()` work, is recorded with what it waits for. So any cycle of such waits is
+  caught, however many threads and locks (sources, merges, `par()` branches) it runs through. A
+  cycle through something akayu can't see, such as your own `threading.Lock` or a queue, can still
+  deadlock. Ctrl+C interrupts a thread waiting for any akayu lock.
 - Each node an item passes adds to the thread's native stack. A graph thousands of nodes deep, a
   long chain of sources feeding each other, or a thread with a small stack raises `RecursionError`
   when the stack is nearly used up, rather than crashing; so do `flush()` and `drain()`.

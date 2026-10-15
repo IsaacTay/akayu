@@ -158,3 +158,85 @@ def test_many_threads_on_one_source():
     assert len(seen) == 4000
     for k in range(8):  # each thread's items stay in its own order
         assert [i for (kk, i) in seen if kk == k] == list(range(500))
+
+
+def _run_script(code, timeout=60):
+    """Run `code` in a fresh interpreter (a deadlock there can't hang the
+    suite): (exit code, last line of output)."""
+    import subprocess
+    import sys
+    import textwrap
+
+    r = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    lines = (r.stdout + r.stderr).strip().splitlines()
+    return r.returncode, lines[-1] if lines else ""
+
+
+def test_a_cycle_through_a_merge_lock_held_by_a_third_thread_raises():
+    """Three threads, each holding one lock and waiting for the next: T3 is
+    inside a union (its lock) and emits into d, T1 holds d and emits into c,
+    T2 holds c and emits into the union's other input. The waits used to be
+    checked only through sources, and a merge's lock held by a third thread
+    ended the search: all three waited forever. Now the thread that
+    completes the cycle raises DeadlockError, and the other two finish."""
+    code, last = _run_script("""
+        import threading, time, akayu
+        a, z, c, d = (akayu.Stream() for _ in range(4))
+        got, errors = [], []
+        def later(target, value):
+            def callback(x):
+                time.sleep(0.2)  # every thread holds its first lock by now
+                target.emit(value)
+                got.append(x)
+            return callback
+        akayu.union(a, z).sink(later(d, "from the union"))
+        d.sink(lambda x: x == "first" and later(c, "from d")(x))
+        c.sink(lambda x: x == "first" and later(z, "from c")(x))
+        def run(source):
+            try:
+                source.emit("first")
+            except RuntimeError as e:
+                errors.append(e)
+        threads = [threading.Thread(target=run, args=(s,), daemon=True) for s in (a, d, c)]
+        for t in threads:
+            t.start()
+            time.sleep(0.05)
+        for t in threads:
+            t.join(20)
+        hung = any(t.is_alive() for t in threads)
+        deadlock = [type(e.__cause__ or e).__name__ for e in errors]
+        print(hung, deadlock)
+    """)
+    assert (code, last) == (0, "False ['DeadlockError']")
+
+
+@pytest.mark.parametrize("compiled", [False, True])
+def test_a_prefetched_call_may_emit_into_a_source_merged_with_its_own(compiled):
+    """compile() gave a graph without par() one lock, so a prefetched call
+    on `a` emitting into `b` (merged with `a`) waited for the lock its own
+    caller held while waiting for it: compiled, it hung. Graphs with
+    prefetch() keep their locks, as with par()."""
+    code, last = _run_script(f"""
+        import time, akayu
+        a, b = akayu.Stream(), akayu.Stream()
+        out = []
+        akayu.union(a, b).sink(out.append)
+        def f(x):
+            time.sleep(0.02)  # a pool worker claims the task meanwhile
+            b.emit(x * 10)
+            return x
+        a.prefetch(2).map(f).sink(out.append)
+        if {compiled}:
+            a.compile(); b.compile()
+        for i in range(1, 5):
+            a.emit(i)
+        a.flush()
+        print(sorted(out))
+    """)
+    assert (code, last) == (0, "[1, 1, 2, 2, 3, 3, 4, 4, 10, 20, 30, 40]")
