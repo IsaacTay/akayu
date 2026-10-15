@@ -14,6 +14,10 @@
 //! only fields that propagation never writes keeps that safe. Skipping a
 //! reference is always safe for the GC: it only means a cycle running
 //! *through* buffered data is not collected.
+//!
+//! Every struct visited here is destructured field by field, without `..`: a
+//! new field holding a Python reference fails to compile until it is either
+//! visited or listed as skipped.
 
 use std::sync::{PoisonError, TryLockError};
 
@@ -21,7 +25,9 @@ use pyo3::prelude::*;
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::Stream;
-use crate::node::{BuiltinOp, ChainNode, ChunkByState, ExtractBetweenState, NodeLogic};
+use crate::node::{
+    BuiltinOp, ChainNode, ChunkByState, EagerOp, ExtractBetweenState, MethodCall, NodeLogic,
+};
 
 fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
     match op {
@@ -37,9 +43,15 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         | BuiltinOp::NotContains(obj) => visit.call(obj),
         BuiltinOp::AttrGetter(name) | BuiltinOp::HasAttr(name) => visit.call(name),
         BuiltinOp::MethodCall(call) => {
-            visit.call(&call.name)?;
-            call.args.iter().try_for_each(|arg| visit.call(arg))?;
-            call.direct.iter().try_for_each(|(tp, method)| {
+            let MethodCall {
+                name,
+                args,
+                direct,
+                pure: _,
+            } = &**call;
+            visit.call(name)?;
+            args.iter().try_for_each(|arg| visit.call(arg))?;
+            direct.iter().try_for_each(|(tp, method)| {
                 visit.call(tp)?;
                 visit.call(method)
             })
@@ -51,11 +63,13 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         BuiltinOp::TupleConstruct(ops) | BuiltinOp::ListConstruct(ops) => {
             ops.iter().try_for_each(|op| visit_builtin(op, visit))
         }
+        // The program holds only unboxed numbers.
         BuiltinOp::Numeric(_, generic) => visit_builtin(generic, visit),
         BuiltinOp::Eager(eager) => {
-            visit.call(&eager.func)?;
-            visit.call(&eager.code)?;
-            visit_builtin(&eager.op, visit)
+            let EagerOp { func, code, op } = eager;
+            visit.call(func)?;
+            visit.call(code)?;
+            visit_builtin(op, visit)
         }
         BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
             visit_builtin(a, visit)?;
@@ -89,9 +103,12 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
         | NodeLogic::BatchMap { func } => visit.call(func),
         NodeLogic::Filter { predicate } => visit.call(predicate),
         // `state` is replaced on every item, so it is not visited.
-        NodeLogic::Accumulate { func, .. } => visit.call(func),
-        // Items in flight change on every update, so they are not visited.
-        NodeLogic::Prefetched { prefetcher } => visit.call(&prefetcher.func),
+        NodeLogic::Accumulate {
+            func,
+            state: _,
+            returns_state: _,
+        } => visit.call(func),
+        NodeLogic::Prefetched { prefetcher } => prefetcher.traverse(visit),
         NodeLogic::Chain { steps } => steps
             .iter()
             .try_for_each(|step| visit_chain_node(step, visit)),
@@ -99,7 +116,8 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
             let ChunkByState {
                 predicate,
                 pre_buffer_chain,
-                ..
+                buffer: _,
+                order: _,
             } = &**boxed;
             visit.call(predicate)?;
             pre_buffer_chain
@@ -107,42 +125,79 @@ fn visit_logic(logic: &NodeLogic, visit: &PyVisit<'_>) -> Result<(), PyTraverseE
                 .try_for_each(|step| visit_chain_node(step, visit))
         }
         NodeLogic::ExtractBetween(boxed) => {
-            let ExtractBetweenState { open, close, .. } = &**boxed;
+            let ExtractBetweenState {
+                open,
+                close,
+                buffer: _,
+                inside: _,
+                close_vectorcall: _,
+            } = &**boxed;
             visit.call(open)?;
             visit.call(close)
         }
         // Nothing to visit, or only buffers/state that propagation mutates.
-        NodeLogic::Source
-        | NodeLogic::Flatten
-        | NodeLogic::Collect { .. }
-        | NodeLogic::Tag { .. }
+        NodeLogic::Collect { buffer: _ }
         | NodeLogic::CombineLatest(_)
-        | NodeLogic::Zip { .. }
+        | NodeLogic::Zip { buffers: _ }
+        | NodeLogic::Source
+        | NodeLogic::Flatten
+        | NodeLogic::Tag { index: _ }
         | NodeLogic::Parallel
-        | NodeLogic::Prefetch { .. }
-        | NodeLogic::ChainMember { .. } => Ok(()),
+        | NodeLogic::Prefetch { size: _ }
+        | NodeLogic::ChainMember { was_sink: _ } => Ok(()),
     }
 }
 
 fn visit_chain_node(step: &ChainNode, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
-    visit_logic(&step.logic, visit)?;
-    if let Some(op) = &step.builtin_op {
+    let ChainNode {
+        logic,
+        builtin_op,
+        flush_target,
+        emit_target,
+        name: _,
+        source_location: _,
+        node_id: _,
+        cached_vectorcall: _,
+        numeric_run: _,
+    } = step;
+    visit_logic(logic, visit)?;
+    if let Some(op) = builtin_op {
         visit_builtin(op, visit)?;
     }
-    visit.call(&step.flush_target)?;
-    visit.call(&step.emit_target)
+    visit.call(flush_target)?;
+    visit.call(emit_target)
 }
 
 #[pymethods]
 impl Stream {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for downstream in &self.downstreams {
+        let Stream {
+            logic,
+            downstreams,
+            parents,
+            flush_target,
+            emit_target,
+            builtin_op,
+            name: _,
+            locks_children: _,
+            compiled: _,
+            source_location: _,
+            cached_vectorcall: _,
+            chainable: _,
+            batch_fanout: _,
+            flushing: _,
+            emitting: _,
+            busy: _,
+            guard_reentry: _,
+            lock: _,
+        } = self;
+        for downstream in downstreams {
             visit.call(&downstream.node)?;
         }
         // Never block inside the GC. If another thread holds the lock, skip
         // the parents: the GC then treats them as externally referenced, so
         // the cycle is just not collected this time.
-        let parents = match self.parents.try_lock() {
+        let parents = match parents.try_lock() {
             Ok(guard) => Some(guard),
             Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
             Err(TryLockError::WouldBlock) => None,
@@ -152,10 +207,10 @@ impl Stream {
                 visit.call(parent)?;
             }
         }
-        visit.call(&self.flush_target)?;
-        visit.call(&self.emit_target)?;
-        visit_logic(&self.logic, &visit)?;
-        if let Some(op) = &self.builtin_op {
+        visit.call(flush_target)?;
+        visit.call(emit_target)?;
+        visit_logic(logic, &visit)?;
+        if let Some(op) = builtin_op {
             visit_builtin(op, &visit)?;
         }
         Ok(())
@@ -174,8 +229,6 @@ impl Stream {
         self.logic = NodeLogic::Source;
         self.builtin_op = None;
         self.cached_vectorcall = None;
-        self.frozen = false;
-        self.compiled_chainable = false;
-        self.compiled_filter_fast = false;
+        self.chainable = false;
     }
 }

@@ -149,7 +149,7 @@ The project includes a comprehensive test suite using `pytest`.
 
 | Command | Description |
 |---------|-------------|
-| `just test-quick` | Build + run tests (skipping benchmarks), about 2 minutes |
+| `just test-quick` | Build + run tests (skipping benchmarks), about 3 minutes |
 | `just test` | Build + run all tests, including benchmarks |
 | `just test-py314` | Build a cp314 wheel and run the quick tests on Python 3.14 |
 | `just bench` | Build release + run benchmarks only |
@@ -167,7 +167,7 @@ uv run python -m pytest tests/test_benchmark.py -v  # Run benchmarks
 `just bench` and `just bench-cost` build a release extension, while `just build` and the test
 recipes leave a debug build installed: run `just build-release` before timing anything by hand.
 `bench-cost` counts instructions rather than time, so its numbers hold up on a busy machine;
-`tests/bench_complex.py` is the wall-clock comparison against streamz behind
+`scripts/bench_complex.py` is the wall-clock comparison against streamz behind
 `docs/benchmarks.md`.
 
 ### Fuzzers

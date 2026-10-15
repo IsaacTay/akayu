@@ -89,7 +89,7 @@ filtered.sink(results.append)
 ### Emitting Data
 
 !!! warning "Source Nodes Only"
-    Data can only be emitted into **source** nodes (nodes created with `Stream()`). Trying to emit data into derived nodes (like those returned by `.map()` or `.filter()`) raises a `RuntimeError`.
+    Data can only be emitted into **source** nodes (nodes created with `Stream()`). Trying to emit data into derived nodes (like those returned by `.map()` or `.filter()`) raises `akayu.NotASourceError`.
 
 ```mermaid
 flowchart LR
@@ -165,13 +165,13 @@ import akayu
 source = akayu.Stream()
 mapped = source.map(lambda x: x * 2)
 
-mapped.emit(5)  # ❌ RuntimeError: Cannot emit to non-source node
+mapped.emit(5)  # ❌ akayu.NotASourceError: Emit called on non-source node
 ```
 
 **Error:**
 
 ```
-RuntimeError: Emit called on non-source node 'map(<lambda>)'. Data can only be emitted into source nodes.
+akayu.NotASourceError: Emit called on non-source node 'map(<lambda>)'. Data can only be emitted into source nodes.
 ```
 
 **Fix:** Always emit to the original source node:
@@ -200,7 +200,7 @@ filtered = doubled.filter(lambda x: x > 10, stream_name="filter_gt_10")
 If an error occurs, the name is included:
 
 ```
-RuntimeError: Emit called on non-source node 'double'. ...
+akayu.NotASourceError: Emit called on non-source node 'double'. ...
 ```
 
 All transform methods support `stream_name`: `map`, `filter`, `sink`, `flatten`,

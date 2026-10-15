@@ -554,3 +554,84 @@ def test_narrowing_with_extra_args():
         s.emit(1)
     msg = str(exc.value)
     assert "map(add_n)" in msg
+
+
+class TestErrorTypes:
+    """Every error about a graph's state is an akayu.StreamError, itself a
+    RuntimeError, so `except RuntimeError` keeps working."""
+
+    def test_hierarchy(self):
+        for cls in (
+            akayu.CallbackError,
+            akayu.FrozenGraphError,
+            akayu.NotASourceError,
+            akayu.ReentrantError,
+            akayu.BusyError,
+            akayu.DeadlockError,
+        ):
+            assert issubclass(cls, akayu.StreamError)
+            assert cls.__module__ == "akayu"
+        assert issubclass(akayu.StreamError, RuntimeError)
+
+    @pytest.mark.parametrize("compiled", [False, True])
+    def test_callback_error_names_the_node(self, compiled):
+        s = akayu.Stream()
+        s.map(lambda x: 1 / x, stream_name="inverse").sink([].append)
+        if compiled:
+            s.compile()
+        with pytest.raises(akayu.CallbackError) as info:
+            s.emit(0)
+        assert info.value.node == "inverse"
+        assert info.value.location.startswith(__file__)
+        assert isinstance(info.value.__cause__, ZeroDivisionError)
+
+    def test_a_wrapped_error_is_not_wrapped_again(self):
+        s = akayu.Stream()
+        inner = akayu.Stream()
+        inner.map(lambda x: 1 / x).sink([].append)
+        s.sink(inner.emit)
+        with pytest.raises(akayu.CallbackError) as info:
+            s.emit(0)
+        assert isinstance(info.value.__cause__, ZeroDivisionError)
+
+    @pytest.mark.parametrize("compiled", [False, True])
+    def test_print_sink_error_is_wrapped_like_any_other(self, compiled):
+        """Compiled, sink(print) let the error through unwrapped."""
+
+        class Unprintable:
+            def __str__(self):
+                raise ValueError("no")
+
+        s = akayu.Stream()
+        s.sink(print)
+        if compiled:
+            s.compile()
+        with pytest.raises(akayu.CallbackError) as info:
+            s.emit(Unprintable())
+        assert isinstance(info.value.__cause__, ValueError)
+        with pytest.raises(akayu.CallbackError):
+            s.emit_batch([Unprintable()])
+
+    def test_state_errors(self):
+        s = akayu.Stream()
+        m = s.map(str)
+        with pytest.raises(akayu.NotASourceError):
+            m.emit(1)
+        s.compile()
+        with pytest.raises(akayu.FrozenGraphError):
+            s.map(str)
+        with pytest.raises(akayu.FrozenGraphError):
+            s.compile()
+
+    def test_reentrant_emit(self):
+        s = akayu.Stream()
+        s.sink(lambda x: s.emit(x) if x < 1 else None)
+        with pytest.raises(akayu.CallbackError) as info:
+            s.emit(0)
+        assert isinstance(info.value.__cause__, akayu.ReentrantError)
+
+    def test_invalid_arguments_stay_value_errors(self):
+        with pytest.raises(ValueError):
+            akayu.Stream().prefetch(0)
+        with pytest.raises(ValueError):
+            akayu.union(akayu.Stream())

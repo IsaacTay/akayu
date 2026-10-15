@@ -232,40 +232,42 @@ pub(crate) fn cached_vectorcall1(
     }
 }
 
+/// A callback's error as a `CallbackError` naming the node it ran in, with
+/// the original as its `__cause__`. One already wrapped (by a node further
+/// down, or a nested pipeline) goes on as it is.
 pub(crate) fn wrap_error<T>(
     py: Python,
     res: PyResult<T>,
     node_name: &str,
     source_location: &str,
 ) -> PyResult<T> {
-    res.map_err(|e| {
-        // KeyboardInterrupt, SystemExit, GeneratorExit: not a failed step but
-        // a request to stop, which `except KeyboardInterrupt` and sys.exit()
-        // codes must still see.
-        if !e.is_instance_of::<pyo3::exceptions::PyException>(py) {
-            return e;
-        }
-        let is_akayu_err = e
-            .get_type(py)
-            .is_subclass_of::<pyo3::exceptions::PyRuntimeError>()
-            .unwrap_or(false)
-            && e.value(py)
-                .repr()
-                .ok()
-                .is_some_and(|r| r.to_string().contains("Stream operation failed at node"));
-        if is_akayu_err {
-            return e;
-        }
-        let mut msg =
-            format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
-        if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
-            msg.push('\n');
-            msg.push_str(&pointer);
-        }
-        let new_err = pyo3::exceptions::PyRuntimeError::new_err(msg);
-        new_err.set_cause(py, Some(e));
-        new_err
-    })
+    res.map_err(|e| wrap_callback_error(py, e, node_name, source_location))
+}
+
+#[cold]
+#[inline(never)]
+fn wrap_callback_error(py: Python, e: PyErr, node_name: &str, source_location: &str) -> PyErr {
+    // KeyboardInterrupt, SystemExit, GeneratorExit: not a failed step but
+    // a request to stop, which `except KeyboardInterrupt` and sys.exit()
+    // codes must still see.
+    if !e.is_instance_of::<pyo3::exceptions::PyException>(py)
+        || e.is_instance_of::<crate::error::exc::CallbackError>(py)
+    {
+        return e;
+    }
+    let mut msg =
+        format!("Stream operation failed at node '{node_name}' (defined at {source_location})");
+    if let Some(pointer) = source_pointer(py, source_location, node_name, 0) {
+        msg.push('\n');
+        msg.push_str(&pointer);
+    }
+    let new_err = crate::error::exc::CallbackError::new_err(msg);
+    let value = new_err.value(py);
+    // Plain attributes on the instance: a failure to set one only loses it.
+    let _ = value.setattr(pyo3::intern!(py, "node"), node_name);
+    let _ = value.setattr(pyo3::intern!(py, "location"), source_location);
+    new_err.set_cause(py, Some(e));
+    new_err
 }
 
 /// Read a source line using Python's linecache module.

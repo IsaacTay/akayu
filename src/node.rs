@@ -156,6 +156,9 @@ pub struct MethodCall {
     /// resolved by compile(). Builtin types can't be changed, so an item of
     /// exactly one of them calls its C method directly, without a lookup.
     pub direct: Box<[(Py<PyType>, Py<PyAny>)]>,
+    /// The method changes nothing but its result on builtin types
+    /// (`builtin::PURE_METHODS`), so compile() may reorder its calls.
+    pub pure: bool,
 }
 
 pub struct ChainNode {
@@ -305,6 +308,11 @@ impl NodeLogic {
                 | NodeLogic::Sink { .. }
                 | NodeLogic::BatchMap { .. }
         )
+    }
+
+    /// A step `apply_logic` runs: a chainable node, or a fused chain of them.
+    pub fn is_step(&self) -> bool {
+        self.is_chainable() || matches!(self, NodeLogic::Chain { .. })
     }
 }
 

@@ -43,39 +43,61 @@ impl Stream {
         name: String,
         source_location: std::sync::Arc<str>,
     ) -> PyResult<Py<Self>> {
-        let compiled_chainable = (logic.is_chainable()
-            && !matches!(&logic, NodeLogic::Filter { .. }))
-            || matches!(&logic, NodeLogic::Chain { .. });
-        let compiled_filter_fast = matches!(&logic, NodeLogic::Filter { .. });
         let builtin_op = crate::builtin::eager_op(py, &logic);
         if let Some(interrupt) = crate::builtin::take_interrupt() {
             return Err(interrupt);
         }
-        Py::new(
-            py,
-            Self {
-                logic,
-                downstreams: crate::Downstreams::new(),
-                parents: std::sync::Mutex::new(crate::Parents::new()),
-                name: name.into(),
-                frozen: false,
-                needs_lock: false,
-                compiled: false,
-                source_location,
-                builtin_op,
-                cached_vectorcall: None,
-                compiled_chainable,
-                compiled_filter_fast,
-                batch_fanout: false,
-                flush_target: None,
-                emit_target: None,
-                flushing: false,
-                emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
-                busy: false,
-                guard_reentry: false,
-                lock: NodeLock::new(),
-            },
-        )
+        let mut node = Self::blank(logic, name.into(), source_location);
+        node.builtin_op = builtin_op;
+        Py::new(py, node)
+    }
+
+    /// A node with no edges, not compiled, every flag clear.
+    fn blank(
+        logic: NodeLogic,
+        name: std::sync::Arc<str>,
+        source_location: std::sync::Arc<str>,
+    ) -> Self {
+        Self {
+            chainable: logic.is_step(),
+            logic,
+            downstreams: crate::Downstreams::new(),
+            parents: std::sync::Mutex::new(crate::Parents::new()),
+            name,
+            locks_children: false,
+            compiled: false,
+            source_location,
+            builtin_op: None,
+            cached_vectorcall: None,
+            batch_fanout: false,
+            flush_target: None,
+            emit_target: None,
+            flushing: false,
+            emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
+            busy: false,
+            guard_reentry: false,
+            lock: NodeLock::new(),
+        }
+    }
+
+    /// Build a node below `slf` (`this`, borrowed by the caller) and link
+    /// the two: `slf` gets the edge down, the node its parent.
+    pub(crate) fn attach(
+        slf: &Bound<'_, Self>,
+        this: &mut Self,
+        logic: NodeLogic,
+        name: String,
+        source_location: std::sync::Arc<str>,
+    ) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let node = Self::make_node(py, logic, name, source_location)?;
+        this.downstreams.push(Downstream::new(py, &node));
+        node.borrow(py)
+            .parents
+            .lock()
+            .unwrap()
+            .push(slf.clone().unbind());
+        Ok(node)
     }
 
     /// `slf` borrowed shared, if it is a source (see `flush_source`).
@@ -91,10 +113,7 @@ impl Stream {
     /// and the flush waits for a running emit. A callback of the flush that
     /// emits into the source or flushes it again is refused.
     fn flush_source(&self, py: Python, drain: bool) -> PyResult<()> {
-        let _guard = self.lock.acquire_checked(py, || {
-            crate::lock::Emitting::check_not_waited_on(&self.emitting, crate::lock::refused_flush)
-        })?;
-        let _flushing = crate::lock::Emitting::enter_flush(&self.emitting)?;
+        let _entered = self.enter_source(py, true)?;
         if !drain && self.downstreams.is_empty() {
             warn_noop_flush(py, &self.name);
         }
@@ -306,29 +325,8 @@ impl Stream {
     #[new]
     #[pyo3(signature = (name=None))]
     pub fn new(py: Python, name: Option<String>) -> Self {
-        let source_location = capture_source_location(py);
-        Self {
-            logic: NodeLogic::Source,
-            downstreams: crate::Downstreams::new(),
-            parents: std::sync::Mutex::new(crate::Parents::new()),
-            name: name.map_or_else(|| "source".into(), Into::into),
-            frozen: false,
-            needs_lock: false,
-            compiled: false,
-            source_location,
-            builtin_op: None,
-            cached_vectorcall: None,
-            compiled_chainable: false,
-            compiled_filter_fast: false,
-            batch_fanout: false,
-            flush_target: None,
-            emit_target: None,
-            flushing: false,
-            emitting: std::sync::atomic::AtomicUsize::new(crate::lock::IDLE),
-            busy: false,
-            guard_reentry: false,
-            lock: NodeLock::new(),
-        }
+        let name = name.map_or_else(|| "source".into(), Into::into);
+        Self::blank(NodeLogic::Source, name, capture_source_location(py))
     }
 
     /// Returns True if the stream graph is compiled (frozen).
@@ -393,17 +391,13 @@ impl Stream {
             return Ok(slf.clone().unbind());
         }
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::Map { func: wrapped_func },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Run the next `map()`, `filter()` or `batch_map()` on up to `n` items at once.
@@ -458,12 +452,13 @@ impl Stream {
         };
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, &format!("prefetch({})", n), None);
-        let node = Self::make_node(py, NodeLogic::Prefetch { size: n }, name, source_location)?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        Self::attach(
+            slf,
+            &mut this,
+            NodeLogic::Prefetch { size: n },
+            name,
+            source_location,
+        )
     }
 
     /// Apply a function to each element, unpacking the element as arguments.
@@ -528,12 +523,7 @@ impl Stream {
             let wrapped_func = get_build_starmap_func()?.call1(py, (func, args, kwargs))?;
             NodeLogic::Map { func: wrapped_func }
         };
-        let node = Self::make_node(py, logic, name, source_location)?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        Self::attach(slf, &mut this, logic, name, source_location)
     }
 
     /// Apply a batch-aware function to process entire batches at once.
@@ -595,17 +585,13 @@ impl Stream {
             return Ok(slf.clone().unbind());
         }
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::BatchMap { func: wrapped_func },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Filter elements based on a predicate function.
@@ -668,19 +654,15 @@ impl Stream {
             return Ok(slf.clone().unbind());
         }
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::Filter {
                 predicate: wrapped_predicate,
             },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Flatten an iterable element into individual elements.
@@ -717,12 +699,7 @@ impl Stream {
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "flatten", None);
-        let node = Self::make_node(py, NodeLogic::Flatten, name, source_location)?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        Self::attach(slf, &mut this, NodeLogic::Flatten, name, source_location)
     }
 
     /// Collect elements into a buffer until `flush()` is called.
@@ -764,17 +741,13 @@ impl Stream {
         check_not_compiled(this.compiled, &this.name)?;
         let source_location = capture_source_location(py);
         let name = resolve_stream_name(stream_name, "collect", None);
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::Collect { buffer: Vec::new() },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Buffer items until a predicate matches, then emit the buffer as a tuple.
@@ -848,8 +821,9 @@ impl Stream {
 
         let name = resolve_stream_name(stream_name, "chunk_by", func_name.as_deref());
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::ChunkBy(Box::new(ChunkByState {
                 buffer: Vec::new(),
                 predicate,
@@ -858,12 +832,7 @@ impl Stream {
             })),
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Extract items between two delimiter predicates.
@@ -935,8 +904,9 @@ impl Stream {
             )),
         );
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::ExtractBetween(Box::new(ExtractBetweenState {
                 buffer: Vec::new(),
                 open,
@@ -946,12 +916,7 @@ impl Stream {
             })),
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Flush buffered elements downstream.
@@ -1086,17 +1051,13 @@ impl Stream {
         let source_location = capture_source_location(py);
         let wrapped_func = wrap_func(py, func, args, kwargs)?;
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::Sink { func: wrapped_func },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Accumulate values using a function, emitting each intermediate state.
@@ -1172,8 +1133,9 @@ impl Stream {
 
         let name = resolve_stream_name(stream_name, "accumulate", func_name.as_deref());
 
-        let node = Self::make_node(
-            py,
+        Self::attach(
+            slf,
+            &mut this,
             NodeLogic::Accumulate {
                 func,
                 state: start,
@@ -1181,12 +1143,7 @@ impl Stream {
             },
             name,
             source_location,
-        )?;
-        this.downstreams.push(Downstream::new(py, &node));
-        let self_py = slf.clone().unbind();
-        drop(this);
-        node.borrow(py).parents.lock().unwrap().push(self_py);
-        Ok(node)
+        )
     }
 
     /// Emit a single value into the stream.
@@ -1215,15 +1172,7 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit(&self, py: Python, x: Py<PyAny>) -> PyResult<()> {
-        let _guard = self.lock.acquire_checked(py, || {
-            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
-                crate::lock::refused(state, &self.name)
-            })
-        })?;
-        if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
-        }
-        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
+        let _entered = self.enter_source(py, false)?;
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1264,15 +1213,7 @@ impl Stream {
     ///
     /// * `RuntimeError` - If called on a non-source node or if emit is re-entrant.
     pub fn emit_batch(&self, py: Python, items: Vec<Py<PyAny>>) -> PyResult<()> {
-        let _guard = self.lock.acquire_checked(py, || {
-            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
-                crate::lock::refused(state, &self.name)
-            })
-        })?;
-        if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
-        }
-        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
+        let _entered = self.enter_source(py, false)?;
 
         let profiling = crate::profiling::is_profiling();
         if profiling {
@@ -1448,15 +1389,7 @@ impl Stream {
         py: Python,
         x: Py<PyAny>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
-        let _guard = self.lock.acquire_checked(py, || {
-            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
-                crate::lock::refused(state, &self.name)
-            })
-        })?;
-        if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
-        }
-        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
+        let _entered = self.enter_source(py, false)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
         let result = self.propagate(py, x);
@@ -1498,15 +1431,7 @@ impl Stream {
         py: Python,
         items: Vec<Py<PyAny>>,
     ) -> PyResult<Py<crate::profiling::ProfileReport>> {
-        let _guard = self.lock.acquire_checked(py, || {
-            crate::lock::Emitting::check_not_waited_on(&self.emitting, |state| {
-                crate::lock::refused(state, &self.name)
-            })
-        })?;
-        if !matches!(self.logic, NodeLogic::Source) {
-            return Err(StreamError::EmitOnNonSource(self.name.to_string()).into());
-        }
-        let _emitting = crate::lock::Emitting::enter(&self.emitting, &self.name)?;
+        let _entered = self.enter_source(py, false)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
         let result = self.propagate_batch(py, items);

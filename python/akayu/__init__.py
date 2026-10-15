@@ -6,7 +6,14 @@ from importlib.metadata import version as _version
 from pathlib import Path as _Path
 
 from akayu.akayu import (
+    BusyError,
+    CallbackError,
+    DeadlockError,
+    FrozenGraphError,
+    NotASourceError,
     ProfileReport,
+    ReentrantError,
+    StreamError,
     to_text_file,
 )
 from akayu.akayu import Stream as _Stream
@@ -606,9 +613,16 @@ def from_text_file(path, interval=None):
 
 
 __all__ = [
+    "BusyError",
+    "CallbackError",
+    "DeadlockError",
+    "FrozenGraphError",
     "MultiStream",
+    "NotASourceError",
     "ProfileReport",
+    "ReentrantError",
     "Stream",
+    "StreamError",
     "TextFileSource",
     "combine_latest",
     "from_text_file",

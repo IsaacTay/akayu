@@ -13,24 +13,39 @@ use crate::node::{BuiltinOp, ChainNode, ChunkByState, NodeLogic};
 use crate::{Stream, StreamPtr};
 
 impl Stream {
-    /// Full optimization pass, safe because graph is being frozen via compile().
+    /// compile()'s rewrites of the graph below this source, which is about to
+    /// be frozen. The passes run in this order, each relying on the ones
+    /// before it:
     ///
-    /// This enables all optimizations including chain compilation, which is only safe
-    /// when the topology is guaranteed not to change after optimization.
+    /// 1. `share_graph_lock`: one lock for a par()-free graph. First, so the
+    ///    nodes the rewrites below absorb share it too.
+    /// 2. `eliminate_source_passthroughs`: bypass the pass-through source
+    ///    nodes union() and seq() make.
+    /// 3. `detect_and_cache_all`: each node's native op, flush/emit target
+    ///    and vectorcall pointer (the analysis that reads closures, defaults
+    ///    and globals once). Before the fusions, which move these into steps.
+    /// 4. `fuse_chunk_by`: `collect()` plus `filter(p).sink(collect.flush)`
+    ///    becomes one chunk_by node.
+    /// 5. `build_compiled_chains`: each linear run of steps becomes one Chain
+    ///    node, with its numeric runs marked.
+    /// 6. `mark_par_branch_nodes`: lock the nodes of par() branches that
+    ///    converge.
+    ///
+    /// compile() then freezes every node (`freeze_all`), marks independent
+    /// fan-outs and arms the re-entry guards.
     pub fn optimize_topology_full(
         &mut self,
         py: Python,
         source: &Bound<'_, Self>,
     ) -> Vec<Py<Self>> {
         let source_py_ptr = source.as_ptr() as usize;
-        // Before fusion, so the nodes it absorbs get the shared lock too.
         self.share_graph_lock(py, source_py_ptr);
         self.eliminate_source_passthroughs(py, source);
 
         let all_nodes = self.collect_all_nodes(py);
 
-        self.fuse_chunk_by(py, source_py_ptr, &all_nodes);
         self.detect_and_cache_all(py, &all_nodes);
+        self.fuse_chunk_by(py, source_py_ptr, &all_nodes);
 
         self.build_compiled_chains(py);
 
@@ -45,7 +60,7 @@ impl Stream {
     ///
     /// Every way into the graph (emit/emit_batch on any source, flush on any
     /// node) takes the lock of the node it starts at. Once all nodes share one
-    /// lock, two threads can't be in the graph at once, so the `needs_lock`
+    /// lock, two threads can't be in the graph at once, so the `locks_children`
     /// edges that guard merges of several sources (union, zip, combine_latest)
     /// lock nothing new: they are cleared, and the compiled raw-pointer path
     /// applies to them. Skipped when the graph has a par() node (its workers
@@ -54,7 +69,7 @@ impl Stream {
     /// pointers), or when any node is borrowed right now (in use). The GIL is
     /// held throughout and no Python code runs, so nothing starts meanwhile.
     fn share_graph_lock(&mut self, py: Python, source_py_ptr: usize) {
-        if matches!(self.logic, NodeLogic::Parallel) || self.frozen {
+        if matches!(self.logic, NodeLogic::Parallel) || self.compiled {
             return;
         }
         let mut seen = HashSet::from_iter([source_py_ptr]);
@@ -72,7 +87,7 @@ impl Stream {
             let Ok(node) = node_py.try_borrow_mut(py) else {
                 return; // in use by another thread (or re-entrantly)
             };
-            if node.frozen || matches!(node.logic, NodeLogic::Parallel) {
+            if node.compiled || matches!(node.logic, NodeLogic::Parallel) {
                 return;
             }
             stack.extend(node.downstreams.iter().map(|d| d.node.clone_ref(py)));
@@ -81,14 +96,14 @@ impl Stream {
             nodes.push(node_py);
         }
         let lock = Arc::clone(&self.lock);
-        self.needs_lock = false;
+        self.locks_children = false;
         for d in &mut self.downstreams {
             d.lock = Arc::clone(&lock);
         }
         for node_py in nodes {
             let mut node = node_py.borrow_mut(py);
             node.lock = Arc::clone(&lock);
-            node.needs_lock = false;
+            node.locks_children = false;
             for d in &mut node.downstreams {
                 d.lock = Arc::clone(&lock);
             }
@@ -107,12 +122,12 @@ impl Stream {
     /// across branches is then unobservable, except through the data's own
     /// dunder methods, or which items a failing batch had processed.
     pub(crate) fn mark_independent_fanouts(&mut self, py: Python, all_nodes: &[Py<Self>]) {
-        self.batch_fanout = !self.needs_lock && independent_branches(py, &self.downstreams);
+        self.batch_fanout = !self.locks_children && independent_branches(py, &self.downstreams);
         for node_py in all_nodes {
             let Ok(node) = node_py.try_borrow(py) else {
                 continue;
             };
-            let independent = !node.needs_lock && independent_branches(py, &node.downstreams);
+            let independent = !node.locks_children && independent_branches(py, &node.downstreams);
             drop(node);
             if let Ok(mut node) = node_py.try_borrow_mut(py) {
                 node.batch_fanout = independent;
@@ -188,27 +203,17 @@ impl Stream {
     /// This is called by compile() to prevent any further modifications
     /// to the stream graph after optimization.
     pub fn freeze_all(&mut self, py: Python, all_nodes: &[Py<Self>]) {
-        self.frozen = true;
         self.compiled = true;
-        self.compiled_chainable = (self.logic.is_chainable()
-            && !matches!(&self.logic, NodeLogic::Filter { .. }))
-            || matches!(&self.logic, NodeLogic::Chain { .. });
-        self.compiled_filter_fast =
-            matches!(&self.logic, NodeLogic::Filter { .. }) && self.builtin_op.is_some();
+        self.chainable = self.logic.is_step();
         for d in &mut self.downstreams {
             d.ptr = Some(StreamPtr::new(&mut d.node.borrow_mut(py)));
         }
 
         for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
-            if !node.frozen {
-                node.frozen = true;
+            if !node.compiled {
                 node.compiled = true;
-                node.compiled_chainable = (node.logic.is_chainable()
-                    && !matches!(&node.logic, NodeLogic::Filter { .. }))
-                    || matches!(&node.logic, NodeLogic::Chain { .. });
-                node.compiled_filter_fast =
-                    matches!(&node.logic, NodeLogic::Filter { .. }) && node.builtin_op.is_some();
+                node.chainable = node.logic.is_step();
                 let downstream_refs: Vec<Py<Stream>> =
                     node.downstreams.iter().map(|d| d.clone_ref(py)).collect();
                 drop(node);
@@ -246,11 +251,10 @@ impl Stream {
         }
     }
 
-    /// Mark nodes that need per-node locking when inside par() branches.
-    /// When par() dispatches to threads, multiple branches may converge on shared
-    /// downstream nodes. We mark all nodes in par branches so their propagate()
-    /// uses _safe_update (per-node Python locks), preventing concurrent borrow_mut
-    /// on shared PyCells.
+    /// Lock the children of every node in par() branches that converge.
+    /// par() runs its branches on different threads, and branches that meet
+    /// downstream would update the shared node concurrently: each node in them
+    /// takes its child's lock (`locks_children`) before updating it.
     #[allow(clippy::unused_self)]
     fn mark_par_branch_nodes(&self, py: Python, all_nodes: &[Py<Self>]) {
         let mut par_nodes: Vec<Py<Self>> = Vec::new();
@@ -313,14 +317,12 @@ impl Stream {
                 continue;
             }
 
-            // Mark ALL nodes in par branches. Each node's propagate() checks
-            // its own needs_lock flag to decide whether to use _safe_update.
-            // We must mark branch nodes (not just convergence points) because
-            // it's the branch node's propagate() that borrow_mut's the shared
-            // downstream — the convergence point's own flag is checked too late.
+            // Mark ALL nodes in par branches, not just the convergence points:
+            // it's the parent's propagate() that updates the shared child, so
+            // the parent has to lock it (the child's own flag is too late).
             for node_py in node_refs.values() {
                 let mut node = node_py.borrow_mut(py);
-                node.needs_lock = true;
+                node.locks_children = true;
             }
         }
     }
@@ -387,7 +389,7 @@ impl Stream {
             let new_downstreams: Vec<Downstream> =
                 child.downstreams.iter().map(|d| d.clone_edge(py)).collect();
             // The child's edges keep their locking (see build_chain_at).
-            let child_needs_lock = child.needs_lock;
+            let child_locks_children = child.locks_children;
             drop(child);
             // Their parent is this node now: later passes (chunk_by fusion)
             // trace parents back, and must not reach the bypassed node.
@@ -401,7 +403,7 @@ impl Stream {
                 }
             }
             self.downstreams = new_downstreams.into();
-            self.needs_lock |= child_needs_lock;
+            self.locks_children |= child_locks_children;
         }
     }
 
@@ -483,7 +485,7 @@ impl Stream {
         let last = last_py.borrow(py);
         let tail_downstreams: Vec<Downstream> =
             last.downstreams.iter().map(|d| d.clone_edge(py)).collect();
-        let tail_needs_lock = last.needs_lock;
+        let tail_locks_children = last.locks_children;
         drop(last);
 
         // Extract logic from each node into ChainNode structs
@@ -530,7 +532,7 @@ impl Stream {
         head.downstreams = tail_downstreams.iter().map(|d| d.clone_edge(py)).collect();
         // The edges are the tail's, and so is their locking: a tail feeding a
         // merge (union, zip, ...) locks the shared node before updating it.
-        head.needs_lock |= tail_needs_lock;
+        head.locks_children |= tail_locks_children;
         drop(head);
 
         // The nodes after the chain now hang off the head. Their parent link
@@ -611,14 +613,12 @@ impl Stream {
     fn fuse_chunk_by(&mut self, py: Python, source_py_ptr: usize, all_nodes: &[Py<Self>]) {
         let source_ptr = source_py_ptr;
 
+        // The sinks `detect_and_cache_all` found flushing a collect.
         let mut flush_pairs: Vec<(Py<Self>, Py<Self>)> = Vec::new();
         for node_py in all_nodes {
             let node = node_py.borrow(py);
-            if let NodeLogic::Sink { ref func } = node.logic
-                && let Some(target) = detect_flush_target_from_func(py, func)
-            {
-                drop(node);
-                flush_pairs.push((node_py.clone_ref(py), target));
+            if let (NodeLogic::Sink { .. }, Some(target)) = (&node.logic, &node.flush_target) {
+                flush_pairs.push((node_py.clone_ref(py), target.clone_ref(py)));
             }
         }
         if flush_pairs.is_empty() {
@@ -825,8 +825,9 @@ impl Stream {
                 });
             }
 
-            // Extract predicate from Filter
-            let predicate = {
+            // The filter's predicate, with what `detect_and_cache_all` found
+            // for it: the chunk node tests items with it now.
+            let (predicate, predicate_op, predicate_vectorcall) = {
                 let mut filter_node = filter_py.borrow_mut(py);
                 let pred = match std::mem::replace(
                     &mut filter_node.logic,
@@ -836,18 +837,22 @@ impl Stream {
                     _ => unreachable!(),
                 };
                 filter_node.downstreams.clear();
-                pred
+                (
+                    pred,
+                    filter_node.builtin_op.take(),
+                    filter_node.cached_vectorcall.take(),
+                )
             };
 
             // Get Collect's downstreams
-            let (collect_downstreams, collect_needs_lock) = {
+            let (collect_downstreams, collect_locks_children) = {
                 let collect_node = collect_py.borrow(py);
                 let downstreams = collect_node
                     .downstreams
                     .iter()
                     .map(|d| d.clone_edge(py))
                     .collect::<Vec<_>>();
-                (downstreams, collect_node.needs_lock)
+                (downstreams, collect_node.locks_children)
             };
 
             let (filter_name, filter_source) = {
@@ -875,11 +880,13 @@ impl Stream {
                     order: crate::node::ChunkOrder::Fused { buffer_first },
                     pre_buffer_chain,
                 }));
+                chunk_node.builtin_op = predicate_op;
+                chunk_node.cached_vectorcall = predicate_vectorcall;
                 chunk_node.name = format!("chunk_by[fused]({})", filter_name).into();
                 chunk_node.source_location = filter_source;
                 chunk_node.downstreams = collect_downstreams.into();
                 // The edges keep their locking (see build_chain_at).
-                chunk_node.needs_lock |= collect_needs_lock;
+                chunk_node.locks_children |= collect_locks_children;
             }
 
             // If buffer_path had intermediate nodes, mark the Collect as orphaned
@@ -921,7 +928,7 @@ fn native_subtree(py: Python, node_py: &Py<Stream>, lists: &mut HashSet<usize>) 
     let Ok(node) = node_py.try_borrow(py) else {
         return false;
     };
-    if node.needs_lock
+    if node.locks_children
         || node.flush_target.is_some()
         || node.emit_target.is_some()
         || node.parents.lock().unwrap().len() != 1
@@ -943,15 +950,13 @@ fn native_subtree(py: Python, node_py: &Py<Stream>, lists: &mut HashSet<usize>) 
             .all(|d| native_subtree(py, &d.node, lists))
 }
 
-/// A step compile() turned into a native operation; sinks must append to a
-/// list no other sink in these branches appends to.
+/// A step compile() turned into a native operation with no effect but its
+/// result; sinks must append to a list no other sink in these branches
+/// appends to.
 fn native_step(logic: &NodeLogic, op: Option<&BuiltinOp>, lists: &mut HashSet<usize>) -> bool {
-    use BuiltinOp::{AccumBinOp, AccumBinOpConst, AccumMax, AccumMin, ListAppend, Print};
+    use BuiltinOp::{AccumBinOp, AccumBinOpConst, AccumMax, AccumMin, ListAppend};
     match (logic, op) {
-        (NodeLogic::Map { .. } | NodeLogic::Filter { .. }, Some(op)) => !matches!(
-            op,
-            Print | ListAppend(_) | AccumBinOp(_) | AccumBinOpConst(..) | AccumMax | AccumMin
-        ),
+        (NodeLogic::Map { .. } | NodeLogic::Filter { .. }, Some(op)) => pure_item_op(op),
         (
             NodeLogic::Accumulate {
                 returns_state: false,
@@ -961,6 +966,54 @@ fn native_step(logic: &NodeLogic, op: Option<&BuiltinOp>, lists: &mut HashSet<us
         ) => true,
         (NodeLogic::Sink { .. }, Some(ListAppend(list))) => lists.insert(list.as_ptr() as usize),
         _ => false,
+    }
+}
+
+/// Whether a native op, applied to an item, has no effect but its result
+/// (beyond the item's own dunder methods). An allow-list: an op added later
+/// counts as having effects until it is listed here.
+fn pure_item_op(op: &BuiltinOp) -> bool {
+    match op {
+        BuiltinOp::IsInstance(_)
+        | BuiltinOp::Len
+        | BuiltinOp::Str
+        | BuiltinOp::Int
+        | BuiltinOp::Float
+        | BuiltinOp::Bool
+        | BuiltinOp::Not
+        | BuiltinOp::Is(_)
+        | BuiltinOp::IsNot(_)
+        | BuiltinOp::Truth
+        | BuiltinOp::ItemGetter(_)
+        | BuiltinOp::AttrGetter(_)
+        | BuiltinOp::Type
+        | BuiltinOp::HasAttr(_)
+        | BuiltinOp::Tuple
+        | BuiltinOp::List
+        | BuiltinOp::Set
+        | BuiltinOp::FrozenSet
+        | BuiltinOp::BinOp(..)
+        | BuiltinOp::Compare(..)
+        | BuiltinOp::Contains(_)
+        | BuiltinOp::NotContains(_)
+        | BuiltinOp::Slice(..) => true,
+        BuiltinOp::MethodCall(call) => call.pure,
+        BuiltinOp::TupleConstruct(ops) | BuiltinOp::ListConstruct(ops) => {
+            ops.iter().all(pure_item_op)
+        }
+        BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
+            pure_item_op(a) && pure_item_op(b)
+        }
+        BuiltinOp::Negate(inner) | BuiltinOp::Numeric(_, inner) => pure_item_op(inner),
+        // compile() replaces an eager op with its op; one still here calls
+        // the function once its code is replaced.
+        BuiltinOp::Eager(_)
+        | BuiltinOp::Print
+        | BuiltinOp::AccumBinOp(_)
+        | BuiltinOp::AccumBinOpConst(..)
+        | BuiltinOp::AccumMax
+        | BuiltinOp::AccumMin
+        | BuiltinOp::ListAppend(_) => false,
     }
 }
 

@@ -252,7 +252,7 @@ assert [int(x) for x in results] == [0, 2, 4, 6, 8]
 
 ### 1. The "Late Modification"
 
-Adding to the graph after `compile()` raises a `RuntimeError`.
+Adding to the graph after `compile()` raises `akayu.FrozenGraphError`.
 
 <!--pytest.mark.xfail(strict=True)-->
 
@@ -263,7 +263,7 @@ s = akayu.Stream()
 s.map(lambda x: x + 1)
 s.compile()
 
-s.map(lambda x: x * 2)  # ❌ RuntimeError: Cannot modify frozen stream 'source'. ...
+s.map(lambda x: x * 2)  # ❌ akayu.FrozenGraphError: Cannot modify frozen stream 'source'. ...
 ```
 
 **Fix**: Define the entire topology before calling compile.

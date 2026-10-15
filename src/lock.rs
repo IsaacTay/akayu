@@ -1,7 +1,7 @@
 //! The per-node lock that serializes concurrent use of a node across threads.
 //!
 //! `emit()`, `emit_batch()` and `flush()` hold the lock of the node they were
-//! called on, and edges marked `needs_lock` (par() branches, union inputs) take
+//! called on, and edges marked `locks_children` (par() branches, union inputs) take
 //! the child's lock before updating it. It replaces a Python `threading.RLock`
 //! per node, which cost ~3,600 instructions per emit through PyO3 method calls.
 
@@ -297,33 +297,75 @@ fn this_thread_mark() -> usize {
     std::ptr::addr_of!(marker) as usize
 }
 
+/// A source entered by emit()/emit_batch() (or flush()/drain()): its lock
+/// held and its `emitting` mark set, until dropped. The mark is cleared
+/// before the lock is released (fields drop in order).
+pub(crate) struct EnteredSource<'a> {
+    _emitting: Emitting<'a>,
+    _guard: NodeLockGuard<'a>,
+}
+
+impl Stream {
+    /// Enter this source to emit into it (`flush`: to flush or drain it).
+    /// Every way into a source goes through here: lock, check the node is a
+    /// source, mark it. Waiting for the lock is refused if the thread in it
+    /// waits for this one (`Emitting::check_not_waited_on`).
+    #[inline(always)]
+    pub(crate) fn enter_source(&self, py: Python, flush: bool) -> PyResult<EnteredSource<'_>> {
+        let guard = self.lock.acquire_checked(py, || {
+            Emitting::check_not_waited_on(&self.emitting, |state| {
+                if flush {
+                    refused_flush(state)
+                } else {
+                    refused(state, &self.name)
+                }
+            })
+        })?;
+        if !matches!(self.logic, crate::node::NodeLogic::Source) {
+            return Err(not_a_source(&self.name));
+        }
+        let emitting = Emitting::enter(&self.emitting, &guard, flush, &self.name)?;
+        Ok(EnteredSource {
+            _emitting: emitting,
+            _guard: guard,
+        })
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn not_a_source(name: &str) -> PyErr {
+    crate::error::StreamError::EmitOnNonSource(name.to_string()).into()
+}
+
 /// Marks a source as emitting (or flushing) until dropped, even when a panic
 /// unwinds through it: a flag left set would reject every later emit().
 pub(crate) struct Emitting<'a>(&'a AtomicUsize);
 
 impl<'a> Emitting<'a> {
-    /// Mark `flag` emitting, or fail if the source is already emitting or
-    /// flushing (an emit() from inside its own graph, or from a callback of
-    /// its own flush()).
-    /// The caller holds the source's lock, so a load and a store suffice.
+    /// Mark `flag` emitting (`flush`: flushing), or fail if the source is
+    /// already emitting or flushing: an emit() from inside its own graph, or
+    /// from a callback of its own flush(). `_locked` is the source's lock,
+    /// held, so a load and a store suffice.
     #[inline(always)]
-    pub(crate) fn enter(flag: &'a AtomicUsize, name: &str) -> pyo3::PyResult<Self> {
+    fn enter(
+        flag: &'a AtomicUsize,
+        _locked: &NodeLockGuard<'_>,
+        flush: bool,
+        name: &str,
+    ) -> pyo3::PyResult<Self> {
         let state = flag.load(Ordering::Acquire);
         if state != IDLE {
-            return Err(refused(state, name));
+            return Err(if flush {
+                refused_flush(state)
+            } else {
+                refused(state, name)
+            });
         }
-        flag.store(this_thread_mark(), Ordering::Release);
-        Ok(Self(flag))
-    }
-
-    /// Mark `flag` flushing, for flush()/drain() of a source, or fail if a
-    /// callback of the source's own emit() or flush() is calling it.
-    pub(crate) fn enter_flush(flag: &'a AtomicUsize) -> pyo3::PyResult<Self> {
-        let state = flag.load(Ordering::Acquire);
-        if state != IDLE {
-            return Err(refused_flush(state));
-        }
-        flag.store(this_thread_mark() | FLUSHING, Ordering::Release);
+        flag.store(
+            this_thread_mark() | if flush { FLUSHING } else { 0 },
+            Ordering::Release,
+        );
         Ok(Self(flag))
     }
 
@@ -350,7 +392,7 @@ impl<'a> Emitting<'a> {
 /// The error for an emit() into a source that is emitting or flushing.
 #[cold]
 #[inline(never)]
-pub(crate) fn refused(state: usize, name: &str) -> pyo3::PyErr {
+fn refused(state: usize, name: &str) -> pyo3::PyErr {
     use crate::error::StreamError;
     if state & FLUSHING != 0 {
         StreamError::EmitDuringFlush(name.to_string()).into()
@@ -362,7 +404,7 @@ pub(crate) fn refused(state: usize, name: &str) -> pyo3::PyErr {
 /// The error for a flush() of a source that is emitting or flushing.
 #[cold]
 #[inline(never)]
-pub(crate) fn refused_flush(state: usize) -> pyo3::PyErr {
+fn refused_flush(state: usize) -> pyo3::PyErr {
     use crate::error::StreamError;
     if state & FLUSHING != 0 {
         StreamError::ReentrantFlushCall.into()

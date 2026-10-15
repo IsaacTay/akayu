@@ -44,6 +44,64 @@ fn parse_binary_op(s: &str) -> Option<BinaryOp> {
     }
 }
 
+/// Methods `x.name(...)` that leave `x` and everything else as they were on
+/// every builtin type that has them (`MethodCall::pure`). They may still run
+/// the item's own dunder methods, as every native op may.
+const PURE_METHODS: &[&str] = &[
+    "capitalize",
+    "casefold",
+    "center",
+    "count",
+    "decode",
+    "encode",
+    "endswith",
+    "expandtabs",
+    "find",
+    "format",
+    "get",
+    "hex",
+    "index",
+    "isalnum",
+    "isalpha",
+    "isascii",
+    "isdecimal",
+    "isdigit",
+    "isidentifier",
+    "islower",
+    "isnumeric",
+    "isprintable",
+    "isspace",
+    "istitle",
+    "isupper",
+    "is_integer",
+    "items",
+    "join",
+    "keys",
+    "ljust",
+    "lower",
+    "lstrip",
+    "partition",
+    "removeprefix",
+    "removesuffix",
+    "replace",
+    "rfind",
+    "rindex",
+    "rjust",
+    "rpartition",
+    "rsplit",
+    "rstrip",
+    "split",
+    "splitlines",
+    "startswith",
+    "strip",
+    "swapcase",
+    "title",
+    "translate",
+    "upper",
+    "values",
+    "zfill",
+];
+
 /// The C methods named `name` that builtin types define themselves (see
 /// `MethodCall::direct`), most common receivers first.
 fn builtin_methods(py: Python, name: &Bound<'_, PyString>) -> Box<[(Py<PyType>, Py<PyAny>)]> {
@@ -144,10 +202,12 @@ fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp>
                 return None;
             }
             let direct = builtin_methods(py, &name);
+            let pure = name.to_str().is_ok_and(|name| PURE_METHODS.contains(&name));
             Some(BuiltinOp::MethodCall(Box::new(MethodCall {
                 name: name.unbind(),
                 args,
                 direct,
+                pure,
             })))
         }
         "type" => Some(BuiltinOp::Type),
@@ -223,6 +283,12 @@ fn analyze_function(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Py
     analysis(py, func, accumulate)?.result
 }
 
+/// A function's analysis parsed into an op (None if nothing was recognised).
+fn analyze_to_op(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
+    let analysis = analysis(py, func, false)?;
+    parse_cached(py, analysis.result.as_ref()?, analysis.kept)
+}
+
 /// The native op an uncompiled map or filter node can use from the start:
 /// for a lambda whose analysis depends only on its code, there is nothing
 /// compile() would snapshot. Only lambdas: a `def` function's body would no
@@ -237,6 +303,7 @@ pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> 
         code_only: true,
         is_lambda: true,
         code,
+        kept,
     } = analysis(py, func, false)?
     else {
         return None;
@@ -244,7 +311,7 @@ pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> 
     Some(Arc::new(BuiltinOp::Eager(EagerOp {
         func: func.clone_ref(py),
         code,
-        op: parse_cached(py, &result)?,
+        op: parse_cached(py, &result, kept)?,
     })))
 }
 
@@ -255,6 +322,9 @@ struct Analysis {
     code_only: bool,
     is_lambda: bool,
     code: Py<PyAny>,
+    /// The analyzer keeps `result`: the same object comes back for this
+    /// function, so ops parsed from it can be shared (`PARSED`).
+    kept: bool,
 }
 
 thread_local! {
@@ -295,6 +365,7 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
             code_only: true,
             is_lambda: *is_lambda,
             code: code.unbind(),
+            kept: true,
         });
     }
     let answer = match get_analyze_for_compile()
@@ -310,7 +381,8 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
             return None;
         }
     };
-    let (result, code_only, is_lambda): (Py<PyAny>, bool, bool) = answer.extract(py).ok()?;
+    let (result, code_only, is_lambda, kept): (Py<PyAny>, bool, bool, bool) =
+        answer.extract(py).ok()?;
     let result = (!result.is_none(py)).then_some(result);
     if code_only && let Ok(weak) = PyWeakrefReference::new(&code) {
         let entry = (
@@ -339,13 +411,8 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
         code_only,
         is_lambda,
         code: code.unbind(),
+        kept,
     })
-}
-
-/// Analyze a Python callable's bytecode via `_analyze_lambda()` and convert to `BuiltinOp`.
-fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
-    let result = analyze_bytecode(py, func)?;
-    parse_cached(py, &result)
 }
 
 /// Parsed ops by the analysis result they came from (`_analyze_lambda`
@@ -355,13 +422,23 @@ fn analyze_lambda_fallback(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp
 /// this table still references are dropped when it grows.
 type ParsedOps = crate::helpers::PtrMap<usize, (Py<PyAny>, Arc<BuiltinOp>)>;
 static PARSED: LazyLock<Mutex<ParsedOps>> = LazyLock::new(Mutex::default);
+/// Beyond this many entries, those only `PARSED` still holds are dropped.
+const PARSED_MAX: usize = 256;
 
-fn parse_cached(py: Python, result: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
+/// The op for an analysis `result`, shared through `PARSED` when the
+/// analyzer `kept` it (a result it doesn't keep is made afresh each time: an
+/// entry would keep it, and whatever it captured, alive).
+fn parse_cached(py: Python, result: &Py<PyAny>, kept: bool) -> Option<Arc<BuiltinOp>> {
     let key = result.as_ptr() as usize;
-    let mut parsed = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some((_, op)) = parsed.get(&key) {
+    if kept
+        && let Some((_, op)) = PARSED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+    {
         return Some(Arc::clone(op));
     }
+    // Parsed without the lock: parsing calls into Python, which could need it.
     let op = parse_analysis_tuple(py, result.bind(py))?;
     let op = Arc::new(match crate::numeric::NumProgram::from_op(py, &op) {
         Some(program) if program.worth_alone() => {
@@ -369,10 +446,27 @@ fn parse_cached(py: Python, result: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
         }
         _ => op,
     });
-    if parsed.len() >= 256 {
-        parsed.retain(|_, (held, _)| held.get_refcnt(py) > 1);
+    if kept {
+        let freed = {
+            let mut parsed = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut freed = Vec::new();
+            if parsed.len() >= PARSED_MAX {
+                parsed.retain(|_, entry| {
+                    let live = entry.0.get_refcnt(py) > 1;
+                    if !live {
+                        freed.push((entry.0.clone_ref(py), Arc::clone(&entry.1)));
+                    }
+                    live
+                });
+            }
+            let entry = parsed.entry(key).or_insert((result.clone_ref(py), op));
+            (freed, Arc::clone(&entry.1))
+        };
+        // Freed outside the lock: freeing can run Python code.
+        let (freed, op) = freed;
+        drop(freed);
+        return Some(op);
     }
-    parsed.insert(key, (result.clone_ref(py), Arc::clone(&op)));
     Some(op)
 }
 
@@ -460,10 +554,8 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Ar
         return Some(op);
     }
     // Fallback: analyze lambda bytecode
-    let result = analyze_bytecode(py, func)?;
-    if result.is_none(py) {
-        return None;
-    }
+    let analysis = analysis(py, func, false)?;
+    let result = analysis.result?;
     let bound = result.bind(py);
     let tuple = bound.cast::<PyTuple>().ok()?;
     let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
@@ -473,7 +565,7 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Ar
         *func = resolved;
         return None;
     }
-    parse_cached(py, &result)
+    parse_cached(py, &result, analysis.kept)
 }
 
 /// Detect builtin fast-path for a Filter predicate.
@@ -484,7 +576,7 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Ar
 fn detect_filter_builtin(py: Python, predicate: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
     let Some(bound) = crate::call::bound_parts(py, predicate) else {
         // No extra arguments: analyse the predicate's own bytecode
-        return analyze_lambda_fallback(py, predicate);
+        return analyze_to_op(py, predicate);
     };
     let call = bound.get();
     let ([arg], false) = (call.args(), call.has_kwargs()) else {
@@ -698,9 +790,10 @@ unsafe fn extract_vectorcall(
         if offset <= 0 {
             return None;
         }
+        // Unaligned: CPython itself copies the slot with memcpy.
         let ptr = (callable as *const u8).offset(offset as isize)
             as *const Option<pyo3::ffi::vectorcallfunc>;
-        *ptr
+        ptr.read_unaligned()
     }
 }
 

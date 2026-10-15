@@ -20,6 +20,47 @@ __version__: str
 
 _StreamOrMultiStream = Union["Stream", "MultiStream"]
 
+class StreamError(RuntimeError):
+    """Base class of the errors akayu raises about a stream graph.
+
+    A subclass of RuntimeError. Invalid arguments raise ValueError or
+    TypeError instead.
+    """
+
+class CallbackError(StreamError):
+    """A function given to a node (map, filter, sink, ...) raised.
+
+    The function's exception is `__cause__`. `node` is the node's name
+    and `location` the file and line that built it.
+    """
+
+    node: str
+    location: str
+
+class FrozenGraphError(StreamError):
+    """The graph was changed after compile() froze it, or compiled twice."""
+
+class NotASourceError(StreamError):
+    """emit(), emit_batch() or profiling was used on a node that isn't a source."""
+
+class ReentrantError(StreamError):
+    """A callback re-entered the graph it runs in.
+
+    It emitted into a source its own item came from, or flushed a node
+    that is mid-flush: the graph has a loop. Restructure the pipeline.
+    """
+
+class BusyError(StreamError):
+    """A node was changed or flushed while it was processing an item.
+
+    Build the graph before emitting, and flush after emit() returns.
+    """
+
+class DeadlockError(StreamError):
+    """Waiting would never end: whoever holds what this thread needs is
+    waiting for this thread.
+    """
+
 @final
 class ProfileReport:
     """Profiling report for a pipeline execution.
@@ -1110,9 +1151,16 @@ def from_text_file(path: str, interval: float | None = None) -> TextFileSource:
     ...
 
 __all__ = [
+    "BusyError",
+    "CallbackError",
+    "DeadlockError",
+    "FrozenGraphError",
     "MultiStream",
+    "NotASourceError",
     "ProfileReport",
+    "ReentrantError",
     "Stream",
+    "StreamError",
     "TextFileSource",
     "combine_latest",
     "from_text_file",

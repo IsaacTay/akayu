@@ -26,7 +26,7 @@ source.map(f1).map(f2).filter(p).sink(print)
 # Apply optimizations
 source.compile()
 
-# Graph is now frozen - this would raise RuntimeError:
+# Graph is now frozen - this would raise akayu.FrozenGraphError:
 # source.map(another_func)
 ```
 
@@ -40,8 +40,8 @@ When you call `.compile()` on a stream:
 
 - Every node reachable from it (downstream) is traversed.
 - Each of those nodes is marked as `compiled`.
-- Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on one of those nodes raises a `RuntimeError`.
-- Calling `.compile()` a second time on the same stream raises `RuntimeError: Stream '...' is already compiled`.
+- Any subsequent attempt to call a transformation method (like `.map()`, `.filter()`, `.sink()`, etc.) on one of those nodes raises `akayu.FrozenGraphError`.
+- Calling `.compile()` a second time on the same stream raises `akayu.FrozenGraphError: Stream '...' is already compiled`.
 
 Nodes that are not downstream of the stream stay open. In a graph with several sources
 (`union`, `zip`, `combine_latest`), `s1.compile()` compiles the merge and everything below it,
@@ -59,7 +59,7 @@ branch = source.map(lambda x: x + 1)
 
 source.compile()
 
-# RuntimeError: Cannot modify frozen stream 'map(<lambda>)'.
+# akayu.FrozenGraphError: Cannot modify frozen stream 'map(<lambda>)'.
 # Call compile() only after building the complete graph.
 new_node = branch.map(lambda x: x * 2)
 ```
@@ -71,7 +71,7 @@ flowchart LR
         S["Source 🔒"]:::source --> M1["map 🔒"]:::process --> S1["sink 🔒"]:::sink
     end
 
-    M1 -.->|❌ RuntimeError| New[New Node]:::error
+    M1 -.->|❌ FrozenGraphError| New[New Node]:::error
     
     classDef error stroke:#dc2626,stroke-width:2px,stroke-dasharray: 5 5
     style locked stroke:#9ca3af,stroke-dasharray: 5 5,fill:transparent
@@ -104,7 +104,7 @@ propagating to it. A filter that drops an item ends the chain for it, so
 the later steps aren't called. Profiles and error messages still name each step:
 
 ```text
-RuntimeError: Stream operation failed at node 'map(<lambda>)' (defined at app.py:12)
+akayu.CallbackError: Stream operation failed at node 'map(<lambda>)' (defined at app.py:12)
 ```
 
 **Benchmark impact**: a compiled pipeline of 10 chained maps runs about 142x faster than streamz (see [Benchmarks](../benchmarks.md)); fusion makes the 10 nodes one.

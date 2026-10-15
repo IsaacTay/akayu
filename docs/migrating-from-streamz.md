@@ -71,14 +71,14 @@ mapped = source.map(f)
 mapped.emit(x)
 
 # akayu: explicit error
-mapped.emit(x)  # ❌ RuntimeError: Emit called on non-source node
+mapped.emit(x)  # ❌ akayu.NotASourceError: Emit called on non-source node
 ```
 
 ### 4. Errors from Callbacks
 
 **streamz** raises a callback's exception as it is: a failing `map(lambda x: 1 / x)` raises `ZeroDivisionError`.
 
-**akayu** raises a `RuntimeError` naming the node (and the line that created it), with the original exception as its `__cause__`. `KeyboardInterrupt`, `SystemExit` and other exceptions that aren't `Exception` subclasses pass through unchanged.
+**akayu** raises `akayu.CallbackError` naming the node (`.node`) and the line that created it (`.location`), with the original exception as its `__cause__`. `CallbackError` is a `RuntimeError`, like every error akayu raises about the graph (see [Errors](api.md#errors)). `KeyboardInterrupt`, `SystemExit` and other exceptions that aren't `Exception` subclasses pass through unchanged.
 
 ```python
 import akayu
@@ -88,7 +88,7 @@ source.map(lambda x: 1 / x).sink(print)
 
 try:
     source.emit(0)
-except RuntimeError as e:
+except akayu.CallbackError as e:
     assert isinstance(e.__cause__, ZeroDivisionError)
 ```
 
@@ -131,7 +131,7 @@ See [Benchmarks](benchmarks.md) for the measurements.
 - [ ] Replace `Stream()` with `akayu.Stream()` (and `stream_name=` on sources with `name=`)
 - [ ] Give every `accumulate()` a `start` value
 - [ ] Replace `filter(None)` with `filter(bool)`, and `sink_to_list()` with `to_list()`
-- [ ] Where you caught a callback's exception, catch `RuntimeError` and check `__cause__`
+- [ ] Where you caught a callback's exception, catch `akayu.CallbackError` and check `__cause__`
 - [ ] Replace any `emit()` calls to non-source nodes with `union()` injection pattern
 - [ ] Add `source.compile()` after pipeline construction (optional but recommended)
 - [ ] Consider using `emit_batch()` + `batch_map()` for bulk operations

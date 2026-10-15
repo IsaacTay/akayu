@@ -179,3 +179,31 @@ def test_code_only_results_skip_the_python_analysis():
     finally:
         sys.setprofile(None)
     assert not [c for c in calls if c.startswith("_analyze")], calls
+
+
+def test_cached_results_do_not_keep_captured_graphs_alive():
+    """A result that captured a Stream (a sink's emit target) or a list is
+    not cached: the cache used to keep up to 8 graphs per lambda alive."""
+    import weakref
+
+    def handler():
+        s, t = akayu.Stream(), akayu.Stream()
+        t.map(lambda x: x).sink([].append)
+        s.sink(lambda x: t.emit(x))
+        allowed = list(range(1000))
+        s.filter(lambda x: x in allowed).sink([].append)
+        s.compile()
+        s.emit(1)
+        return weakref.ref(s), weakref.ref(t)
+
+    refs = [handler() for _ in range(20)]
+    gc.collect()
+    assert [r for pair in refs for r in pair if r() is not None] == []
+
+
+def test_cached_results_keep_only_plain_values():
+    """Numbers, strings, types and builtins are cached as before."""
+    from akayu._helpers import _pinnable
+
+    assert all(_pinnable(v) for v in (None, 1, 2.5, "s", b"b", int, len, (1, "a"), frozenset({1})))
+    assert not any(_pinnable(v) for v in ([1], {1: 2}, {1}, akayu.Stream(), object(), (1, [2])))

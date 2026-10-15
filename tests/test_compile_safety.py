@@ -67,3 +67,24 @@ def test_modify_downstream_after_compile():
     s.compile()
     with pytest.raises(RuntimeError, match="Cannot modify frozen stream"):
         n.map(lambda x: x)
+
+
+def test_node_updates_are_not_python_methods():
+    """`_update`/`_update_batch` let a callback start a second update of a
+    compiled node mid-update: two `&mut` to one node through its raw pointer."""
+    assert not hasattr(akayu.Stream, "_update")
+    assert not hasattr(akayu.Stream, "_update_batch")
+
+
+@pytest.mark.parametrize("call", ["emit", "emit_batch"])
+def test_emit_into_a_source_whose_child_was_folded_into_a_chain(call):
+    """compile() folds the map after a seq() into the chain above it; an
+    emit into the seq() node raises, and emit_batch used to panic."""
+    s = akayu.Stream()
+    q = s.map(lambda x: x).seq()
+    out = q.map(lambda x: x + 1).to_list()
+    s.compile()
+    with pytest.raises(akayu.NotASourceError, match="folded into a chain"):
+        getattr(q, call)(1 if call == "emit" else [1, 2])
+    s.emit(1)
+    assert out == [2]

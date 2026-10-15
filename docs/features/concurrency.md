@@ -347,17 +347,17 @@ Where the locks are:
   uncompiled graph, if that flush's callbacks emit into the source the waiting item came from,
   the item fails with an error instead of deadlocking; `compile()` lets the two take turns.
 - Known limitation: in an uncompiled graph, `flush()` / `drain()` called on a node other than a
-  source waits at most half a second for another thread's item inside that node, then raises a
-  `RuntimeError` saying the node "is still processing an item (a callback flushed mid-emit…)",
+  source waits at most half a second for another thread's item inside that node, then raises
+  `akayu.BusyError` saying the node "is still processing an item (a callback flushed mid-emit…)",
   although no callback did. Flush the source instead (it reaches the same buffers), or `compile()`
   the graph; both wait for as long as the item takes.
 - A callback may emit into another source. Emitting into a source that is itself mid-emit (from
-  its own graph, through a `sink(source.emit)` or a loop of sources) fails with "Re-entrant emit
-  detected", and an item that comes back into a node still processing another with "An item
+  its own graph, through a `sink(source.emit)` or a loop of sources) fails with
+  `akayu.ReentrantError` ("Re-entrant emit detected"), and an item that comes back into a node still processing another with "An item
   re-entered a node". Emitting into a source from a callback of its own `flush()` fails too. To
   feed results back, collect them and emit them after `emit()` returns.
 - Adding nodes, compiling or stopping a profile from a callback, on the part of the graph that is
-  running, raises a `RuntimeError`; the graph keeps working afterwards. The same goes for another
+  running, raises `akayu.BusyError`; the graph keeps working afterwards. The same goes for another
   thread doing so while an item passes through: build the graph before threads emit into it.
 - Two threads whose callbacks emit into each other's sources would each wait for the other's
   source forever. Instead, the thread that finds the other one waiting for it fails with
@@ -375,9 +375,10 @@ Where the locks are:
   when the stack is nearly used up, rather than crashing; so do `flush()` and `drain()`.
 - An exception raised in a callback that isn't an `Exception` (`KeyboardInterrupt`, `SystemExit`,
   `GeneratorExit`, or your own `BaseException` subclass) reaches the caller as it is. Any other is
-  wrapped in a `RuntimeError` naming the node ("Stream operation failed at node ..."), with the
-  original as its `__cause__`; so are the errors above (a re-entrant emit raises a `RuntimeError`
-  naming the node whose callback emitted, with "Re-entrant emit detected" as its `__cause__`).
+  wrapped in `akayu.CallbackError` naming the node ("Stream operation failed at node ..."), with
+  the original as its `__cause__`; so are the errors above (a re-entrant emit raises a
+  `CallbackError` naming the node whose callback emitted, with the `ReentrantError` as its
+  `__cause__`).
 - Locks belong to OS threads. Greenlets (gevent, eventlet) share one, so a greenlet emitting into
   a source that another greenlet is mid-emit in looks like a re-entrant emit and raises. Give each
   source a greenlet lock, or emit from one greenlet.
@@ -392,11 +393,11 @@ Where the locks are:
 
 ### Performance Characteristics
 
-| Configuration           | Behavior                                        |
-| ----------------------- | ----------------------------------------------- |
-| `prefetch(n)` alone     | Up to n items in flight, ordered output         |
-| `par()` alone           | Branches run in parallel                        |
-| `par()` + `prefetch(n)` | Parallel branches, each with n items in flight  |
+| Configuration           | Behavior                                       |
+| ----------------------- | ---------------------------------------------- |
+| `prefetch(n)` alone     | Up to n items in flight, ordered output        |
+| `par()` alone           | Branches run in parallel                       |
+| `par()` + `prefetch(n)` | Parallel branches, each with n items in flight |
 
 In every case, at most pool size + 1 calls run at once, and they overlap only while they wait with
 the GIL released.
