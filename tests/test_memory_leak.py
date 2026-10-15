@@ -3,8 +3,12 @@ import os
 import time
 
 import psutil
+import pytest
 
 import akayu
+
+# Seconds per test: run by `just test`, skipped by `just test-quick`.
+pytestmark = pytest.mark.slow
 
 
 def get_process_memory_mb():

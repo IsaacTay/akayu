@@ -27,6 +27,7 @@ import random
 import traceback
 
 import pytest
+from support import canon, seed_chunks, seed_ids
 
 import akayu
 
@@ -518,10 +519,6 @@ def cause(e):
     return type(e).__name__
 
 
-def canon(v):
-    return (type(v).__name__, repr(v))
-
-
 def snapshot(outs):
     snap = {}
     for k, vs in outs.items():
@@ -629,10 +626,10 @@ CHUNK = 500
 
 
 @pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("start", range(0, SEEDS, CHUNK))
-def test_matches_reference(start, multi):
+@pytest.mark.parametrize("seeds", seed_chunks(SEEDS, CHUNK), ids=seed_ids)
+def test_matches_reference(seeds, multi):
     failures = []
-    for seed in range(start, min(start + CHUNK, SEEDS)):
+    for seed in seeds:
         spec, events, compile_at, compile_all, problems = check(seed, multi)
         if problems:
             where = f"seed {seed} compile_at={compile_at} all={compile_all}"

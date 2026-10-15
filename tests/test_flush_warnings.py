@@ -50,7 +50,6 @@ def _prefetch(s):
 GRAPHS = [_chain_to_sink, _chain_to_collect, _non_sink_leaf, _fan_out, _fused_chunk_by, _chunks_between, _prefetch]
 
 
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
 @pytest.mark.parametrize("build", GRAPHS, ids=[g.__name__.lstrip("_") for g in GRAPHS])
 @pytest.mark.parametrize("method", ["flush", "drain"])
 def test_source_flush_does_not_warn(build, compiled, method):
@@ -64,7 +63,6 @@ def test_source_flush_does_not_warn(build, compiled, method):
         getattr(s, method)()
 
 
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
 def test_flushing_a_leaf_directly_still_warns(compiled):
     s = akayu.Stream()
     leaf = s.map(lambda x: x, stream_name="double").map(lambda x: x, stream_name="inc")

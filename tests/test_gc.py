@@ -339,7 +339,6 @@ def _run(build, step, *, compiled, batched):
 
 
 @pytest.mark.parametrize("batched", [False, True], ids=["emit", "emit_batch"])
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
 @pytest.mark.parametrize("build", [b for _, b in STRESS], ids=[n for n, _ in STRESS])
 def test_gc_during_propagation(build, compiled, batched):
     # par() branches run concurrently, so their interleaving is not defined

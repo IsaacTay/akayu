@@ -201,7 +201,6 @@ def test_drain_discards_incomplete():
 # --- Regression tests ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
 @pytest.mark.parametrize(
     "open_, close",
     [

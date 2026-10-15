@@ -1,6 +1,12 @@
 from dataclasses import dataclass
 from types import SimpleNamespace
 
+import pytest
+from support import UNDER_WINE
+
+if UNDER_WINE:
+    pytest.skip("numpy crashes under Wine (ucrtbase crealf)", allow_module_level=True)
+
 import numpy as np
 import streamz as real_streamz
 

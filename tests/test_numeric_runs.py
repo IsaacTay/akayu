@@ -17,6 +17,7 @@ import pytest
 from akayu._helpers import _analyze_lambda
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from support import canon  # exact identity of a number: type and repr
 
 import akayu
 
@@ -92,11 +93,6 @@ def build(chain, compiled):
     if compiled:
         s.compile()
     return s, out
-
-
-def canon(v):
-    """Exact identity of a number: type and repr (NaN, -0.0, 2 vs 2.0)."""
-    return type(v), repr(v)
 
 
 def per_item(s, out, x):
@@ -177,7 +173,7 @@ def test_overflow_falls_back_to_big_ints(batch):
 
     items = [2**61, -(2**61), 2**60 + 3, (2**63 - 1) // 16]
     eager, compiled = run_both(chain, items, batch)
-    assert compiled == eager == [(int, repr((x * 4 + 1) * 4)) for x in items]
+    assert compiled == eager == [canon((x * 4 + 1) * 4) for x in items]
 
 
 @pytest.mark.parametrize(

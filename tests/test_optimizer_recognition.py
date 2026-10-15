@@ -11,6 +11,7 @@ import sys
 
 import pytest
 from akayu._helpers import _analyze_lambda
+from support import run_python
 
 threshold = 10
 allowed = {"a", "b"}
@@ -91,21 +92,12 @@ def test_step_chains_recognized(func, expected):
     assert _analyze_lambda(func) == expected
 
 
-def run_python(code, **env):
-    """Run `code` in a fresh interpreter (the analyzer is set up at import)."""
-    import os
-    import subprocess
-
-    result = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        env={**os.environ, **env},
-        timeout=120,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout.strip(), result.stderr
+def run_ok(code, **env):
+    """Run `code` in a fresh interpreter (the analyzer is set up at
+    import): (stdout, stderr), after checking it succeeded."""
+    status, out, err = run_python(code, **env)
+    assert status == 0, err
+    return out.strip(), err
 
 
 COUNT_CALLS = """
@@ -129,13 +121,13 @@ print(out, native, len(calls))
 
 def test_analyzer_can_be_switched_off():
     """AKAYU_ANALYZER=0: every lambda runs as Python (late binding), quietly."""
-    stdout, stderr = run_python(COUNT_CALLS, AKAYU_ANALYZER="0")
+    stdout, stderr = run_ok(COUNT_CALLS, AKAYU_ANALYZER="0")
     assert stdout == "[15] [15] 1"
     assert "RuntimeWarning" not in stderr
 
 
 def test_analyzer_runs_on_tested_versions():
-    stdout, stderr = run_python(COUNT_CALLS)
+    stdout, stderr = run_ok(COUNT_CALLS)
     assert stdout == "[15] [10] 1"  # the native lambda read k once, at compile()
     assert "RuntimeWarning" not in stderr
 
@@ -143,7 +135,7 @@ def test_analyzer_runs_on_tested_versions():
 def test_a_python_without_the_bytecode_table_still_imports():
     """`dis._inline_cache_entries` is private: without it akayu used to fail
     at import. Now lambdas run as Python, with one warning."""
-    stdout, stderr = run_python("import dis\ndel dis._inline_cache_entries\n" + COUNT_CALLS)
+    stdout, stderr = run_ok("import dis\ndel dis._inline_cache_entries\n" + COUNT_CALLS)
     assert stdout == "[15] [15] 1"
     assert stderr.count("RuntimeWarning") == 1
     assert "can't read" in stderr

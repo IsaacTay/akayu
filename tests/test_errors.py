@@ -573,7 +573,6 @@ class TestErrorTypes:
             assert cls.__module__ == "akayu"
         assert issubclass(akayu.StreamError, RuntimeError)
 
-    @pytest.mark.parametrize("compiled", [False, True])
     def test_callback_error_names_the_node(self, compiled):
         s = akayu.Stream()
         s.map(lambda x: 1 / x, stream_name="inverse").sink([].append)
@@ -594,7 +593,6 @@ class TestErrorTypes:
             s.emit(0)
         assert isinstance(info.value.__cause__, ZeroDivisionError)
 
-    @pytest.mark.parametrize("compiled", [False, True])
     def test_print_sink_error_is_wrapped_like_any_other(self, compiled):
         """Compiled, sink(print) let the error through unwrapped."""
 

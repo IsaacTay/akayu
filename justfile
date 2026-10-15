@@ -1,5 +1,6 @@
-# Benchmarks and slow memory tests, skipped by the quick test runs
-quick_ignores := "--ignore=tests/test_benchmark.py --ignore=tests/test_benchmark_split.py --ignore=tests/test_memory_leak.py --ignore=tests/test_compile_benchmark.py --ignore=tests/test_lambda_benchmark.py --ignore=tests/test_vectorcall_benchmark.py"
+# The quick runs skip benchmarks (tests using pytest-benchmark's fixture) and
+# tests marked slow (the memory-leak checks)
+quick_select := "--benchmark-skip -m 'not slow'"
 
 # Default recipe - show available commands
 default:
@@ -23,7 +24,7 @@ test: build
 
 # Run tests without benchmarks (faster)
 test-quick: build
-    uv run python -m pytest tests/ -v {{quick_ignores}}
+    uv run python -m pytest tests/ -v {{quick_select}}
 
 # Run the quick tests on Python 3.14 (cp314 wheel built outside the 3.13 dev env)
 test-py314:
@@ -39,7 +40,7 @@ test-py314:
     uv export --frozen --no-hashes --no-emit-project > "$work/requirements.txt"
     env -u PYTHONPATH uv venv -q -p "$py" "$work/venv"
     env -u PYTHONPATH uv pip install -q --python "$work/venv/bin/python" -r "$work/requirements.txt" "$work"/*.whl
-    env -u PYTHONPATH LD_LIBRARY_PATH="$libcxx" "$work/venv/bin/python" -m pytest tests/ -q {{quick_ignores}}
+    env -u PYTHONPATH LD_LIBRARY_PATH="$libcxx" "$work/venv/bin/python" -m pytest tests/ -q {{quick_select}}
 
 # Run benchmarks only
 bench: build-release
@@ -124,11 +125,11 @@ wheels:
 
 # Test dist/'s Windows x64 wheel on this host, under Wine (after `just wheels`)
 test-wheel-windows py="3.13":
-    scripts/test-wheel-windows.sh {{py}} {{quick_ignores}}
+    scripts/test-wheel-windows.sh {{py}} {{quick_select}}
 
 # Test dist/'s aarch64 Linux wheel on this host, under qemu (after `just wheels`; slow)
 test-wheel-aarch64 py="3.13":
-    scripts/test-wheel-aarch64.sh {{py}} {{quick_ignores}}
+    scripts/test-wheel-aarch64.sh {{py}} {{quick_select}}
 
 # Each wheel uploads under its own native filename, so different platforms
 # coexist on the server (no clobbering).

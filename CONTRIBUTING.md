@@ -138,7 +138,7 @@ The Windows and aarch64 wheels can be tested here too:
 
 | Command | Description |
 |---------|-------------|
-| `just test-wheel-windows [3.13\|3.14]` | the quick tests on the Windows wheel, under Wine with the embeddable CPython from python.org (the modules that import numpy are skipped: numpy calls a C runtime function Wine lacks) |
+| `just test-wheel-windows [3.13\|3.14]` | the quick tests on the Windows wheel, under Wine with the embeddable CPython from python.org. Tests that fail only under Wine skip themselves when `AKAYU_UNDER_WINE=1` (`tests/support.py`), among them the modules that import numpy, which calls a C runtime function Wine lacks |
 | `just test-wheel-aarch64 [3.13\|3.14]` | the quick tests on the aarch64 wheel, with an aarch64 CPython under qemu user-mode emulation (slow) |
 
 The macOS wheels can't be run here; test them on a Mac.
@@ -149,7 +149,7 @@ The project includes a comprehensive test suite using `pytest`.
 
 | Command | Description |
 |---------|-------------|
-| `just test-quick` | Build + run tests (skipping benchmarks), about 3 minutes |
+| `just test-quick` | Build + run tests, skipping benchmarks (`--benchmark-skip`) and tests marked `slow`; about 3 minutes |
 | `just test` | Build + run all tests, including benchmarks |
 | `just test-py314` | Build a cp314 wheel and run the quick tests on Python 3.14 |
 | `just bench` | Build release + run benchmarks only |
@@ -174,7 +174,8 @@ recipes leave a debug build installed: run `just build-release` before timing an
 
 Several tests generate random graphs and inputs and compare akayu with a plain-Python model. Each
 runs a modest number of seeds by default; set the variable to run more, for example
-`AKAYU_FUZZ_SEEDS=20000 uv run python -m pytest tests -k fuzz`:
+`AKAYU_FUZZ_SEEDS=20000 uv run python -m pytest tests -k fuzz`. A failure names its seed:
+`AKAYU_FUZZ_SEED=1234` runs only that seed, in every fuzzer, to replay it.
 
 | Test | What it checks | Seeds |
 |------|----------------|-------|
@@ -183,9 +184,29 @@ runs a modest number of seeds by default; set the variable to run more, for exam
 | `tests/test_concurrency_fuzz.py` | several threads emitting and flushing at once: every sink gets exactly the items its path predicts, with no errors or hangs | `AKAYU_CONCURRENCY_FUZZ_SEEDS` (default 40) |
 
 The property tests (`test_property_based.py` and others) use Hypothesis with the `akayu` profile
-from `tests/conftest.py`, which turns off its per-example deadline. Each bug found by probing
-unusual flows has a regression test in `tests/test_wacky_flows.py`; cases that used to crash the
-interpreter run in a subprocess.
+from `tests/conftest.py`, which turns off its per-example deadline.
+
+### Where a test goes
+
+A regression test goes in the file for the feature it is about, with a docstring saying what used
+to break; `tests/test_wacky_flows.py` holds the probing rounds' findings that fit no feature.
+
+| Concern | File |
+|---------|------|
+| Errors and their types | `test_errors.py` |
+| Locks, waits and deadlocks between threads | `test_node_lock.py` |
+| Merges (`union`, `zip`, `combine_latest`) | `test_combinator_parity.py`, `test_merge_concurrency.py` |
+| `par()` and the thread pool, `prefetch()` | `test_parallel.py`, `test_pool.py` |
+| `flush()` / `drain()` | `test_collect_flush.py`, `test_flush_parity.py` |
+| `compile()`: what it may not change, fusions | `test_compile_safety.py`, `test_step_chains.py`, `test_chunk_by.py` |
+| The lambda analyzer and native ops | `test_optimizer_recognition.py`, `test_analysis_cache.py`, `test_native_ops_fuzz.py` |
+| Batches | `test_batch_fanout.py`, `test_batch_in_place.py` |
+| Garbage collection and memory | `test_gc.py`, `test_node_memory.py` |
+
+`tests/support.py` has the shared helpers (`run_script` for a test that must run in a fresh
+interpreter, because it could hang or crash, `innermost`, `canon`, the fuzzers' seed handling),
+and `tests/conftest.py` the `compiled` fixture (each test runs uncompiled, then compiled) and
+`fast_switching` (threads switch every microsecond, so races show up).
 
 ## Code Style
 
@@ -207,7 +228,9 @@ together with the quick tests and the documentation checks; run it before submit
 - `src/`: the Rust extension, built with PyO3.
     - `lib.rs`: the `Stream` type and module setup.
     - `operations.rs`, `combinators.rs`: the Python-facing operations (`map`, `filter`, `union`, ...).
-    - `execution.rs`: propagating values through the graph.
+    - `execution.rs`: propagation: a node's update, and handing results to its children (locked, through compiled pointers, or in parallel).
+    - `steps.rs`: what each kind of node does with an item or a batch, fused chains included.
+    - `native.rs`: the native operations compile() runs instead of calling recognised functions.
     - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas. `optimize_topology_full()` lists the passes in order; debug builds check the graph's links after them (`assert_graph_consistent`), so a rewrite that forgets one panics in the tests.
     - `numeric.rs`: unboxed int/float arithmetic and comparisons for runs of numeric steps.
     - `call.rs`: calling functions with extra bound arguments (`map(f, *args, **kwargs)`) natively.
