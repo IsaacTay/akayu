@@ -566,7 +566,7 @@ if __name__ == "__main__":
 
     import akayu.akayu
 
-    if akayu.akayu._build != "release":
+    if getattr(akayu.akayu, "_build", "release") != "release":
         sys.exit("akayu is a debug build: run `just build-release` first")
     topologies = [
         (
