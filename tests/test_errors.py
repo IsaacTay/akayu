@@ -1,4 +1,5 @@
 import functools
+import pathlib
 
 import pytest
 
@@ -581,7 +582,10 @@ class TestErrorTypes:
         with pytest.raises(akayu.CallbackError) as info:
             s.emit(0)
         assert info.value.node == "inverse"
-        assert info.value.location.startswith(__file__)
+        # file:line; compared by name, since under Wine the recorded path is the
+        # Unix one while __file__ is the Z:\\ one
+        file, line = info.value.location.rsplit(":", 1)
+        assert pathlib.PurePath(file).name == pathlib.PurePath(__file__).name and line.isdigit()
         assert isinstance(info.value.__cause__, ZeroDivisionError)
 
     def test_a_wrapped_error_is_not_wrapped_again(self):
