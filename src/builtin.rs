@@ -5,15 +5,15 @@ use pyo3::types::{
     PyBytes, PyDict, PyFloat, PyFrozenSet, PyInt, PyList, PySet, PyString, PyTuple, PyType,
     PyWeakrefMethods, PyWeakrefReference,
 };
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::Arc;
 
 use crate::Stream;
 use crate::helpers::{
-    get_analyze_for_compile, get_builtin_bool, get_builtin_float, get_builtin_frozenset,
-    get_builtin_int, get_builtin_isinstance, get_builtin_len, get_builtin_list, get_builtin_print,
-    get_builtin_set, get_builtin_str, get_builtin_tuple, get_builtin_type, get_operator_attrgetter,
-    get_operator_is, get_operator_is_not, get_operator_itemgetter, get_operator_not,
-    get_operator_truth,
+    InternTable, get_analyze_for_compile, get_builtin_bool, get_builtin_float,
+    get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
+    get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
+    get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
+    get_operator_itemgetter, get_operator_not, get_operator_truth,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic};
 
@@ -269,12 +269,11 @@ fn analyze_bytecode(py: Python, func: &Py<PyAny>) -> Option<Py<PyAny>> {
 /// every function with that code without calling into Python. Entries hold a
 /// weak reference to their code, so the code still dies with its functions,
 /// and a dead one means its address may belong to another object now.
-type CodeOnly = crate::helpers::PtrMap<(usize, bool), CodeOnlyEntry>;
-/// (weak reference to the code, result, is_lambda)
-type CodeOnlyEntry = (Py<PyWeakrefReference>, Option<Py<PyAny>>, bool);
-static CODE_ONLY: LazyLock<Mutex<CodeOnly>> = LazyLock::new(Mutex::default);
-/// Beyond this many live code objects, results are no longer cached here.
-const CODE_ONLY_MAX: usize = 1024;
+/// Values: (result, is_lambda).
+type CodeOnlyKey = (usize, bool);
+type CodeOnlyValue = Arc<(Option<Py<PyAny>>, bool)>;
+static CODE_ONLY: InternTable<CodeOnlyKey, Py<PyWeakrefReference>, CodeOnlyValue> =
+    InternTable::new(256, 1024);
 
 /// `_analyze_lambda(func)` (or `_analyze_accumulate` with `accumulate`) for a
 /// plain Python function. None for anything else: builtins have no bytecode,
@@ -354,12 +353,9 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
         Bound::from_borrowed_ptr(py, pyo3::ffi::PyFunction_GetCode(func.as_ptr()))
     };
     let key = (code.as_ptr() as usize, accumulate);
-    if let Some((weak, result, is_lambda)) = CODE_ONLY
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&key)
-        && weak.bind(py).upgrade().is_some()
-    {
+    let alive = |weak: &Py<PyWeakrefReference>| weak.bind(py).upgrade().is_some();
+    if let Some(found) = CODE_ONLY.get(&key, alive) {
+        let (result, is_lambda) = &*found;
         return Some(Analysis {
             result: result.as_ref().map(|r| r.clone_ref(py)),
             code_only: true,
@@ -385,26 +381,8 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
         answer.extract(py).ok()?;
     let result = (!result.is_none(py)).then_some(result);
     if code_only && let Ok(weak) = PyWeakrefReference::new(&code) {
-        let entry = (
-            weak.unbind(),
-            result.as_ref().map(|r| r.clone_ref(py)),
-            is_lambda,
-        );
-        let freed = {
-            let mut cache = CODE_ONLY.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut dead = CodeOnly::default();
-            if cache.len() >= CODE_ONLY_MAX / 4 {
-                let live;
-                (live, dead) = std::mem::take(&mut *cache)
-                    .into_iter()
-                    .partition(|(_, (weak, ..))| weak.bind(py).upgrade().is_some());
-                *cache = live;
-            }
-            let replaced = (cache.len() < CODE_ONLY_MAX).then(|| cache.insert(key, entry));
-            (dead, replaced)
-        };
-        // Freed outside the lock: freeing can run Python code.
-        drop(freed);
+        let value = Arc::new((result.as_ref().map(|r| r.clone_ref(py)), is_lambda));
+        CODE_ONLY.insert(key, weak.unbind(), value, alive);
     }
     Some(Analysis {
         result,
@@ -420,23 +398,15 @@ fn analysis(py: Python, func: &Py<PyAny>, accumulate: bool) -> Option<Analysis> 
 /// share one immutable op tree instead of allocating their own. Entries hold
 /// their result, so a key can't be reused by another object; entries only
 /// this table still references are dropped when it grows.
-type ParsedOps = crate::helpers::PtrMap<usize, (Py<PyAny>, Arc<BuiltinOp>)>;
-static PARSED: LazyLock<Mutex<ParsedOps>> = LazyLock::new(Mutex::default);
-/// Beyond this many entries, those only `PARSED` still holds are dropped.
-const PARSED_MAX: usize = 256;
+static PARSED: InternTable<usize, Py<PyAny>, Arc<BuiltinOp>> = InternTable::new(256, 4096);
 
 /// The op for an analysis `result`, shared through `PARSED` when the
 /// analyzer `kept` it (a result it doesn't keep is made afresh each time: an
 /// entry would keep it, and whatever it captured, alive).
 fn parse_cached(py: Python, result: &Py<PyAny>, kept: bool) -> Option<Arc<BuiltinOp>> {
     let key = result.as_ptr() as usize;
-    if kept
-        && let Some((_, op)) = PARSED
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&key)
-    {
-        return Some(Arc::clone(op));
+    if kept && let Some(op) = PARSED.get(&key, |_| true) {
+        return Some(op);
     }
     // Parsed without the lock: parsing calls into Python, which could need it.
     let op = parse_analysis_tuple(py, result.bind(py))?;
@@ -446,28 +416,11 @@ fn parse_cached(py: Python, result: &Py<PyAny>, kept: bool) -> Option<Arc<Builti
         }
         _ => op,
     });
-    if kept {
-        let freed = {
-            let mut parsed = PARSED.lock().unwrap_or_else(PoisonError::into_inner);
-            let mut freed = Vec::new();
-            if parsed.len() >= PARSED_MAX {
-                parsed.retain(|_, entry| {
-                    let live = entry.0.get_refcnt(py) > 1;
-                    if !live {
-                        freed.push((entry.0.clone_ref(py), Arc::clone(&entry.1)));
-                    }
-                    live
-                });
-            }
-            let entry = parsed.entry(key).or_insert((result.clone_ref(py), op));
-            (freed, Arc::clone(&entry.1))
-        };
-        // Freed outside the lock: freeing can run Python code.
-        let (freed, op) = freed;
-        drop(freed);
+    if !kept {
         return Some(op);
     }
-    Some(op)
+    let in_use = |held: &Py<PyAny>| held.get_refcnt(py) > 1;
+    Some(PARSED.insert(key, result.clone_ref(py), op, in_use))
 }
 
 /// Detect builtin fast-path for a Map function via identity checks only.
