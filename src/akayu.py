@@ -87,6 +87,18 @@ except (ImportError, AttributeError):
 
 _CMP_OP = dis.cmp_op  # ('<', '<=', '==', '!=', '>', '>=')
 
+# Opcodes a newer Python spells differently, as the patterns below spell
+# them. (3.14 also has LOAD_SMALL_INT, whose oparg is the int itself, and
+# spells BINARY_SUBSCR as BINARY_OP []: see _fast_extract.)
+_RESPELLED = {
+    "LOAD_FAST_BORROW": "LOAD_FAST",  # 3.14
+    "LOAD_FAST_BORROW_LOAD_FAST_BORROW": "LOAD_FAST_LOAD_FAST",  # 3.14
+}
+
+# The operators the native ops support (BinaryOp and CompareOp in Rust).
+_BINARY_OPS = frozenset(("+", "-", "*", "/", "//", "%", "**"))
+_COMPARE_OPS = frozenset(("==", "!=", "<", ">", "<=", ">="))
+
 
 def _fast_extract(co):
     """Extract (opname, argval) pairs from a code object, ~19x faster than dis.
@@ -113,12 +125,8 @@ def _fast_extract(co):
         j += caches * 2  # skip inline cache entries
         if name is None or name in _NOISE_OPCODES or name == "RETURN_VALUE":
             continue
-        # Python 3.14 spellings of 3.13 opcodes, so the patterns below match
-        if name == "LOAD_FAST_BORROW":
-            name = "LOAD_FAST"
-        elif name == "LOAD_FAST_BORROW_LOAD_FAST_BORROW":
-            name = "LOAD_FAST_LOAD_FAST"
-        elif name == "LOAD_SMALL_INT":  # the int is the oparg itself
+        name = _RESPELLED.get(name, name)
+        if name == "LOAD_SMALL_INT":  # 3.14: the int is the oparg itself
             result.append(("LOAD_CONST", arg))
             offsets.append(offset)
             continue
@@ -398,7 +406,7 @@ def _analyze_simple(instrs, func):
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
             op_name = instrs[2][1]
-            if op_name in ("==", "!=", "<", ">", "<=", ">="):
+            if op_name in _COMPARE_OPS:
                 return ("compare", op_name, val)
 
     # --- BinOp: lambda x: x + 1 ---
@@ -407,7 +415,7 @@ def _analyze_simple(instrs, func):
         val = _resolve_value(instrs[1], func)
         if val is not _UNRESOLVABLE:
             op_name = instrs[2][1]
-            if op_name in ("+", "-", "*", "/", "//", "%", "**"):
+            if op_name in _BINARY_OPS:
                 return ("binop", op_name, val)
 
     # --- Contains: lambda x: x in collection ---
@@ -478,94 +486,10 @@ def _analyze_simple(instrs, func):
         if start is not _UNRESOLVABLE and stop is not _UNRESOLVABLE:
             return ("slice", start, stop)
 
-    # --- Chained patterns ---
-    # These reference x once at the start and build a pipeline
-
-    # lambda x: x.attr <op> val  (Chain: AttrGetter → Compare/BinOp/Contains)
-    # LOAD_FAST, LOAD_ATTR(name), LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/BINARY_OP/CONTAINS_OP/IS_OP
-    if n == 4 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "LOAD_ATTR":
-        attr_name = instrs[1][1]
-        val = _resolve_value(instrs[2], func)
-        if val is not _UNRESOLVABLE:
-            if instrs[3][0] == "COMPARE_OP":
-                op_name = instrs[3][1]
-                if op_name in ("==", "!=", "<", ">", "<=", ">="):
-                    return ("chain", ("attrgetter", attr_name), ("compare", op_name, val))
-            if instrs[3][0] == "BINARY_OP":
-                op_name = instrs[3][1]
-                if op_name in ("+", "-", "*", "/", "//", "%", "**"):
-                    return ("chain", ("attrgetter", attr_name), ("binop", op_name, val))
-            if instrs[3][0] == "CONTAINS_OP":
-                if instrs[3][1] == 0:
-                    return ("chain", ("attrgetter", attr_name), ("contains", val))
-                else:
-                    return ("chain", ("attrgetter", attr_name), ("not_contains", val))
-            if instrs[3][0] == "IS_OP":
-                if instrs[3][1] == 0:
-                    return ("chain", ("attrgetter", attr_name), ("is", val))
-                else:
-                    return ("chain", ("attrgetter", attr_name), ("is_not", val))
-
-    # lambda x: x[k] <op> val  (Chain: ItemGetter → Compare/etc.)
-    # LOAD_FAST, LOAD_CONST/LOAD_DEREF(k), BINARY_SUBSCR, LOAD_CONST/LOAD_DEREF(val), COMPARE_OP/etc.
-    if n == 5 and instrs[0][0] == "LOAD_FAST" and instrs[2][0] == "BINARY_SUBSCR":
-        key = _resolve_value(instrs[1], func)
-        val = _resolve_value(instrs[3], func)
-        if key is not _UNRESOLVABLE and val is not _UNRESOLVABLE:
-            if instrs[4][0] == "COMPARE_OP":
-                op_name = instrs[4][1]
-                if op_name in ("==", "!=", "<", ">", "<=", ">="):
-                    return ("chain", ("itemgetter", key), ("compare", op_name, val))
-            if instrs[4][0] == "BINARY_OP":
-                op_name = instrs[4][1]
-                if op_name in ("+", "-", "*", "/", "//", "%", "**"):
-                    return ("chain", ("itemgetter", key), ("binop", op_name, val))
-            if instrs[4][0] == "CONTAINS_OP":
-                if instrs[4][1] == 0:
-                    return ("chain", ("itemgetter", key), ("contains", val))
-                else:
-                    return ("chain", ("itemgetter", key), ("not_contains", val))
-            if instrs[4][0] == "IS_OP":
-                if instrs[4][1] == 0:
-                    return ("chain", ("itemgetter", key), ("is", val))
-                else:
-                    return ("chain", ("itemgetter", key), ("is_not", val))
-
-    # lambda x: len(x) > 0 etc.  (Chain: Len → Compare)
-    # LOAD_GLOBAL(len), LOAD_FAST, CALL 1, LOAD_CONST(val), COMPARE_OP
-    if n == 5 and instrs[0][0] == "LOAD_GLOBAL" and instrs[1][0] == "LOAD_FAST" and instrs[2][0] == "CALL":
-        resolved_func = _resolve_value(instrs[0], func)
-        if resolved_func in (
-            _builtins.len,
-            _builtins.str,
-            _builtins.int,
-            _builtins.float,
-            _builtins.bool,
-            _builtins.type,
-        ):
-            val = _resolve_value(instrs[3], func)
-            if val is not _UNRESOLVABLE:
-                first_op = {
-                    _builtins.len: "len",
-                    _builtins.str: "str",
-                    _builtins.int: "int",
-                    _builtins.float: "float",
-                    _builtins.bool: "bool",
-                    _builtins.type: "type",
-                }[resolved_func]
-                if instrs[4][0] == "COMPARE_OP":
-                    op_name = instrs[4][1]
-                    if op_name in ("==", "!=", "<", ">", "<=", ">="):
-                        return ("chain", (first_op,), ("compare", op_name, val))
-                if instrs[4][0] == "BINARY_OP":
-                    op_name = instrs[4][1]
-                    if op_name in ("+", "-", "*", "/", "//", "%", "**"):
-                        return ("chain", (first_op,), ("binop", op_name, val))
-
     # --- Negate: lambda x: not <expr> ---
     # <expr instrs> + UNARY_NOT
     if n >= 2 and instrs[-1][0] == "UNARY_NOT":
-        inner = _analyze_simple(instrs[:-1], func)
+        inner = _analyze_steps(instrs[:-1], func)
         if inner is not None:
             return ("negate", inner)
 
@@ -582,7 +506,7 @@ def _analyze_simple(instrs, func):
             end = pos + 1
             while end < len(remaining) and remaining[end][0] != "LOAD_FAST":
                 end += 1
-            sub = _analyze_simple(remaining[pos:end], func)
+            sub = _analyze_steps(remaining[pos:end], func)
             if sub is None:
                 break
             groups.append(sub)
@@ -686,6 +610,11 @@ def _analyze_expr(instrs, func):
 
 
 _ITEM = ("LOAD_FAST", None)  # stands for the previous step's result
+
+
+def _analyze_steps(instrs, func):
+    """One step on the item, or a chain of them (no and/or)."""
+    return _analyze_simple(instrs, func) or _analyze_postfix(instrs, func)
 
 
 def _analyze_postfix(instrs, func):
@@ -926,9 +855,6 @@ def _analyze_code(func, code, ctx):
     return _analyze_expr(_bind_defaults(clean, code), ctx)
 
 
-_ACCUMULATE_OPS = frozenset(("+", "-", "*", "/", "//", "%", "**"))
-
-
 def _analyze_accumulate(func):
     """Recognise an accumulate function `f(acc, x)` that has a native form.
 
@@ -969,13 +895,13 @@ def _analyze_accumulate_code(func, code, ctx):
         else:
             instrs.append((op, av))
     ops = [op for op, _ in instrs]
-    if ops == ["LOAD_FAST", "LOAD_FAST", "BINARY_OP"] and instrs[2][1] in _ACCUMULATE_OPS:
+    if ops == ["LOAD_FAST", "LOAD_FAST", "BINARY_OP"] and instrs[2][1] in _BINARY_OPS:
         if (instrs[0][1], instrs[1][1]) == (acc, item):
             return ("acc_binop", instrs[2][1])
         return None
     if ops[0::2] == ["LOAD_FAST", "BINARY_OP"] and len(ops) == 3 and instrs[0][1] == acc:
         value = _resolve_value(instrs[1], ctx)
-        if value is not _UNRESOLVABLE and instrs[2][1] in _ACCUMULATE_OPS:
+        if value is not _UNRESOLVABLE and instrs[2][1] in _BINARY_OPS:
             return ("acc_binop_const", instrs[2][1], value)
         return None
     if ops == ["LOAD_GLOBAL", "LOAD_FAST", "LOAD_FAST", "CALL"] and instrs[3][1] == 2:
