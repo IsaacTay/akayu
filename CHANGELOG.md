@@ -243,6 +243,10 @@ independent of machine load:
   any akayu lock, including those of merges.
 - `compile()`'s chunk_by fusion left the nodes after the fused node listing the old collect as
   their parent.
+- With a worker idle in the thread pool, `par()` branches submitted together all went to that one
+  worker: a woken worker still counted as idle until it took its task, so no other worker was
+  started. Eight 0.1 s branches took 0.4 s instead of 0.1 s; `prefetch()` calls were held up the
+  same way.
 
 ## 1.0.0
 

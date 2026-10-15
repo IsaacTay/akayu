@@ -85,3 +85,19 @@ def calls_during(fn, func):
     finally:
         sys.setprofile(None)
     return count
+
+
+def all_at_once(parties, timeout=10):
+    """A function that passes its argument on only once `parties` calls are
+    inside it at the same time: proof that they overlap, with no timing
+    margin to tune (calls made one after another time out and raise
+    `threading.BrokenBarrierError`)."""
+    import threading
+
+    barrier = threading.Barrier(parties, timeout=timeout)
+
+    def meet(x):
+        barrier.wait()
+        return x
+
+    return meet

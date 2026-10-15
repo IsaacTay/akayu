@@ -3,6 +3,8 @@
 import threading
 import time
 
+from support import all_at_once
+
 from akayu import Stream, union
 
 
@@ -58,76 +60,47 @@ def test_par_no_downstream():
 
 
 def test_par_timing():
-    """Test that parallel branches actually run concurrently."""
+    """Parallel branches run at the same time: each waits inside its map
+    for the other (run one after another, the first would time out)."""
     results = []
-
-    def slow_branch(x, delay):
-        time.sleep(delay)
-        results.append((x, delay))
-        return x
+    meet = all_at_once(2)
 
     s = Stream()
     p = s.par()
-    # Two branches, each with 0.1s delay
-    p.map(lambda x: slow_branch(x, 0.1)).sink(lambda x: None)
-    p.map(lambda x: slow_branch(x, 0.1)).sink(lambda x: None)
+    p.map(lambda x: meet(x)).sink(results.append)
+    p.map(lambda x: meet(x)).sink(results.append)
 
-    start = time.time()
     s.emit(1)
-    elapsed = time.time() - start
-
-    # If sequential: ~0.2s, if parallel: ~0.1s
-    # Allow some margin for thread overhead
-    assert elapsed < 0.18, f"Expected parallel execution (~0.1s), got {elapsed:.3f}s"
-    assert len(results) == 2
+    assert results == [1, 1]
 
 
 def test_par_three_branches_timing():
-    """Test par with three branches."""
+    """Three branches all run at once."""
     results = []
-
-    def slow_branch(x, branch_id):
-        time.sleep(0.05)
-        results.append(branch_id)
-        return x
+    meet = all_at_once(3)
 
     s = Stream()
     p = s.par()
-    p.map(lambda x: slow_branch(x, "A")).sink(lambda x: None)
-    p.map(lambda x: slow_branch(x, "B")).sink(lambda x: None)
-    p.map(lambda x: slow_branch(x, "C")).sink(lambda x: None)
+    for branch_id in "ABC":
+        p.map(lambda x, b=branch_id: (meet(x), b)[1]).sink(results.append)
 
-    start = time.time()
     s.emit(1)
-    elapsed = time.time() - start
-
-    # If sequential: ~0.15s, if parallel: ~0.05s
-    assert elapsed < 0.12, f"Expected parallel execution (~0.05s), got {elapsed:.3f}s"
-    assert len(results) == 3
+    assert sorted(results) == ["A", "B", "C"]
 
 
 def test_par_with_union():
-    """Test parallel branches that merge via union."""
+    """Parallel branches that merge via union run at the same time."""
     results = []
-
-    def slow_load(x, source):
-        time.sleep(0.05)
-        return f"{source}:{x}"
+    meet = all_at_once(2)
 
     s = Stream()
     p = s.par()
-    branch_a = p.map(lambda x: slow_load(x, "A"))
-    branch_b = p.map(lambda x: slow_load(x, "B"))
+    branch_a = p.map(lambda x: f"A:{meet(x)}")
+    branch_b = p.map(lambda x: f"B:{meet(x)}")
     merged = union(branch_a, branch_b)
     merged.sink(results.append)
 
-    start = time.time()
     s.emit("file1")
-    elapsed = time.time() - start
-
-    # Both branches should complete in parallel
-    assert elapsed < 0.09, f"Expected parallel execution, got {elapsed:.3f}s"
-    assert len(results) == 2
     assert sorted(results) == ["A:file1", "B:file1"]
 
 
@@ -311,37 +284,29 @@ def test_seq_after_par():
 
 
 def test_par_seq_timing():
-    """Test that par is parallel and seq is sequential."""
-    results = []
-
-    def timed_op(x, label):
-        start = time.time()
-        time.sleep(0.05)
-        results.append((label, time.time() - start))
-        return x
-
-    # Test parallel timing
+    """par() branches overlap; seq() branches run one after another, on one
+    thread."""
+    meet = all_at_once(2)
     s1 = Stream()
     p = s1.par()
-    p.map(lambda x: timed_op(x, "A")).sink(lambda x: None)
-    p.map(lambda x: timed_op(x, "B")).sink(lambda x: None)
+    p.map(lambda x: meet(x)).sink(lambda x: None)
+    p.map(lambda x: meet(x)).sink(lambda x: None)
+    s1.emit(1)  # would time out if the branches ran one after another
 
-    start = time.time()
-    s1.emit(1)
-    par_elapsed = time.time() - start
+    spans, lock = [], threading.Lock()
 
-    results.clear()
+    def timed_op(x):
+        start = time.perf_counter()
+        time.sleep(0.01)
+        with lock:
+            spans.append((start, time.perf_counter(), threading.get_ident()))
+        return x
 
-    # Test sequential timing
     s2 = Stream()
     seq = s2.seq()
-    seq.map(lambda x: timed_op(x, "A")).sink(lambda x: None)
-    seq.map(lambda x: timed_op(x, "B")).sink(lambda x: None)
-
-    start = time.time()
+    seq.map(timed_op).sink(lambda x: None)
+    seq.map(timed_op).sink(lambda x: None)
     s2.emit(1)
-    seq_elapsed = time.time() - start
-
-    # Parallel should be ~50ms, sequential should be ~100ms
-    assert par_elapsed < 0.08, f"par should be ~50ms, got {par_elapsed * 1000:.0f}ms"
-    assert seq_elapsed > 0.09, f"seq should be ~100ms, got {seq_elapsed * 1000:.0f}ms"
+    (_, a_end, a_thread), (b_start, _, b_thread) = sorted(spans)
+    assert a_end <= b_start
+    assert a_thread == b_thread
