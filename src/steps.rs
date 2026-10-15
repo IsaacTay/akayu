@@ -679,8 +679,10 @@ pub(crate) fn apply_logic_batch(
                     wrap_error(py, list_append(py, list, x), ctx.name, ctx.source_location)?;
                 }
             } else {
-                for x in &items {
-                    sink_one(py, func, ctx, x)?;
+                // By value: each item is freed as soon as the sink is done
+                // with it, not when the whole batch is.
+                for x in items {
+                    sink_one(py, func, ctx, &x)?;
                 }
             }
             if let Some(t) = t {
