@@ -1,6 +1,10 @@
 """Unusual flows people bend akayu into, which used to crash, hang, panic or
 silently lose data. Each test pins the behaviour it was fixed to; the ones
 that used to crash the interpreter run in a subprocess.
+
+Sections are by topic. A new regression test goes in its feature's own file
+(CONTRIBUTING.md has the table); this one holds the probing rounds' findings
+that fit no feature.
 """
 
 import gc
@@ -633,7 +637,7 @@ def test_a_failing_truth_test_names_the_filter(compiled):
     assert isinstance(info.value.__cause__, ValueError)
 
 
-# --- Round 3: odd callables, API misuse, environments ---
+# --- Odd callables, API misuse and environments (probing round 3) ---
 
 
 @pytest.mark.parametrize(
@@ -764,7 +768,7 @@ def test_the_stream_type_names_its_module():
     assert akayu.Stream.__module__ == "akayu"
 
 
-# --- Round 4: many threads at once ---
+# --- Many threads at once (probing round 4) ---
 
 
 def test_a_flush_and_an_emit_from_different_sources_of_a_union(compiled, fast_switching):
@@ -1005,7 +1009,7 @@ def test_a_profile_prints_a_node_below_a_merge_once():
     assert len(text.splitlines()) < 400
 
 
-# --- Round 5: signal handlers, finalizers and other threads around par() ---
+# --- Signal handlers, finalizers and other threads around par() (probing round 5) ---
 
 
 @pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="needs signal.setitimer")
@@ -1145,7 +1149,7 @@ def test_many_short_lived_threads_through_par_and_prefetch():
     assert sorted(out) == sorted([i * k for i in range(300) for k in (2, 3)])
 
 
-# --- Round 5: waiting for a source's lock ---
+# --- Waiting for a source's lock (probing round 5) ---
 # A thread waits for a source's lock only while its holder isn't waiting for
 # it in turn. This used to be judged by who submitted the waiting pool task:
 # its submitter holding the source counted as a feedback loop, even when it

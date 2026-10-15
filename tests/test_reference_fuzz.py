@@ -8,7 +8,9 @@ accumulate(returns_state=True), the fused `collect()` +
 `filter(p).sink(lambda _: c.flush())` idiom in either branch order, sinks
 that feed back into the source, and extra sources feeding the merges) and a
 random script of emit(), emit_batch(), flush() and drain() calls, aimed at
-any source, with compile() at a random point, of one source or of all.
+any source, with compile() at a random point, of one source or of all. In
+some scripts the graph grows: its last nodes are only added between two
+calls (before any compile()), so items emitted earlier never reach them.
 Every sink's output after every event must match a small pure-Python
 interpreter of the same graph, which encodes the intended semantics: errors
 at the same step, one flush() reaching each node once, buffered items kept
@@ -18,7 +20,8 @@ Outputs after a failed batch or flush are not compared (a batch goes step by
 step, so how far it got differs), nor after a failed item that a flatten or
 batch_map had split into several (they go on together, like a batch).
 
-Set AKAYU_FUZZ_SEEDS to run more seeds.
+Set AKAYU_FUZZ_SEEDS to run more seeds (AKAYU_FUZZ_BIG_SEEDS for the graphs
+of 30 to 60 nodes), and AKAYU_FUZZ_SEED to replay one.
 """
 
 import collections
@@ -105,7 +108,10 @@ PREFETCHED = ("pmap", "pfilter", "pbmap")
 TERMINAL = ("sink", "lsink", "feedback", "tolist", "toset", "flusher")
 
 
-def gen(rng, multi=False):
+def gen(rng, multi=False, size=(2, 14)):
+    """(spec, events, compile_at, late): the graph, the script, the event
+    compile() runs before (None: never), and the first node built only at
+    the script's "grow" event (None: all built up front)."""
     spec = [("source", [], None)]
     zone = [()]
     sources = [0]
@@ -123,7 +129,7 @@ def gen(rng, multi=False):
             return zone[p] + ((p, par_kids[p]),)
         return zone[p]
 
-    for _ in range(rng.randint(2, 14)):
+    for _ in range(rng.randint(*size)):
         open_nodes = [i for i in range(len(spec)) if i not in sinks]
         kind = rng.choices(list(KINDS), list(KINDS.values()))[0]
         if kind in ("union", "zip", "combine"):
@@ -223,12 +229,21 @@ def gen(rng, multi=False):
             events.append(("flush", src, None))
         else:
             events.append(("drain", src, None))
-    compile_at = rng.choice([None, 0, rng.randint(0, len(events))])
-    return spec, events, compile_at
+    late = None
+    if rng.random() < 0.3 and len(spec) > len(sources):
+        # The graph grows: the nodes from `late` on are added at the "grow"
+        # event, before compile() (a compiled graph can't grow).
+        late = rng.randint(len(sources), len(spec) - 1)
+        grow = rng.randint(0, len(events))
+        events.insert(grow, ("grow", None, None))
+        compile_at = rng.choice([None, rng.randint(grow + 1, len(events))])
+    else:
+        compile_at = rng.choice([None, 0, rng.randint(0, len(events))])
+    return spec, events, compile_at, late
 
 
 class Model:
-    def __init__(self, spec):
+    def __init__(self, spec, upto=None):
         self.spec = spec
         self.children = [[] for _ in spec]
         self.st = {}
@@ -236,25 +251,30 @@ class Model:
         self.busy_src = set()  # sources mid-emit or mid-flush
         self.active = set()  # nodes mid-update (re-entry is refused)
         self.multi = False
-        for i, (kind, parents, payload) in enumerate(spec):
-            for slot, p in enumerate(parents):
-                self.children[p].append((i, slot))
-            if kind in ("accumulate", "accs"):
-                self.st[i] = payload[1]
-            elif kind == "zip":
-                self.st[i] = [[] for _ in parents]
-            elif kind == "combine":
-                self.st[i] = [[False, None] for _ in parents]
-            elif kind in ("collect", "chunk_by"):
-                self.st[i] = []
-            elif kind == "between":
-                self.st[i] = [False, []]
-            elif kind in PREFETCHED:
-                self.st[i] = collections.deque()
-            if kind in ("sink", "lsink", "feedback", "tolist"):
-                self.out[i] = []
-            elif kind == "toset":
-                self.out[i] = set()
+        for i in range(len(spec) if upto is None else upto):
+            self.add(i)
+
+    def add(self, i):
+        """Build node i: hang it below its parents, with fresh state."""
+        kind, parents, payload = self.spec[i]
+        for slot, p in enumerate(parents):
+            self.children[p].append((i, slot))
+        if kind in ("accumulate", "accs"):
+            self.st[i] = payload[1]
+        elif kind == "zip":
+            self.st[i] = [[] for _ in parents]
+        elif kind == "combine":
+            self.st[i] = [[False, None] for _ in parents]
+        elif kind in ("collect", "chunk_by"):
+            self.st[i] = []
+        elif kind == "between":
+            self.st[i] = [False, []]
+        elif kind in PREFETCHED:
+            self.st[i] = collections.deque()
+        if kind in ("sink", "lsink", "feedback", "tolist"):
+            self.out[i] = []
+        elif kind == "toset":
+            self.out[i] = set()
 
     def emit(self, src, x):
         if src in self.busy_src:
@@ -442,9 +462,11 @@ class Model:
             self.drain(c, seen)
 
 
-def build(spec):
-    nodes, outs = [], {}
-    for i, (kind, parents, payload) in enumerate(spec):
+def build(spec, nodes, outs, start, stop):
+    """Build nodes start..stop of `spec` onto `nodes` (sinks' outputs into
+    `outs`)."""
+    for i in range(start, stop):
+        kind, parents, payload = spec[i]
         ps = [nodes[p] for p in parents]
         if kind == "source":
             n = akayu.Stream()
@@ -510,7 +532,6 @@ def build(spec):
 
             n = ps[0].sink(fb)
         nodes.append(n)
-    return nodes, outs
 
 
 def cause(e):
@@ -529,13 +550,16 @@ def snapshot(outs):
     return snap
 
 
-def run_reference(spec, events):
-    m = Model(spec)
+def run_reference(spec, events, late):
+    m = Model(spec, late)
     log = []
     for kind, src, arg in events:
         m.multi = False
         try:
-            if kind == "emit":
+            if kind == "grow":
+                for i in range(late, len(spec)):
+                    m.add(i)
+            elif kind == "emit":
                 m.emit(src, arg)
             elif kind == "batch":
                 for x in arg:
@@ -557,17 +581,20 @@ def run_reference(spec, events):
     return log
 
 
-def run_akayu(spec, events, compile_at, compile_all):
-    nodes, outs = build(spec)
+def run_akayu(spec, events, compile_at, compile_all, late):
+    nodes, outs = [], {}
+    build(spec, nodes, outs, 0, len(spec) if late is None else late)
     sources = [i for i, (k, _, _) in enumerate(spec) if k == "source"]
     log = []
     for n, (kind, src, arg) in enumerate(events):
         if n == compile_at:
             for s in sources if compile_all else sources[:1]:
                 nodes[s].compile()
-        node = nodes[src]
+        node = nodes[src] if src is not None else None
         try:
-            if kind == "emit":
+            if kind == "grow":
+                build(spec, nodes, outs, late, len(spec))
+            elif kind == "emit":
                 node.emit(arg)
             elif kind == "batch":
                 node.emit_batch(list(arg))
@@ -588,15 +615,15 @@ def run_akayu(spec, events, compile_at, compile_all):
     return log
 
 
-def check(seed, multi=False):
+def check(seed, multi=False, size=(2, 14)):
     rng = random.Random(seed)
-    spec, events, compile_at = gen(rng, multi)
+    spec, events, compile_at, late = gen(rng, multi, size)
     compile_all = rng.random() < 0.5
-    ref = run_reference(spec, events)
+    ref = run_reference(spec, events, late)
     problems = []
     for at in sorted({None, compile_at}, key=lambda v: -1 if v is None else v):
         try:
-            got = run_akayu(spec, events, at, compile_all)
+            got = run_akayu(spec, events, at, compile_all, late)
         except BaseException as e:
             if isinstance(e, KeyboardInterrupt):
                 raise
@@ -625,13 +652,55 @@ SEEDS = int(os.environ.get("AKAYU_FUZZ_SEEDS", "4000"))
 CHUNK = 500
 
 
-@pytest.mark.parametrize("multi", [False, True])
-@pytest.mark.parametrize("seeds", seed_chunks(SEEDS, CHUNK), ids=seed_ids)
-def test_matches_reference(seeds, multi):
+BIG_SEEDS = int(os.environ.get("AKAYU_FUZZ_BIG_SEEDS", "300"))
+BIG_CHUNK = 100
+
+
+def failures_of(seeds, multi, size=(2, 14)):
     failures = []
     for seed in seeds:
-        spec, events, compile_at, compile_all, problems = check(seed, multi)
+        spec, events, compile_at, compile_all, problems = check(seed, multi, size)
         if problems:
             where = f"seed {seed} compile_at={compile_at} all={compile_all}"
             failures.append(f"{where}\n spec={spec}\n events={events}\n {problems[:2]}")
+    return failures
+
+
+@pytest.mark.parametrize("multi", [False, True])
+@pytest.mark.parametrize("seeds", seed_chunks(SEEDS, CHUNK), ids=seed_ids)
+def test_matches_reference(seeds, multi):
+    failures = failures_of(seeds, multi)
     assert not failures, "\n".join(failures[:3])
+
+
+@pytest.mark.parametrize("seeds", seed_chunks(BIG_SEEDS, BIG_CHUNK), ids=seed_ids)
+def test_big_graphs_match_reference(seeds):
+    """Graphs of 30 to 60 nodes: deep chains, wide fan-outs and merges of
+    merges, which compile() fuses and rewrites the most (debug builds also
+    check every rewrite's links, see `assert_graph_consistent`)."""
+    failures = failures_of(seeds, multi=True, size=(30, 60))
+    assert not failures, "\n".join(failures[:3])
+
+
+# What the fuzzer calls, and why the rest isn't fuzzed: a method added to
+# Stream must be fuzzed, or listed here with a reason.
+FUZZED = {
+    "accumulate", "batch_map", "chunk_by", "chunks_between", "collect", "combine_latest", "compile",
+    "drain", "emit", "emit_batch", "filter", "flatten", "flush", "map", "par", "prefetch", "seq",
+    "sink", "starmap", "to_list", "to_set", "union", "zip",
+}  # fmt: skip
+NOT_FUZZED = {
+    "parallel": "an alias of par()",
+    "compiled": "a read-only flag",
+    "profile": "profiling: tests/test_profiling.py",
+    "start_profiling": "profiling: tests/test_profiling.py",
+    "stop_profiling": "profiling: tests/test_profiling.py",
+    "emit_profiled": "profiling: tests/test_profiling.py",
+    "emit_batch_profiled": "profiling: tests/test_profiling.py",
+}
+
+
+def test_every_public_method_is_fuzzed_or_excused():
+    public = {name for name in dir(akayu.Stream) if not name.startswith("_")}
+    assert public - FUZZED - NOT_FUZZED.keys() == set(), "not fuzzed, and no reason given"
+    assert (FUZZED | NOT_FUZZED.keys()) - public == set(), "listed but not a Stream method"
