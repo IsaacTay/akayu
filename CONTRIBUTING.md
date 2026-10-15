@@ -22,7 +22,12 @@ This project uses **Nix** to manage the development environment and dependencies
     ```bash
     nix develop     # or, with direnv: echo "use flake" > .envrc && direnv allow
     ```
-    The shell provides Rust, Python 3.13, `uv`, `maturin`, `just` and `mermaid-cli`, and runs `uv sync` to create `.venv` with the development dependencies.
+    The shell provides Rust, Python 3.13, `uv`, `maturin`, `just` and `mermaid-cli`, and syncs `.venv` with the development dependencies. It doesn't build akayu: run `just build` (debug) or `just build-release`, and the build you chose stays installed until you build again.
+
+3.  **Build the extension**:
+    ```bash
+    just build
+    ```
 
 ### Without Nix
 

@@ -6,9 +6,9 @@ quick_select := "--benchmark-skip -m 'not slow'"
 default:
     @just --list
 
-# Sync dependencies
+# Sync the dependencies (the extension itself is `build`'s, so it stays as built)
 sync:
-    uv sync
+    uv sync --no-install-project --inexact
 
 # Build the Rust extension in development mode
 build: sync

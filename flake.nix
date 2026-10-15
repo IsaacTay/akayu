@@ -56,7 +56,13 @@
             if [ ! -d ".venv" ]; then
               uv venv
             fi
-            uv sync
+            # The dependencies only: building akayu is `just build`'s (or
+            # `just build-release`'s), so entering the shell never replaces
+            # the installed build. --inexact keeps that build installed.
+            uv sync --no-install-project --inexact
+            if ! compgen -G "python/akayu/akayu.*.so" > /dev/null; then
+              echo "akayu isn't built yet: run 'just build' (or 'just build-release')."
+            fi
           '';
         };
 

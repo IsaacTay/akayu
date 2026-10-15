@@ -6,9 +6,22 @@ akayu provides two mechanisms for concurrent processing that work efficiently to
 
 The `par()` method creates a branch point where all downstream branches execute concurrently in a shared thread pool:
 
-<!--pytest.mark.skip-->
-
 ```python
+import time
+
+import akayu
+
+
+def load_from_disk(name):  # stand-ins for slow I/O
+    time.sleep(0.05)
+    return f"{name} from disk"
+
+
+def fetch_from_api(name):
+    time.sleep(0.05)
+    return f"{name} from the API"
+
+
 source = akayu.Stream()
 p = source.par()
 
@@ -18,8 +31,10 @@ b = p.map(fetch_from_api)
 
 # Merge results
 merged = akayu.union(a, b)
+results = merged.to_list()
 
-source.emit(filename)  # a and b execute concurrently
+source.emit("report.csv")  # a and b execute concurrently: about 0.05 s, not 0.1 s
+assert sorted(results) == ["report.csv from disk", "report.csv from the API"]
 ```
 
 ### How `par()` Works
@@ -118,16 +133,27 @@ at a time because the union locks, with or without the `seq()`.
 
 The `prefetch(n)` method processes up to `n` items concurrently while **preserving output order**:
 
-<!--pytest.mark.skip-->
-
 ```python
+import time
+
+import akayu
+
+
+def slow_operation(x):  # a stand-in for an API call
+    time.sleep(0.01)
+    return x * 10
+
+
+results = []
 source = akayu.Stream()
 source.prefetch(4).map(slow_operation).sink(results.append)
 source.compile()
 
 # Items processed concurrently but results arrive in order
-source.emit_batch([1, 2, 3, 4, 5, 6, 7, 8])  # results: 1-5
-source.flush()  # results: 1-8
+source.emit_batch([1, 2, 3, 4, 5, 6, 7, 8])
+assert results == [10, 20, 30, 40, 50]  # 3 still in flight
+source.flush()
+assert results == [10, 20, 30, 40, 50, 60, 70, 80]
 ```
 
 ### How `prefetch()` Works
@@ -453,17 +479,26 @@ assert sorted(seen) == [("a", "req-1"), ("b", "req-1")]
 
 When using `prefetch()`, call `flush()` to wait for all in-flight items to complete:
 
-<!--pytest.mark.skip-->
-
 ```python
+import time
+
+import akayu
+
+
+def slow_op(x):  # a stand-in for slow I/O
+    time.sleep(0.01)
+    return x + 1
+
+
+results = []
 source = akayu.Stream()
 source.prefetch(4).map(slow_op).sink(results.append)
 source.compile()
 
-source.emit_batch(items)
+source.emit_batch([1, 2, 3, 4, 5, 6])
 source.flush()  # Wait for all items to complete
 
-print(results)  # All results now available
+print(results)  # All results now available: [2, 3, 4, 5, 6, 7]
 ```
 
 ```mermaid
