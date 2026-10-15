@@ -47,7 +47,8 @@ class ReentrantError(StreamError):
     """A callback re-entered the graph it runs in.
 
     It emitted into a source its own item came from, or flushed a node
-    that is mid-flush: the graph has a loop. Restructure the pipeline.
+    that is mid-flush: the graph has a loop, maybe across threads (their
+    callbacks emitting into each other's sources). Restructure the pipeline.
     """
 
 class BusyError(StreamError):
@@ -57,8 +58,10 @@ class BusyError(StreamError):
     """
 
 class DeadlockError(StreamError):
-    """Waiting would never end: whoever holds what this thread needs is
-    waiting for this thread.
+    """Waiting would never end: whoever holds the lock this thread needs is
+    waiting for this thread, and no callback closes a loop (that would be
+    a ReentrantError): two emits sharing a lock compile() gave their graph,
+    say.
     """
 
 @final

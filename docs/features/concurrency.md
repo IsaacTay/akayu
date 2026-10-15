@@ -374,8 +374,9 @@ Where the locks are:
   `atexit` handler) while other threads emit: they wait for a running emit to finish, and an
   `emit()`, or an item reaching the node being flushed, waits for a running flush. In an
   uncompiled graph, if that flush's callbacks emit into the source the waiting item came from, the
-  two would wait for each other: the one whose wait completes that cycle (the item's `emit()`, or
-  the flush) raises `akayu.DeadlockError` instead. `compile()` lets the two take turns.
+  two would wait for each other: the callback's `emit()` closes a loop, and is refused with
+  `akayu.ReentrantError` (the flush raises it); the item goes on. `compile()` lets the two take
+  turns.
 - Known limitation: in an uncompiled graph, `flush()` / `drain()` called on a node other than a
   source waits at most half a second for another thread's item inside that node, then raises
   `akayu.BusyError` saying the node "is still processing an item (a callback flushed mid-emit…)",
@@ -390,18 +391,21 @@ Where the locks are:
   running, raises `akayu.BusyError`; the graph keeps working afterwards. The same goes for another
   thread doing so while an item passes through: build the graph before threads emit into it.
 - Two threads whose callbacks emit into each other's sources would each wait for the other's
-  source forever. Instead, the thread whose wait would complete the cycle raises
-  `akayu.DeadlockError`, and the other finishes. A `par()` branch or prefetched call that emits
-  into, or flushes, the source it runs under is part of that source's own emit: it raises
-  `akayu.ReentrantError`, as a callback emitting into its own source does. Sources that merge
-  (`union`, `zip`, `combine_latest`) in a compiled graph without `par()` or `prefetch()` share one
-  lock, so there the threads take turns. To pass items between such threads without failures,
-  hand them to a queue instead of emitting them from the callback.
+  source forever: their callbacks form a loop, across threads. Instead, one of those emits is
+  refused with `akayu.ReentrantError`, as a callback emitting into its own source is, and the
+  other thread finishes. So is a `par()` branch or prefetched call that emits into, or flushes,
+  the source it runs under. Sources that merge (`union`, `zip`, `combine_latest`) in a compiled
+  graph without `par()` or `prefetch()` share one lock, so there the threads take turns. To pass
+  items between such threads without failures, hand them to a queue instead of emitting them from
+  the callback.
 - Every akayu lock records the thread holding it, and every thread waiting for one, or for
   `par()`/`prefetch()` work, is recorded with what it waits for. So any cycle of such waits is
-  caught, however many threads and locks (sources, merges, `par()` branches) it runs through. A
-  cycle through something akayu can't see, such as your own `threading.Lock` or a queue, can still
-  deadlock. Ctrl+C interrupts a thread waiting for any akayu lock.
+  caught, however many threads and locks (sources, merges, `par()` branches) it runs through, and
+  exactly one thread gives up: a callback's emit into a source if one is in the cycle (a
+  `ReentrantError`, or a `DeadlockError` when the source is idle and only shares a lock), else
+  another waiting thread (`DeadlockError`). A cycle through something akayu can't see, such as
+  your own `threading.Lock` or a queue, can still deadlock. Ctrl+C interrupts a thread waiting for
+  any akayu lock.
 - Each node an item passes adds to the thread's native stack. A graph thousands of nodes deep, a
   long chain of sources feeding each other, or a thread with a small stack raises `RecursionError`
   when the stack is nearly used up, rather than crashing; so do `flush()` and `drain()`.
