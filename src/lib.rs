@@ -169,6 +169,13 @@ fn akayu(py: Python, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(combine_latest, m)?)?;
     m.add_function(wrap_pyfunction!(zip, m)?)?;
     error::register(m)?;
+    // "debug" or "release": benchmarks refuse a debug build.
+    let build = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    m.add("_build", build)?;
 
     // Initialize Python helpers
     helpers::init_helpers(py, HELPERS)?;

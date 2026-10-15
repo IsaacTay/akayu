@@ -67,3 +67,21 @@ def seed_chunks(total, chunk):
 def seed_ids(seeds):
     """A readable test id for a range of seeds."""
     return f"seeds{seeds.start}-{seeds.stop - 1}"
+
+
+def calls_during(fn, func):
+    """How often `func`'s code ran while `fn()` ran (0 for a function akayu
+    ran natively)."""
+    count = 0
+
+    def profile(frame, event, arg):
+        nonlocal count
+        if event == "call" and frame.f_code is func.__code__:
+            count += 1
+
+    sys.setprofile(profile)
+    try:
+        fn()
+    finally:
+        sys.setprofile(None)
+    return count

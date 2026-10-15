@@ -429,7 +429,10 @@ def main():
     ap.add_argument("--save", help="write results to this JSON file")
     ap.add_argument("--record", metavar="DIR", help="also perf-record each cell's measured region into DIR")
     ap.add_argument("--compare", help="show %% change against this JSON file")
+    ap.add_argument("--allow-debug", action="store_true", help="measure a debug build anyway")
     a = ap.parse_args()
+    if akayu.akayu._build != "release" and not a.allow_debug:
+        sys.exit(f"{akayu.__file__} is a debug build: run `just build-release` first (or pass --allow-debug)")
     if a.one:
         w, mode, kind, n = a.one
         run_one(w, mode, kind, int(n))

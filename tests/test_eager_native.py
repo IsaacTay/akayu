@@ -9,11 +9,10 @@ coverage and breakpoints would notice), and a function whose code was
 replaced (IPython's autoreload does that).
 """
 
-import sys
-
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
+from support import calls_during
 
 import akayu
 
@@ -78,23 +77,6 @@ def test_matches_python(func, x, op, batch):
         assert (type(got[1]), repr(got[1])) == (type(expected[1]), repr(expected[1])), (x, expected, got)
     else:
         assert got == expected, (x, expected, got)
-
-
-def calls_during(fn, func):
-    """How often `func`'s code ran while fn() ran."""
-    count = 0
-
-    def profile(frame, event, arg):
-        nonlocal count
-        if event == "call" and frame.f_code is func.__code__:
-            count += 1
-
-    sys.setprofile(profile)
-    try:
-        fn()
-    finally:
-        sys.setprofile(None)
-    return count
 
 
 def run(func, items, op="map"):

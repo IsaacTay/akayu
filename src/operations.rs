@@ -112,37 +112,47 @@ impl Stream {
     /// on another thread waits for the lock instead of failing on a borrow,
     /// and the flush waits for a running emit. A callback of the flush that
     /// emits into the source or flushes it again is refused.
-    fn flush_source(&self, py: Python, drain: bool) -> PyResult<()> {
+    fn flush_source(&self, py: Python, mode: FlushMode) -> PyResult<()> {
         let _entered = self.enter_source(py, true)?;
-        if !drain && self.downstreams.is_empty() {
+        if mode == FlushMode::Flush && self.downstreams.is_empty() {
             warn_noop_flush(py, &self.name);
         }
         let mut visited = crate::helpers::PtrSet::default();
         visited.insert(std::ptr::from_ref(self) as usize);
         for downstream in &self.downstreams {
             let (mut d, _guard) = downstream.locked_for_flush(py)?;
-            if drain {
-                d.drain_visit(py, &mut visited)?;
-            } else {
-                d.flush_visit(py, false, &mut visited)?;
-            }
+            d.flush_visit(py, mode, false, &mut visited)?;
         }
         Ok(())
     }
 
-    /// Flush with the re-entrancy guard. `warn_if_noop` is true only for the
-    /// node the user called `flush()` on: nodes reached by propagation are
-    /// expected to be leaves and must not warn.
-    pub(crate) fn flush_guarded(&mut self, py: Python, warn_if_noop: bool) -> PyResult<()> {
-        self.flush_visit(py, warn_if_noop, &mut crate::helpers::PtrSet::default())
+    /// flush() or drain() of this node, which the caller holds the lock of
+    /// (`helpers::with_node_mut`). `warn_if_noop`: warn if flushing it does
+    /// nothing (only for the node the user called flush() on: nodes reached
+    /// by propagation are expected to be leaves).
+    pub(crate) fn flush_node(
+        &mut self,
+        py: Python,
+        mode: FlushMode,
+        warn_if_noop: bool,
+    ) -> PyResult<()> {
+        self.flush_visit(
+            py,
+            mode,
+            warn_if_noop,
+            &mut crate::helpers::PtrSet::default(),
+        )
     }
 
-    /// One flush() call reaches each node once: below a merge (union, zip,
-    /// ...) a node is reachable along several paths, and a collect() there
-    /// used to emit once per path. `visited` holds the nodes already flushed.
+    /// One flush() or drain() call reaches each node once: below a merge
+    /// (union, zip, ...) a node is reachable along several paths, and a
+    /// collect() there used to emit once per path. `visited` holds the nodes
+    /// already flushed. The caller holds this node's lock (its edge's, see
+    /// `Downstream::locked_for_flush`).
     fn flush_visit(
         &mut self,
         py: Python,
+        mode: FlushMode,
         warn_if_noop: bool,
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
@@ -154,13 +164,11 @@ impl Stream {
         if !visited.insert(std::ptr::from_ref(self) as usize) {
             return Ok(());
         }
-        let lock = std::sync::Arc::clone(&self.lock);
-        let _guard = lock.acquire(py)?;
         if self.flushing {
             return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
         }
         self.flushing = true;
-        let result = self.flush_inner(py, warn_if_noop, visited);
+        let result = self.flush_inner(py, mode, warn_if_noop, visited);
         self.flushing = false;
         result
     }
@@ -168,10 +176,68 @@ impl Stream {
     fn flush_inner(
         &mut self,
         py: Python,
+        mode: FlushMode,
         warn_if_noop: bool,
         visited: &mut crate::helpers::PtrSet<usize>,
     ) -> PyResult<()> {
-        // Warn if flush has no effect (non-buffering leaf that isn't a Sink)
+        if warn_if_noop && self.flush_does_nothing() {
+            warn_noop_flush(py, &self.name);
+        }
+        match &mut self.logic {
+            NodeLogic::Collect { buffer } => {
+                let items = std::mem::take(buffer);
+                let tuple = PyTuple::new(py, items)?;
+                self.propagate(py, tuple.into())?;
+            }
+            NodeLogic::ChunkBy(boxed) => {
+                let ChunkByState { buffer, order, .. } = &mut **boxed;
+                let emit_empty = matches!(order, ChunkOrder::Fused { .. });
+                if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
+                    self.propagate(py, chunk)?;
+                }
+            }
+            NodeLogic::ExtractBetween(boxed) => {
+                let ExtractBetweenState { buffer, inside, .. } = &mut **boxed;
+                // Discard the incomplete chunk and return to the outside state
+                buffer.clear();
+                *inside = false;
+            }
+            NodeLogic::Prefetched { prefetcher } => {
+                // The results before a failed item still go on, then its error.
+                let (results, error) = prefetcher.flush(py);
+                for result in results {
+                    self.propagate(py, result)?;
+                }
+                if let Some(e) = error {
+                    return wrap_error(py, Err(e), &self.name, &self.source_location);
+                }
+            }
+            _ => {}
+        }
+
+        // drain() goes on to every node below. flush() stops at a collect()
+        // or chunk_by(): their buffer went downstream as an item, and flushing
+        // further would empty the collects below before they have gathered
+        // the items of several flushes. Prefetch nodes go on (their results
+        // went downstream), and so does chunks_between(), which discards
+        // rather than emits: stopping there would swallow the flush.
+        let goes_on = mode == FlushMode::Drain
+            || !matches!(
+                self.logic,
+                NodeLogic::Collect { .. } | NodeLogic::ChunkBy(_)
+            );
+        if goes_on {
+            for downstream in &self.downstreams {
+                let (mut d, _guard) = downstream.locked_for_flush(py)?;
+                d.flush_visit(py, mode, false, visited)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A node with no buffer and no downstreams that isn't a sink: flushing
+    /// it can't do anything.
+    fn flush_does_nothing(&self) -> bool {
         let has_buffer = matches!(
             self.logic,
             NodeLogic::Collect { .. }
@@ -191,129 +257,15 @@ impl Stream {
             NodeLogic::ChainMember { was_sink } => *was_sink,
             _ => false,
         };
-        if warn_if_noop && !has_buffer && self.downstreams.is_empty() && !is_sink {
-            warn_noop_flush(py, &self.name);
-        }
-        match &mut self.logic {
-            NodeLogic::Collect { buffer } => {
-                let items = std::mem::take(buffer);
-                let tuple = PyTuple::new(py, items)?;
-                self.propagate(py, tuple.into())?;
-            }
-            NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState { buffer, order, .. } = &mut **boxed;
-                let emit_empty = matches!(order, ChunkOrder::Fused { .. });
-                if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
-                    self.propagate(py, chunk)?;
-                }
-            }
-            NodeLogic::ExtractBetween(boxed) => {
-                let ExtractBetweenState { buffer, inside, .. } = &mut **boxed;
-                // Discard the incomplete chunk and return to the outside state
-                buffer.clear();
-                *inside = false;
-            }
-            NodeLogic::Prefetched { prefetcher } => {
-                // The results before a failed item still go on, then its error.
-                let (results, error) = prefetcher.flush(py);
-                for result in results {
-                    self.propagate(py, result)?;
-                }
-                if let Some(e) = error {
-                    return wrap_error(py, Err(e), &self.name, &self.source_location);
-                }
-            }
-            _ => {}
-        }
-
-        // Propagate flush to downstream nodes — but NOT for Collect/ChunkBy.
-        // Collect/ChunkBy emit their buffer via propagate() above; cascading
-        // flush would prematurely drain downstream collects before they've had
-        // a chance to accumulate items from multiple flushes.
-        // Prefetch nodes DO propagate so their drained results flow onward.
-        // ExtractBetween also propagates: it discards rather than emits on
-        // flush, so stopping here would silently swallow the flush.
-        let should_propagate = !matches!(
-            self.logic,
-            NodeLogic::Collect { .. } | NodeLogic::ChunkBy(_)
-        );
-        if should_propagate {
-            for downstream in &self.downstreams {
-                let (mut d, _guard) = downstream.locked_for_flush(py)?;
-                d.flush_visit(py, false, visited)?;
-            }
-        }
-        Ok(())
+        !has_buffer && self.downstreams.is_empty() && !is_sink
     }
+}
 
-    /// drain(), reaching each node once (see `flush_visit`).
-    fn drain_visit(
-        &mut self,
-        py: Python,
-        visited: &mut crate::helpers::PtrSet<usize>,
-    ) -> PyResult<()> {
-        crate::stack::check()?;
-        if self.busy {
-            return Err(StreamError::BusyFlush.into());
-        }
-        if !visited.insert(std::ptr::from_ref(self) as usize) {
-            return Ok(());
-        }
-        // Re-entrancy guard: detect cycles in the flush graph
-        if self.flushing {
-            return Err(StreamError::ReentrantFlush(self.name.to_string()).into());
-        }
-        self.flushing = true;
-        let result = self.drain_inner(py, visited);
-        self.flushing = false;
-        result
-    }
-
-    fn drain_inner(
-        &mut self,
-        py: Python,
-        visited: &mut crate::helpers::PtrSet<usize>,
-    ) -> PyResult<()> {
-        // Flush this node's buffer
-        match &mut self.logic {
-            NodeLogic::Collect { buffer } => {
-                let items = std::mem::take(buffer);
-                let tuple = PyTuple::new(py, items)?;
-                self.propagate(py, tuple.into())?;
-            }
-            NodeLogic::ChunkBy(boxed) => {
-                let ChunkByState { buffer, order, .. } = &mut **boxed;
-                let emit_empty = matches!(order, ChunkOrder::Fused { .. });
-                if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
-                    self.propagate(py, chunk)?;
-                }
-            }
-            NodeLogic::ExtractBetween(boxed) => {
-                let ExtractBetweenState { buffer, inside, .. } = &mut **boxed;
-                // Discard the incomplete chunk and return to the outside state
-                buffer.clear();
-                *inside = false;
-            }
-            NodeLogic::Prefetched { prefetcher } => {
-                // The results before a failed item still go on, then its error.
-                let (results, error) = prefetcher.flush(py);
-                for result in results {
-                    self.propagate(py, result)?;
-                }
-                if let Some(e) = error {
-                    return wrap_error(py, Err(e), &self.name, &self.source_location);
-                }
-            }
-            _ => {}
-        }
-
-        // Always recurse into all downstreams
-        for downstream in &self.downstreams {
-            let (mut d, _guard) = downstream.locked_for_flush(py)?;
-            d.drain_visit(py, visited)?;
-        }
-        Ok(())
-    }
+/// flush(): buffers emit and stop; drain(): every node below is flushed too.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FlushMode {
+    Flush,
+    Drain,
 }
 
 #[pymethods]
@@ -814,9 +766,9 @@ impl Stream {
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         if let Some(source) = Self::as_source(slf) {
-            return source.flush_source(py, false);
+            return source.flush_source(py, FlushMode::Flush);
         }
-        crate::helpers::with_node_mut(slf, py, |node| node.flush_guarded(py, true))
+        crate::helpers::with_node_mut(slf, py, |node| node.flush_node(py, FlushMode::Flush, true))
     }
 
     /// Recursively flush this node and all downstream nodes.
@@ -837,11 +789,9 @@ impl Stream {
         _kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         if let Some(source) = Self::as_source(slf) {
-            return source.flush_source(py, true);
+            return source.flush_source(py, FlushMode::Drain);
         }
-        crate::helpers::with_node_mut(slf, py, |node| {
-            node.drain_visit(py, &mut crate::helpers::PtrSet::default())
-        })
+        crate::helpers::with_node_mut(slf, py, |node| node.flush_node(py, FlushMode::Drain, false))
     }
 
     /// Apply a function to each element for side effects.

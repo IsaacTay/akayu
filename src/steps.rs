@@ -129,7 +129,9 @@ fn print_one(py: Python, x: &Py<PyAny>) -> PyResult<()> {
 /// Python does, without the call.
 #[inline(never)]
 fn flush_target_node(py: Python, target: &Py<crate::Stream>) -> PyResult<()> {
-    crate::helpers::with_node_mut(target.bind(py), py, |node| node.flush_guarded(py, true))
+    crate::helpers::with_node_mut(target.bind(py), py, |node| {
+        node.flush_node(py, crate::operations::FlushMode::Flush, true)
+    })
 }
 
 /// Call a Python callable, using the cached vectorcall pointer if available.

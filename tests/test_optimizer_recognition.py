@@ -11,7 +11,7 @@ import sys
 
 import pytest
 from akayu._helpers import _analyze_lambda
-from support import run_python
+from support import calls_during, run_python
 
 threshold = 10
 allowed = {"a", "b"}
@@ -139,3 +139,67 @@ def test_a_python_without_the_bytecode_table_still_imports():
     assert stdout == "[15] [15] 1"
     assert stderr.count("RuntimeWarning") == 1
     assert "can't read" in stderr
+
+
+# (op, function, items, runs natively before compile()): every form the
+# analyzer recognises. Before compile(), only lambdas that read nothing but
+# their own code run natively; the rest, including those calling a builtin by
+# name (a module may rebind `len`), keep late binding. After, all do.
+NATIVE_FORMS = [
+    ("map", lambda x: x + 1, [1, 2.5], True),
+    ("map", lambda x: x * 2, [3, "ab"], True),
+    ("map", lambda x: x // 2 % 3, [7, -9], True),
+    ("map", lambda x: x["a"], [{"a": 1}], True),
+    ("map", lambda x: x["a"]["b"], [{"a": {"b": 2}}], True),
+    ("map", lambda x: x.real, [3, 2.5], True),
+    ("map", lambda x: len(x), ["ab", (1,)], False),
+    ("map", lambda x: str(x), [1, None], False),
+    ("map", lambda x: int(x), ["7", 2.9], False),
+    ("map", lambda x: float(x), ["1.5", 2], False),
+    ("map", lambda x: bool(x), [0, "a"], False),
+    ("map", lambda x: tuple(x), ["ab"], False),
+    ("map", lambda x: type(x), [1], False),
+    ("map", lambda x: x.strip(), [" a "], True),
+    ("map", lambda x: x.startswith("a"), ["ab", "b"], True),
+    ("map", lambda x: x.replace(old, new), ["xx"], False),
+    ("map", lambda x: str(x).upper(), ["a"], False),
+    ("map", lambda x: x[1:3], ["abcd"], True),
+    ("map", lambda x: (x["a"], x["b"]), [{"a": 1, "b": 2}], True),
+    ("map", lambda x: [x.real, x.imag], [3j], True),
+    ("map", lambda x: x * threshold, [2], False),
+    ("filter", lambda x: x > 10, [5, 15], True),
+    ("filter", lambda x: x > threshold, [5, 15], False),
+    ("filter", lambda x: x in allowed, ["a", "z"], False),
+    ("filter", lambda x: x not in allowed, ["a", "z"], False),
+    ("filter", lambda x: x is None, [None, 1], True),
+    ("filter", lambda x: x is not None, [None, 1], True),
+    ("filter", lambda x: not x, [0, 1], True),
+    ("filter", lambda x: not x > 3, [1, 5], True),
+    ("filter", lambda x: x > 1 and x < 9, [0, 5, 10], True),
+    ("filter", lambda x: x < 1 or x > 9, [0, 5, 10], True),
+    ("filter", lambda x: len(x) > 1, ["a", "ab"], False),
+    ("filter", lambda x: isinstance(x, int), [1, "a"], False),
+    ("filter", lambda x: hasattr(x, "real"), [1, "a"], False),
+    ("filter", lambda x: x % 2 == 0, [1, 2], True),
+]
+
+
+@pytest.mark.parametrize(
+    ("op", "func", "items", "eager"),
+    NATIVE_FORMS,
+    ids=[f"{op}-{i}" for i, (op, *_) in enumerate(NATIVE_FORMS)],
+)
+def test_recognised_forms_run_natively_with_python_results(op, func, items, eager, compiled):
+    """A recognised lambda isn't called once compile() ran (nor before, if it
+    reads nothing but its code), and its results are what Python computes.
+    The analyzer hands its findings to Rust as tagged tuples: a misspelt tag
+    silently fell back to calling the lambda, which every result test passed."""
+    import akayu
+
+    s, out = akayu.Stream(), []
+    getattr(s, op)(func).sink(out.append)
+    if compiled:
+        s.compile()
+    calls = calls_during(lambda: [s.emit(x) for x in items], func)
+    assert calls == (0 if compiled or eager else len(items))
+    assert out == ([func(x) for x in items] if op == "map" else [x for x in items if func(x)])
