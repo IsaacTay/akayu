@@ -101,3 +101,34 @@ def all_at_once(parties, timeout=10):
         return x
 
     return meet
+
+
+class Overlap:
+    """For calls that may not come in whole groups, such as prefetch()'s,
+    where the waiting caller may run an item too: `meet` passes its argument
+    on and records in `most` how many calls were inside it at once. Until
+    `target` have been, each call waits for that (giving up after `timeout`
+    for all), so calls that can overlap do; extra or missing calls can't
+    deadlock it, as they can all_at_once."""
+
+    def __init__(self, target, timeout=10):
+        import threading
+
+        self.target, self.timeout = target, timeout
+        self.most = self._inside = 0
+        self._gave_up = False
+        self._cond = threading.Condition()
+
+    def _done(self):
+        return self.most >= self.target or self._gave_up
+
+    def meet(self, x):
+        with self._cond:
+            self._inside += 1
+            self.most = max(self.most, self._inside)
+            if self._done():
+                self._cond.notify_all()
+            elif not self._cond.wait_for(self._done, self.timeout):
+                self._gave_up = True
+            self._inside -= 1
+        return x

@@ -17,7 +17,7 @@ import threading
 import time
 
 import pytest
-from support import all_at_once
+from support import Overlap
 
 import akayu
 
@@ -33,13 +33,15 @@ def slow(x):
 
 
 def test_par_branches_run_concurrently():
+    """On the pool's workers, one per core, and the calling thread."""
     s, out = akayu.Stream(), []
-    meet = all_at_once(4)  # times out unless the four branches overlap
+    overlap = Overlap(min(4, os.process_cpu_count() + 1))
     p = s.par()
     for k in range(4):
-        p.map(lambda x, k=k: meet(x + k)).sink(out.append)
+        p.map(lambda x, k=k: overlap.meet(x + k)).sink(out.append)
     s.emit(0)
     assert sorted(out) == [0, 1, 2, 3]
+    assert overlap.most >= overlap.target
 
 
 request_id = contextvars.ContextVar("request_id", default=None)
@@ -143,24 +145,28 @@ def test_waiting_for_par_branches_is_interruptible():
 
 @pytest.mark.parametrize("op", ["map", "filter", "batch_map"])
 def test_prefetch_overlaps_items_and_keeps_order(op):
-    """Four items in flight at once (each call waits for the other three, so
-    calls run one at a time would time out), results in input order."""
+    """Four items in flight at once, results in input order. The pool has a
+    worker per core, so on fewer than four cores that many."""
+    n = min(4, os.process_cpu_count())
+    items = range(8)
     s, out = akayu.Stream(), []
-    meet = all_at_once(4)
+    overlap = Overlap(n)
+    meet = overlap.meet
     pre = s.prefetch(4)
     if op == "map":
         pre.map(lambda x: meet(x * 2)).sink(out.append)
-        expected = [x * 2 for x in range(8)]
+        expected = [x * 2 for x in items]
     elif op == "filter":
         pre.filter(lambda x: meet(x) % 2 == 0).sink(out.append)
-        expected = [0, 2, 4, 6]
+        expected = [x for x in items if x % 2 == 0]
     else:
         pre.batch_map(lambda xs: [meet(x) + 1 for x in xs]).sink(out.append)
-        expected = [x + 1 for x in range(8)]
-    for x in range(8):
+        expected = [x + 1 for x in items]
+    for x in items:
         s.emit(x)
     s.flush()
     assert out == expected
+    assert overlap.most >= n
 
 
 def test_prefetch_sees_the_callers_context():
@@ -236,50 +242,60 @@ def test_par_runs_in_parallel_in_a_forked_child():
 EXIT_SCRIPT = """
 import sys, threading, time
 import akayu
-path = sys.argv[1]
+path, workers = sys.argv[1], int(sys.argv[2])
+started, all_running = threading.Semaphore(0), threading.Event()
 def slow(x):
+    started.release()
     time.sleep(0.3)
     with open(path, "a") as f:
         f.write("done\\n")
     return x
 s = akayu.Stream()
 p = s.par()
-for _ in range(4):
+for _ in range(workers):
     p.map(slow).sink(lambda _: None)
+# The last branch runs on the emitting thread, a daemon one that exit stops.
+# It holds that thread until the workers run the slow ones: a waiting thread
+# runs its own tasks no worker has started.
+p.map(lambda x: all_running.wait(10) and x).sink(lambda _: None)
 threading.Thread(target=s.emit, args=(1,), daemon=True).start()
-time.sleep(0.1)  # every branch is now running; the interpreter exits
+for _ in range(workers):
+    started.acquire(timeout=10)
+all_running.set()
+# Every slow branch is running on a worker now; the interpreter exits.
 """
 
 
 def test_running_branches_finish_before_the_interpreter_exits(tmp_path):
     """ThreadPoolExecutor let running tasks finish at exit; the Rust pool
-    must too, or their side effects are silently lost."""
+    must too, or their side effects are silently lost. (Tasks still queued
+    are dropped, so there are only as many slow branches as workers: one
+    per core.)"""
+    workers = min(3, os.process_cpu_count())
     out = tmp_path / "out.txt"
     out.touch()
-    cmd = [sys.executable, "-c", EXIT_SCRIPT, str(out)]
+    cmd = [sys.executable, "-c", EXIT_SCRIPT, str(out), str(workers)]
     r = subprocess.run(cmd, timeout=30, capture_output=True, text=True, check=False)
     assert r.returncode == 0, r.stderr
-    assert out.read_text().count("done") == 4
+    assert out.read_text().count("done") == workers
 
 
-def test_every_branch_gets_a_worker_when_one_is_idle():
+def test_every_branch_gets_a_worker_when_some_are_idle():
     """A worker woken for one task still counted as idle until it took it,
-    so with one idle worker, branches submitted together got that one
-    worker: eight 0.1 s par() branches took 0.4 s instead of 0.1 s. Each
-    branch here waits for all the others, so they must run at once."""
+    so branches submitted together while workers were idle had to share
+    them: eight 0.1 s par() branches took 0.4 s instead of 0.1 s. Here k
+    workers are left idle, then k + 2 branches that each wait for all the
+    others must run at once: on those k workers, a new one, and the calling
+    thread. The pool has a worker per core, so k is at most the cores - 1."""
     from support import run_script
 
     code, last = run_script(f"""
-        import sys
+        import os, sys, time
         sys.path.insert(0, {str(pathlib.Path(__file__).parent)!r})
         import akayu
         from support import all_at_once
-        warm = akayu.Stream()
-        p = warm.par()
-        for _ in range(2):
-            p.map(lambda x: x).sink(lambda x: None)
-        warm.emit(0)  # the pool now has one idle worker
-        for n in (3, 4, 8):
+
+        def meeting(n):
             meet = all_at_once(n, timeout=5)
             s, out = akayu.Stream(), []
             p = s.par()
@@ -287,6 +303,11 @@ def test_every_branch_gets_a_worker_when_one_is_idle():
                 p.map(lambda x: meet(x)).sink(out.append)
             s.emit(n)
             assert out == [n] * n
+
+        k = min(os.process_cpu_count(), 4) - 1
+        meeting(k + 1)  # starts k workers
+        time.sleep(0.2)  # by now they're all idle
+        meeting(k + 2)
         print("ok")
     """)
     assert (code, last) == (0, "ok")
