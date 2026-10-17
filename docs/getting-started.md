@@ -5,7 +5,7 @@
 - CPython 3.13 or 3.14, on Linux, macOS or Windows
 
 Each [release](https://github.com/IsaacTay/akayu/releases) has wheels for Linux x86_64 and
-aarch64 (glibc 2.17+), macOS arm64 and x86_64, and Windows x64, built and tested on each of those
+aarch64 (glibc 2.17+), macOS arm64 and x86_64, and Windows x64, tested on each of those
 platforms. akayu isn't on PyPI: uv, pip and pixi install the wheels from akayu's own package
 index, `https://isaactay.github.io/akayu/simple/`.
 
