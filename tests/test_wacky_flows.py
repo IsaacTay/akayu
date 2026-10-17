@@ -11,6 +11,7 @@ import gc
 import operator
 import signal
 import sys
+import textwrap
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -22,26 +23,60 @@ import akayu
 
 # --- Deep graphs: a clean RecursionError, never a native stack overflow ---
 
+# The main thread's stack is as big as the OS makes it (ulimit -s: 8 MB on
+# most Linux machines, 16 MB on GitHub's runners, unlimited on some), so a
+# deep graph may fit there and simply run. A thread gets the stack it asks
+# for: 4 MiB, which each graph here is over three times too deep for.
+DEEP_SCRIPT = """
+import threading
+import akayu
+{build}
+def attempt():
+    try:
+        print(run())
+    except BaseException as e:
+        while e.__cause__ is not None:
+            e = e.__cause__
+        print(type(e).__name__)
+if {on_thread}:
+    threading.stack_size(4 * 1024 * 1024)
+    t = threading.Thread(target=attempt)
+    t.start()
+    t.join()
+else:
+    attempt()
+"""
 
+WHERE = pytest.mark.parametrize("where", ["main", "thread"])
+
+
+def run_deep(build, where, result):
+    """Run the `run()` that `build` defines on the main thread or a 4 MiB
+    thread, in a subprocess. On the thread it must raise RecursionError; on
+    the main thread it may instead fit and print `result`."""
+    script = DEEP_SCRIPT.format(build=textwrap.dedent(build), on_thread=where == "thread")
+    code, last = run_script(script)
+    assert code == 0
+    assert last == "RecursionError" or (where == "main" and last == result)
+
+
+@WHERE
 @pytest.mark.parametrize("entry", ["emit", "emit_batch"])
-def test_a_very_deep_graph_raises_recursion_error(entry):
-    code, last = run_script(f"""
-        import akayu
-        s = akayu.Stream(); node = s
+def test_a_very_deep_graph_raises_recursion_error(entry, where):
+    build = f"""
         def inc(x):
             y = x + 1
             return y
-        for _ in range(30000):
-            node = node.map(inc)
-        node.sink(print)
-        try:
-            s.{entry}(0) if "{entry}" == "emit" else s.emit_batch([0])
-        except BaseException as e:
-            while e.__cause__ is not None:
-                e = e.__cause__
-            print(type(e).__name__)
-    """)
-    assert (code, last) == (0, "RecursionError")
+        def run():
+            s = akayu.Stream(); node = s
+            for _ in range(30000):
+                node = node.map(inc)
+            out = []
+            node.sink(out.append)
+            s.emit(0) if "{entry}" == "emit" else s.emit_batch([0])
+            return out
+    """
+    run_deep(build, where, "[30000]")
 
 
 def test_compiling_a_very_deep_graph():
@@ -82,20 +117,19 @@ def test_a_thread_with_a_small_stack():
     assert last in ("[400]", "['RecursionError']")
 
 
-def test_a_long_chain_of_sources():
-    code, last = run_script("""
-        import akayu
-        sources = [akayu.Stream() for _ in range(8000)]
-        for a, b in zip(sources, sources[1:]):
-            a.sink(b.emit)
-        try:
+@WHERE
+def test_a_long_chain_of_sources(where):
+    build = """
+        def run():
+            sources = [akayu.Stream() for _ in range(8000)]
+            for a, b in zip(sources, sources[1:]):
+                a.sink(b.emit)
+            out = []
+            sources[-1].sink(out.append)
             sources[0].emit(1)
-        except BaseException as e:
-            while e.__cause__ is not None:
-                e = e.__cause__
-            print(type(e).__name__)
-    """)
-    assert (code, last) == (0, "RecursionError")
+            return out
+    """
+    run_deep(build, where, "[1]")
 
 
 def test_compiling_stacked_diamonds_is_linear():
@@ -421,22 +455,20 @@ def test_emit_into_a_source_from_its_own_flush(compiled):
     assert got == [(1,)]
 
 
+@WHERE
 @pytest.mark.parametrize("entry", ["flush", "drain"])
-def test_flushing_a_very_deep_graph_raises_recursion_error(entry):
-    code, last = run_script(f"""
-        import akayu
-        s = akayu.Stream(); node = s
-        for _ in range(60000):
-            node = node.map(lambda x: x)
-        node.collect().sink(print)
-        try:
+def test_flushing_a_very_deep_graph_raises_recursion_error(entry, where):
+    build = f"""
+        def run():
+            s = akayu.Stream(); node = s
+            for _ in range(60000):
+                node = node.map(lambda x: x)
+            out = []
+            node.collect().sink(out.append)
             s.{entry}()
-        except BaseException as e:
-            while e.__cause__ is not None:
-                e = e.__cause__
-            print(type(e).__name__)
-    """)
-    assert (code, last) == (0, "RecursionError")
+            return out
+    """
+    run_deep(build, where, "[()]")
 
 
 # --- batch_map and prefetch ---
