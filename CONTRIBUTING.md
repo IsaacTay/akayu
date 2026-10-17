@@ -127,7 +127,7 @@ The `pyproject.toml` includes `cache-keys` configuration that tells `uv` to rebu
 
 ## Building Wheels and Releasing
 
-GitHub builds the wheels: `.github/workflows/wheels.yml` builds each platform's wheel for CPython 3.13 and 3.14 on that platform (Linux x86_64 and aarch64, macOS arm64 and x86_64, Windows x64) and runs the quick tests against it there, with `scripts/test-wheel.sh`. It runs for every push to `main` and every pull request, and the run's page has the wheels for a week.
+GitHub builds the wheels: `.github/workflows/wheels.yml` builds each platform's wheel for CPython 3.13 and 3.14 (Linux x86_64 and aarch64, macOS arm64 and x86_64, Windows x64) and runs the quick tests against it on that platform, with `scripts/test-wheel.sh`. Each is built on its own platform too, except Linux aarch64: cross-compiled on x86_64 as `just wheels` does, because a native build links its own build scripts with zig as well, which fails. It runs for every push to `main` and every pull request, and the run's page has the wheels for a week.
 
 To release:
 

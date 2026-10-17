@@ -34,7 +34,7 @@
 - `akayu.__version__`.
 - Faster `compile()` through cached lambda analysis.
 - Wheels for Linux x86_64 and aarch64 (manylinux2014), macOS arm64 and x86_64, and Windows x64,
-  for CPython 3.13 and 3.14, built and tested on each platform by GitHub Actions and attached to
+  for CPython 3.13 and 3.14, tested on each platform by GitHub Actions and attached to
   each GitHub release, with build provenance attestations. They install from akayu's package
   index: `uv add akayu --index akayu=https://isaactay.github.io/akayu/simple/`, or
   `pip install akayu --index-url https://isaactay.github.io/akayu/simple/`. `just wheels` builds
