@@ -69,6 +69,9 @@ jobs:
         with:
           # uv.lock's maturin, which `just build` uses.
           maturin-version: v1.11.5
+          # The wheels dev shell's Rust (flake.lock), which `just wheels` uses. The
+          # runner image's newer one (1.99) passes zig a linker flag it rejects.
+          rust-toolchain: "1.97.1"
           # A cross build takes the interpreter's name, a native one the interpreter.
           args: >-
             --release --out dist ${{ matrix.platform.args }}
