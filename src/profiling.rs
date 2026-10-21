@@ -647,10 +647,10 @@ impl ProfileReport {
 
         let _ = writeln!(
             out,
-            "  #  {:<30} {:<16} {:>10}  {:>10}  {:>5}",
+            "  #  {:<30} {:<24} {:>10}  {:>10}  {:>5}",
             "Node", "Location", "In\u{2192}Out", "Func Time", "%"
         );
-        let _ = writeln!(out, "{}", "\u{2500}".repeat(80));
+        let _ = writeln!(out, "{}", "\u{2500}".repeat(88));
 
         for (rank, &idx) in sorted.iter().enumerate() {
             let node = &self.nodes[idx];
@@ -667,21 +667,12 @@ impl ProfileReport {
                 format!("{}\u{2192}{}", node.items_in, node.items_out)
             };
 
-            // Truncate name/location if too long
-            let name = if node.name.len() > 30 {
-                format!("{}...", &node.name[..27])
-            } else {
-                node.name.clone()
-            };
-            let loc = if node.source_location.len() > 16 {
-                format!("{}...", &node.source_location[..13])
-            } else {
-                node.source_location.clone()
-            };
+            let name = keep_start(&node.name, 30);
+            let loc = keep_end(file_and_line(&node.source_location), 24);
 
             let _ = writeln!(
                 out,
-                " {:>2}  {:<30} {:<16} {:>10}  {:>8.2}ms  {:>4.1}%",
+                " {:>2}  {:<30} {:<24} {:>10}  {:>8.2}ms  {:>4.1}%",
                 rank + 1,
                 name,
                 loc,
@@ -712,4 +703,29 @@ impl ProfileReport {
 
         out
     }
+}
+
+/// `path/to/app.py:22` as `app.py:22`: the file and line, which tell nodes
+/// apart, without the directories, which mostly don't.
+fn file_and_line(location: &str) -> &str {
+    location.rsplit(['/', '\\']).next().unwrap_or(location)
+}
+
+/// `s`, cut to `width` characters ending in "…" if it is longer.
+fn keep_start(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    let kept: String = s.chars().take(width - 1).collect();
+    kept + "\u{2026}"
+}
+
+/// `s`, cut to its last `width` characters after a "…" if it is longer.
+fn keep_end(s: &str, width: usize) -> String {
+    let n = s.chars().count();
+    if n <= width {
+        return s.to_string();
+    }
+    let kept: String = s.chars().skip(n - (width - 1)).collect();
+    "\u{2026}".to_string() + &kept
 }

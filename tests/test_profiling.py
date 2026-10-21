@@ -1,6 +1,7 @@
 """Tests for pipeline profiling feature."""
 
 import contextlib
+import inspect
 import io
 import time
 
@@ -354,6 +355,26 @@ class TestReportFormatting:
             report.print(sort_by=sort_by)
         assert "Pipeline Profile" in out.getvalue()
         assert "map(double)" in out.getvalue()
+
+    @staticmethod
+    def sorted_view(report):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            report.print(sort_by="time")
+        return out.getvalue()
+
+    def test_sorted_view_shows_the_file_and_line(self):
+        """Not the start of the path, which said nothing ("/home/me/pro...")."""
+        s = Stream()
+        line = inspect.currentframe().f_lineno + 1
+        s.map(double).sink(noop)
+        assert f"test_profiling.py:{line}" in self.sorted_view(s.emit_profiled(5))
+
+    def test_sorted_view_shortens_long_names_by_character(self):
+        """Cut at a byte, a name with accented letters raised PanicException."""
+        s = Stream()
+        s.map(double, stream_name="é" * 40).sink(noop)
+        assert "é" * 29 + "…" in self.sorted_view(s.emit_profiled(5))
 
     def test_to_dict_structure(self):
         s = Stream()

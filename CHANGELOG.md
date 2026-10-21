@@ -10,6 +10,9 @@
 - Profile reports count every item: what `flush()` sends on (a `collect()`'s buffer, a
   `chunk_by()`'s last chunk, `prefetch()` results still in flight) was missing, and a source
   showed 0 items. A node's items in now always equal the items its parents sent out.
+- `ProfileReport.print(sort_by="time")` shows where each node was built as `app.py:22`, where it
+  showed the start of the path (`/home/me/pro...`), and a long node name with accented letters
+  no longer raises `PanicException`.
 
 ## 2.0.1
 
