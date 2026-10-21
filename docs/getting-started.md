@@ -90,7 +90,7 @@ pixi add --pypi akayu
 pip install "akayu @ git+https://github.com/IsaacTay/akayu"
 ```
 
-Needs a Rust toolchain (see above). Add `@v2.0.0` (a release's tag) or a commit for a specific
+Needs a Rust toolchain (see above). Add `@v2.0.1` (a release's tag) or a commit for a specific
 version.
 
 ///

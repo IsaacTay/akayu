@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.0.1
+
+The 2.0.0 release was withdrawn; 2.0.1 replaces it with no changes to akayu itself.
+
 ## 2.0.0
 
 ### Breaking changes
