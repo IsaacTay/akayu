@@ -63,6 +63,7 @@ dev = [
     "pytest>=8.0",
     "pytest-benchmark>=4.0",
     "pytest-codeblocks>=0.17",
+    "pytest-github-actions-annotate-failures>=0.4.2",
     "scipy>=1.14.1",
     "streamz>=0.6",
 ]

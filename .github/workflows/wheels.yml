@@ -83,12 +83,14 @@ jobs:
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 7
+      # Each failed test also shows as an annotation on the run's page
+      # (pytest-github-actions-annotate-failures); the suite's warnings don't.
       - name: Test
         if: ${{ !matrix.platform.cross }}
         shell: bash
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
-        run: bash scripts/test-wheel.sh "$PYTHON" --benchmark-skip -m 'not slow'
+        run: bash scripts/test-wheel.sh "$PYTHON" --benchmark-skip -m 'not slow' --exclude-warning-annotations
 
   test-aarch64:
     name: linux-aarch64 py${{ matrix.python }} (test)
@@ -122,7 +124,7 @@ jobs:
       - name: Test
         env:
           PYTHON: ${{ steps.python.outputs.python-path }}
-        run: bash scripts/test-wheel.sh "$PYTHON" --benchmark-skip -m 'not slow'
+        run: bash scripts/test-wheel.sh "$PYTHON" --benchmark-skip -m 'not slow' --exclude-warning-annotations
 
   sdist:
     runs-on: ubuntu-24.04
