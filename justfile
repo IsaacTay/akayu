@@ -66,7 +66,7 @@ fmt-check:
     cargo fmt --check
     uv run ruff format --check .
 
-# Lint all Python (the vendored pipeline/ fixture is excluded in pyproject.toml)
+# Lint all Python
 lint:
     uv run ruff check .
 

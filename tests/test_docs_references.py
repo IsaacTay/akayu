@@ -12,7 +12,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = [ROOT / "README.md", ROOT / "CONTRIBUTING.md", *sorted((ROOT / "docs").rglob("*.md"))]
-TOP_DIRS = ("src", "python", "tests", "examples", "docs", "scripts", "pipeline")
+TOP_DIRS = ("src", "python", "tests", "examples", "docs", "scripts")
 
 # `tests/test_io.py`, `src/gc.rs`, `docs/`, ...
 PATH_RE = re.compile(rf"`((?:{'|'.join(TOP_DIRS)})/[\w./*-]*)`")

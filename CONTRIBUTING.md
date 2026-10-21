@@ -262,7 +262,6 @@ together with the quick tests and the documentation checks; run it before submit
 - `tests/`: the `pytest` suite. Benchmarks (`test_*benchmark*.py`) and `test_memory_leak.py` are skipped by `just test-quick`.
 - `examples/`: runnable examples; `tests/test_examples.py` runs every one of them.
 - `docs/`: the documentation site (`mkdocs.yml`); `just docs` serves it locally with live reload, and `just docs-check` builds it strictly and runs its code blocks.
-- `pipeline/`: a copy of application code used only as a test fixture (excluded from linting).
 - `scripts/`: development scripts (`bench_cost.py` CPU/memory benchmark, Mermaid validation, `stub_docs.py`, `test-wheel.sh` and testing the Windows and aarch64 wheels under Wine and qemu, `wheel_index.py` for the package index).
 - `.github/workflows/`: `wheels.yml` builds, tests and releases the wheels; `docs.yml` publishes the docs site and the package index.
 - `Cargo.toml`, `pyproject.toml`, `flake.nix`, `justfile`: build, packaging, environment and task configuration.
