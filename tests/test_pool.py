@@ -244,10 +244,13 @@ import sys, threading, time
 import akayu
 path, workers = sys.argv[1], int(sys.argv[2])
 started, all_running = threading.Semaphore(0), threading.Event()
+# One write at a time: on Windows an append seeks to the end and then writes,
+# so appends from two threads at once can land in the same place.
+writing = threading.Lock()
 def slow(x):
     started.release()
     time.sleep(0.3)
-    with open(path, "a") as f:
+    with writing, open(path, "a") as f:
         f.write("done\\n")
     return x
 s = akayu.Stream()
