@@ -6,8 +6,10 @@
 
 - `Stream.explain()`: how each node of a graph runs, a line per node: where it was built, whether
   its function is called (`Python`) or run natively (`native`, `native, unboxed` for arithmetic on
-  machine numbers), and after `compile()` the chain it was merged into. The profile report's tree
-  shows the same tags, and `to_dict()` has them as `how` and `chain`.
+  machine numbers), and after `compile()` the chain it was merged into. A map or filter that runs
+  as Python says why, when it can tell: `until compile()`, or the part of its function no native
+  form covers (`Python: calls lookup()`, `Python: x * x`, `Python: 2 statements`). The profile
+  report's tree shows the same tags, and `to_dict()` has them as `how` and `chain`.
 - `CallbackError.item`: what the failing function was given (the item, or for `batch_map()` its
   list). It is an attribute, not part of the message, so private data doesn't end up in logs.
 

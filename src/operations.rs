@@ -1071,7 +1071,7 @@ impl Stream {
     ///     A ProfileReport with per-node timing and item flow data.
     pub fn stop_profiling(&self, py: Python) -> PyResult<Py<crate::profiling::ProfileReport>> {
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
-        crate::profiling::build_report(py, self, data, wall_time, emit_count)
+        crate::profiling::build_report(py, self, data, wall_time, emit_count, false)
     }
 
     /// Return a Profiler context manager for this source.
@@ -1118,7 +1118,7 @@ impl Stream {
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
         // Propagate error after stopping profiling
         result?;
-        crate::profiling::build_report(py, self, data, wall_time, emit_count)
+        crate::profiling::build_report(py, self, data, wall_time, emit_count, false)
     }
 
     /// Emit a batch of values and return a profiling report.
@@ -1141,7 +1141,7 @@ impl Stream {
         crate::profiling::end_emit();
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
         result?;
-        crate::profiling::build_report(py, self, data, wall_time, emit_count)
+        crate::profiling::build_report(py, self, data, wall_time, emit_count, false)
     }
 
     /// How the graph below this stream runs: a line per node, with where it
@@ -1154,6 +1154,10 @@ impl Stream {
     /// "chain N" for the nodes merged into one loop. The profile report's tree
     /// shows the same tags.
     ///
+    /// A map or filter that runs as Python says why, when it can tell: "until
+    /// compile()", or the part of its function no native form covers, such
+    /// as `Python: lookup(x)`, `Python: x * x` or `Python: 2 statements`.
+    ///
     /// Returns:
     ///     The description, to print.
     pub fn explain(&self, py: Python) -> PyResult<String> {
@@ -1163,6 +1167,7 @@ impl Stream {
             std::collections::HashMap::new(),
             std::time::Duration::ZERO,
             0,
+            true,
         )?;
         Ok(report.borrow(py).format_explain())
     }

@@ -1,8 +1,11 @@
+import ast
 import builtins as _builtins
 import dis
 import inspect
+import linecache
 import os
 import sys
+import textwrap
 import warnings
 import weakref
 from types import BuiltinFunctionType as _BuiltinFunctionType
@@ -724,6 +727,8 @@ def _remember(results, deps, result):
 # The most complex analyzable pattern (compound and/or with chained sub-expressions)
 # is ~80 bytes. Anything longer is definitely too complex for our pattern matcher.
 _MAX_BYTECODE_LEN = 80
+# And of instructions, without the noise (see _clean_instructions).
+_MAX_INSTRUCTIONS = 25
 
 
 def _analyze_lambda(func):
@@ -837,7 +842,7 @@ def _analyze_code(func, code, ctx):
         return None
 
     # Complexity guard
-    if len(clean) > 25:
+    if len(clean) > _MAX_INSTRUCTIONS:
         return None
 
     # Reject multi-statement functions
@@ -913,6 +918,166 @@ def _analyze_accumulate_code(func, code, ctx):
         if fn is _builtins.min:
             return ("acc_min",)
     return None
+
+
+# --- Why a function stays Python (for Stream.explain()) ---
+
+# Expressions explain() names by their kind instead of showing them: the kind
+# is what to change (`x if x > 0 else -x` is Python for its if/else, whatever
+# `-x` is).
+_KINDS = {
+    ast.IfExp: "if/else",
+    ast.JoinedStr: "an f-string",
+    ast.ListComp: "a comprehension",
+    ast.SetComp: "a comprehension",
+    ast.DictComp: "a comprehension",
+    ast.GeneratorExp: "a generator expression",
+    ast.Lambda: "a lambda",
+    ast.NamedExpr: ":=",
+    ast.Await: "await",
+}
+_STATEMENTS = {
+    ast.If: "an if statement",
+    ast.For: "a loop",
+    ast.While: "a loop",
+    ast.Try: "try/except",
+    ast.With: "with",
+}
+_MAX_SHOWN = 28  # characters of an expression shown
+
+
+def _why_python(func, native, shown):
+    """Why compile() runs `func`, the function of the map or filter node
+    `shown` (its name), as Python: a short phrase for explain(), or "" when
+    there's nothing to add (a class, a C function, source that can't be read).
+
+    `native(f)` tells whether compile() would run the function `f` natively.
+    The part of the function to blame is found by asking it about smaller
+    and smaller parts, as `lambda x: <part>`, so the answer follows the
+    analyzer as it learns new forms. Only explain() calls this.
+    """
+    if not _ANALYZER_ON:
+        if os.environ.get("AKAYU_ANALYZER") == "0":
+            return "AKAYU_ANALYZER=0"
+        return f"not analyzed on Python {sys.version_info[0]}.{sys.version_info[1]}"
+    name = getattr(func, "__name__", None)
+    if "<lambda>" in shown and isinstance(name, str) and name != "<lambda>":
+        # compile() replaced `lambda x: f(x)` with f: the node calls f itself.
+        return _shorten(f"calls {name}()")
+    if type(func) is not _FunctionType:
+        return ""
+    code = func.__code__
+    if code.co_flags & (_CO_GENERATOR | _CO_ASYNC_GENERATOR):
+        return "a generator"
+    if code.co_flags & _CO_VARARGS:
+        return "takes *args"
+    if code.co_flags & _CO_VARKEYWORDS:
+        return "takes **kwargs"
+    if code.co_kwonlyargcount or code.co_argcount - 1 > len(func.__defaults__ or ()):
+        return "takes more than the item"
+    body = _returned_expression(func)
+    if not isinstance(body, ast.expr):
+        return body
+    item = code.co_varnames[0]
+    # Names as the function sees them: its globals, closure and defaults.
+    namespace = dict(func.__globals__)
+    if func.__closure__:
+        try:
+            namespace.update((n, c.cell_contents) for n, c in zip(code.co_freevars, func.__closure__, strict=True))
+        except ValueError:  # an empty cell: a variable not yet assigned
+            return ""
+    # The defaults are the last parameters' (the item's, too, if it has one).
+    params = code.co_varnames[1 : code.co_argcount]
+    namespace.update(zip(reversed(params), reversed(func.__defaults__ or ()), strict=False))
+    found = _blame(body, item, namespace, native)
+    if found is None or isinstance(found, str):
+        return found or ""
+    if isinstance(found, ast.Call) and not _uses(found.func, item):
+        return _KINDS.get(type(found.func)) or _shorten(f"calls {ast.unparse(found.func)}()")
+    return _shorten(ast.unparse(found))
+
+
+def _shorten(text):
+    return text if len(text) <= _MAX_SHOWN else text[: _MAX_SHOWN - 1] + "…"
+
+
+def _uses(expr, name):
+    """Whether the ast node `expr` reads the variable `name`."""
+    return any(isinstance(n, ast.Name) and n.id == name for n in ast.walk(expr))
+
+
+def _returned_expression(func):
+    """The expression `func` returns, as an ast node; or why there isn't
+    one, a str ("" if its source can't be read)."""
+    code = func.__code__
+    if code.co_name == "<lambda>":
+        # The body's span, from where its instructions are (the first,
+        # RESUME, is at the start of the line and spans nothing).
+        spots = [p for p in code.co_positions() if None not in p and (p[1], p[3]) > (p[0], p[2])]
+        if not spots:
+            return ""
+        (line, col), (end_line, end_col) = min((p[0], p[2]) for p in spots), max((p[1], p[3]) for p in spots)
+        lines = linecache.getlines(code.co_filename)[line - 1 : end_line]
+        if len(lines) != end_line - line + 1:
+            return ""
+        lines[-1] = lines[-1][:end_col]
+        lines[0] = lines[0][col:]
+        try:
+            return ast.parse("(" + "".join(lines) + ")", mode="eval").body
+        except (SyntaxError, RecursionError, MemoryError):
+            return ""
+    try:
+        tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    except (OSError, TypeError, SyntaxError, RecursionError, MemoryError):
+        return ""
+    if not tree.body or not isinstance(tree.body[0], ast.FunctionDef):
+        return ""
+    body = tree.body[0].body
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+        body = body[1:]  # its docstring
+    if len(body) > 1:
+        return f"{len(body)} statements"
+    if body and isinstance(body[0], ast.Return) and body[0].value is not None:
+        return body[0].value
+    return _STATEMENTS.get(type(body[0]), "no return value") if body else ""
+
+
+def _blame(expr, item, namespace, native):
+    """The smallest part of `expr` that has no native form (an ast node, or
+    a phrase: "too long", or one of _KINDS), or None if `lambda item: expr`
+    has one."""
+    func = _lambda_of(expr, item, namespace)
+    if func is None or native(func):
+        return None
+    if _too_long(func):
+        return "too long"  # its parts would be too: no need to look at them
+    if type(expr) in _KINDS:
+        return _KINDS[type(expr)]
+    for part in ast.iter_child_nodes(expr):
+        # Parts without the item are values (`TABLE` in `TABLE[x]`), and the
+        # item itself is the start of every native form.
+        if isinstance(part, ast.expr) and not isinstance(part, ast.Name) and _uses(part, item):
+            found = _blame(part, item, namespace, native)
+            if found is not None:
+                return found
+    return expr
+
+
+def _lambda_of(expr, item, namespace):
+    """`lambda item: expr`, with `namespace` as its globals, or None."""
+    args = ast.arguments(posonlyargs=[], args=[ast.arg(item)], kwonlyargs=[], kw_defaults=[], defaults=[])
+    tree = ast.fix_missing_locations(ast.Expression(ast.Lambda(args, expr)))
+    try:
+        # Defines the function, runs none of it.
+        return eval(compile(tree, "<explain>", "eval"), namespace)
+    except (SyntaxError, ValueError, TypeError, RecursionError, MemoryError):
+        return None
+
+
+def _too_long(func):
+    """Whether the analyzer turns `func` down for its length alone."""
+    clean = _clean_instructions(func)
+    return len(func.__code__.co_code) > _MAX_BYTECODE_LEN or (clean is not None and len(clean) > _MAX_INSTRUCTIONS)
 
 
 def _reject_async(func, op):

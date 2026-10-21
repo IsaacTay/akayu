@@ -196,6 +196,9 @@ struct ReportNode {
     how: &'static str,
     /// The compiled chain it was merged into, numbered from 1 in report order.
     chain: Option<usize>,
+    /// For explain(): why a "Python" node isn't native (see
+    /// `builtin::why_python`), or "".
+    why: String,
 }
 
 /// How a node's work runs, as the reports tag it: "Python" (its function is
@@ -249,7 +252,8 @@ pub struct ProfileReport {
 // ---------------------------------------------------------------------------
 
 /// Build a `ProfileReport` by BFS-walking the stream graph and matching
-/// each node to its collected profile data.
+/// each node to its collected profile data; with `explain`, also why each
+/// "Python" node isn't native (explain() shows it, profile reports don't).
 ///
 /// Uses Rust struct pointers (`std::ptr::from_ref`) for profile data lookups
 /// to match the keys used in `execution.rs` instrumentation.
@@ -259,7 +263,15 @@ pub fn build_report(
     data: HashMap<usize, NodeProfile>,
     wall_time: Duration,
     emit_count: u64,
+    explain: bool,
 ) -> PyResult<Py<ProfileReport>> {
+    let why = |logic: &NodeLogic, name: &str, how: &str| -> PyResult<String> {
+        if explain && how == "Python" {
+            crate::builtin::why_python(py, logic, name, source.compiled)
+        } else {
+            Ok(String::new())
+        }
+    };
     let mut nodes: Vec<ReportNode> = Vec::new();
     let mut edges: Vec<(usize, usize)> = Vec::new();
     // Map from Rust struct pointer → index in `nodes` vec (for dedup in DAGs)
@@ -280,6 +292,7 @@ pub fn build_report(
         children: Vec::new(),
         how: how(&source.logic, native(source), false),
         chain: None,
+        why: String::new(),
     };
     nodes.push(source_node);
     ptr_to_idx.insert(source_ptr, 0);
@@ -334,6 +347,7 @@ pub fn build_report(
                     || step.flush_target.is_some()
                     || step.emit_target.is_some();
                 let step_profile = data.get(&step.node_id);
+                let step_how = how(&step.logic, native, unboxed);
                 let step_node = ReportNode {
                     name: step.name.to_string(),
                     source_location: step.source_location.to_string(),
@@ -342,8 +356,9 @@ pub fn build_report(
                     items_out: step_profile.map_or(0, |p| p.items_out),
                     is_terminal: false,
                     children: Vec::new(),
-                    how: how(&step.logic, native, unboxed),
+                    how: step_how,
                     chain: Some(chains),
+                    why: why(&step.logic, &step.name, step_how)?,
                 };
                 let step_idx = nodes.len();
                 nodes.push(step_node);
@@ -366,6 +381,7 @@ pub fn build_report(
         }
 
         let child_profile = data.get(&child_ptr);
+        let child_how = how(&child.logic, native(&child), false);
 
         let child_node = ReportNode {
             name: child.name.to_string(),
@@ -375,8 +391,9 @@ pub fn build_report(
             items_out: child_profile.map_or(0, |p| p.items_out),
             is_terminal: child.downstreams.is_empty(),
             children: Vec::new(),
-            how: how(&child.logic, native(&child), false),
+            how: child_how,
             chain: None,
+            why: why(&child.logic, &child.name, child_how)?,
         };
         let child_idx = nodes.len();
         nodes.push(child_node);
@@ -637,8 +654,25 @@ impl ProfileReport {
             .map(|n| location(n).chars().count())
             .max()
             .unwrap_or(0);
+        let how = |node: &ReportNode| match node.why.as_str() {
+            "" => node.how.to_string(),
+            "until compile()" => format!("{} until compile()", node.how),
+            why => format!("{}: {why}", node.how),
+        };
+        // The chain column starts after the widest tag of a node in a chain.
+        let how_width = self
+            .nodes
+            .iter()
+            .filter(|n| n.chain.is_some())
+            .map(|n| how(n).chars().count())
+            .max()
+            .unwrap_or(0);
         self.format_node(&mut out, |node| {
-            format!("{:<width$}  {}", location(node), tag(node))
+            let tag = match node.chain {
+                Some(chain) => format!("{:<how_width$}  chain {chain}", how(node)),
+                None => how(node),
+            };
+            format!("{:<width$}  {tag}", location(node))
         });
         out
     }

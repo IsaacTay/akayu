@@ -13,7 +13,7 @@ use crate::helpers::{
     get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
     get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
     get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
-    get_operator_itemgetter, get_operator_not, get_operator_truth,
+    get_operator_itemgetter, get_operator_not, get_operator_truth, get_why_python,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic};
 
@@ -312,6 +312,61 @@ pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> 
         code,
         op: parse_cached(py, &result, kept)?,
     })))
+}
+
+/// Why a map, filter or chunk_by node's function runs as Python, for
+/// explain(): "until compile()" in a graph not compiled yet whose function
+/// compile() would run natively; otherwise `_why_python`'s phrase. "" for
+/// other nodes, and when there's nothing to add.
+pub(crate) fn why_python(
+    py: Python,
+    logic: &NodeLogic,
+    name: &str,
+    compiled: bool,
+) -> PyResult<String> {
+    let why = find_why_python(py, logic, name, compiled);
+    // The analyzer keeps a Ctrl+C for compile() (see `INTERRUPTED`): this
+    // was explain()'s.
+    match take_interrupt() {
+        Some(interrupt) => Err(interrupt),
+        None => why,
+    }
+}
+
+fn find_why_python(py: Python, logic: &NodeLogic, name: &str, compiled: bool) -> PyResult<String> {
+    let func = match logic {
+        NodeLogic::Map { func } | NodeLogic::Filter { predicate: func } => func,
+        NodeLogic::ChunkBy(chunk) => &chunk.predicate,
+        _ => return Ok(String::new()),
+    };
+    if !compiled {
+        let mut copy = match logic {
+            NodeLogic::Map { func } => NodeLogic::Map {
+                func: func.clone_ref(py),
+            },
+            _ => NodeLogic::Filter {
+                predicate: func.clone_ref(py),
+            },
+        };
+        if detect_builtin_for_logic(py, &mut copy).is_some() {
+            return Ok("until compile()".to_string());
+        }
+    }
+    // `map(round, 2)`: no function of the item alone to explain.
+    if crate::call::bound_parts(py, func).is_some() {
+        return Ok(String::new());
+    }
+    let native = pyo3::wrap_pyfunction!(has_native_form, py)?;
+    get_why_python()?
+        .call1(py, (func, native, name))?
+        .extract(py)
+}
+
+/// Whether compile() runs the function `func` of a map or filter natively
+/// (for `_why_python`).
+#[pyfunction]
+fn has_native_form(func: Bound<'_, PyAny>) -> bool {
+    analyze_to_op(func.py(), &func.unbind()).is_some()
 }
 
 /// What `analyze_function` found for a function.

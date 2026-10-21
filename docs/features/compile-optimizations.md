@@ -304,6 +304,24 @@ sink(print)    app.py:4  native           chain 1
 A node whose function is tagged `Python` is the one to look at when a compiled pipeline is slower
 than expected. The profile report (`profile()`) shows the same tags next to each node's time.
 
+A map or filter tagged `Python` says why when it can tell: the part of its function that no native
+form covers, or `until compile()` in a graph not compiled yet:
+
+```text
+Graph below 'orders' (app.py:15), compiled: 6 nodes, 1 chain, 2 native
+
+orders            app.py:15
+map(parse)        app.py:16  Python: 2 statements    chain 1
+map(<lambda>)     app.py:17  Python: calls lookup()  chain 1
+filter(<lambda>)  app.py:18  native                  chain 1
+map(<lambda>)     app.py:18  Python: an f-string     chain 1
+sink(print)       app.py:18  native                  chain 1
+```
+
+Here `parse` would need to be one expression, `lookup()` is a Python function (no native form can
+run it), and an f-string has no native form. The reason needs the function's source, so a function
+defined in `exec()`'d code is just `Python`.
+
 ## Limitations
 
 Fusion stops at **split points** where a node has multiple downstreams:

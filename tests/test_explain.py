@@ -8,6 +8,9 @@ report's tree carries the same tags.
 
 import contextlib
 import io
+import re
+
+import pytest
 
 from akayu import Stream
 
@@ -45,7 +48,7 @@ def test_an_uncompiled_graph():
     header = text.splitlines()[0]
     assert "'events'" in header and "not compiled" in header
     nodes = lines_by_node(text)
-    assert nodes["map(parse)"].rstrip().endswith("Python")
+    assert nodes["map(parse)"].rstrip().endswith("Python: 2 statements")
     # Analyzed lambdas run natively even before compile().
     assert nodes["filter(<lambda>)"].rstrip().endswith("native")
     assert "chain" not in text
@@ -115,3 +118,112 @@ def test_no_caveat_without_unboxed_steps():
     with contextlib.redirect_stdout(out):
         report = s.emit_profiled("1")
     assert "unboxed" not in str(report)
+
+
+# Why a node is Python. These functions are defined here, at module level,
+# so their source can be read.
+
+TABLE = {"a": 1}
+
+
+def two_statements(x):
+    y = x + 1
+    return y * 2
+
+
+def guarded(x):
+    try:
+        return int(x)
+    except ValueError:
+        return None
+
+
+def doubled(x):
+    return x * 2
+
+
+def loads(text, **options):
+    return text
+
+
+class Point:
+    def __init__(self, x):
+        self.x = x
+
+
+def scaled_and_shown(k):
+    return lambda x: (x * k, f"{x}!")
+
+
+WHY = {
+    "calls a function": (lambda x: lookup(x) + 1, "calls lookup()"),
+    "calls a method of a global": (lambda x: TABLE.get(x), "calls TABLE.get()"),
+    "the part shown": (lambda x: x["a"] + x["b"], "x['a'] + x['b']"),
+    "an f-string": (lambda x: f"{x}!", "an f-string"),
+    # For its if/else, whatever its parts are.
+    "if/else": (lambda x: x if x > 0 else -x, "if/else"),
+    "statements": (two_statements, "2 statements"),
+    "try": (guarded, "try/except"),
+    "parameters": (loads, "takes **kwargs"),
+    # k is the closure's: x * k has a native form, the f-string doesn't.
+    "a closure": (scaled_and_shown(3), "an f-string"),
+    "a default for the item": (lambda x=0: f"{x}", "an f-string"),
+    "too long": (lambda x: x.a.b.c.d.e.f, "too long"),
+}
+
+
+def how(func, compile=True):
+    """How explain() says map(func) runs: its tag, without the chain."""
+    s = Stream()
+    s.map(func).sink(print)
+    if compile:
+        s.compile()
+    line = s.explain().splitlines()[3]
+    return re.fullmatch(r".*?test_explain\.py:\d+  (.*?)(?:  +chain \d+)?", line)[1]
+
+
+@pytest.mark.parametrize("case", WHY)
+def test_why_a_function_stays_python(case):
+    func, why = WHY[case]
+    assert how(func) == f"Python: {why}"
+
+
+def test_a_lambda_compile_replaced_with_the_function_it_calls():
+    # compile() calls lookup itself, without the lambda.
+    assert how(lambda x: lookup(x)) == "Python: calls lookup()"
+    assert how(lambda x: Point(x)) == "Python: calls Point()"
+
+
+def test_until_compile():
+    # A def runs natively only once compiled (its body would no longer run,
+    # which coverage and breakpoints would notice).
+    assert how(doubled, compile=False) == "Python until compile()"
+    assert how(doubled) == "native"
+
+
+def test_nothing_to_add():
+    # A class, a C function, a lambda whose source can't be read.
+    for func in (Point, abs, eval("lambda x: x * x")):
+        assert how(func) == "Python"
+
+
+def test_long_parts_are_shortened():
+    # Short in bytecode (on 3.14 too, whose method calls are longer), long as text.
+    why = how(lambda x: x["a_long_key"] * x["another_long_key"]).removeprefix("Python: ")
+    assert len(why) == 28 and why.endswith("…")
+
+
+def test_only_functions_explain_can_reason_about():
+    s = Stream()
+    s.map(lambda x: x + 1).batch_map(lambda xs: xs).sink(lambda x: print(x))
+    s.compile()
+    text = s.explain()
+    assert "Python:" not in text and "until compile()" not in text
+
+
+def test_the_chain_column_lines_up_after_a_reason():
+    s = Stream()
+    s.map(lookup).map(lambda x: x + 1).map(two_statements).sink(print)
+    s.compile()
+    rows = [line for line in s.explain().splitlines() if "  chain " in line]
+    assert len(rows) == 4 and len({line.index("chain") for line in rows}) == 1
