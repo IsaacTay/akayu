@@ -89,6 +89,8 @@ except (ImportError, AttributeError):
     _NB_OPS = []
 
 _CMP_OP = dis.cmp_op  # ('<', '<=', '==', '!=', '>', '>=')
+# COMPARE_OP's flag (3.13+) for a comparison that converts its result to bool.
+_COMPARE_TO_BOOL = 16
 
 # Opcodes a newer Python spells differently, as the patterns below spell
 # them. (3.14 also has LOAD_SMALL_INT, whose oparg is the int itself, and
@@ -99,7 +101,7 @@ _RESPELLED = {
 }
 
 # The operators the native ops support (BinaryOp and CompareOp in Rust).
-_BINARY_OPS = frozenset(("+", "-", "*", "/", "//", "%", "**"))
+_BINARY_OPS = frozenset(("+", "-", "*", "/", "//", "%", "**", "<<", ">>", "&", "|", "^"))
 _COMPARE_OPS = frozenset(("==", "!=", "<", ">", "<=", ">="))
 
 
@@ -160,6 +162,11 @@ def _fast_extract(co):
             av = arg
         result.append((name, av))
         offsets.append(offset)
+        if name == "COMPARE_OP" and arg & _COMPARE_TO_BOOL:
+            # The result converted to bool, as a TO_BOOL after it would:
+            # `not not (x > c)` compiles to this alone.
+            result.append(("TO_BOOL", 0))
+            offsets.append(offset)
     return _finish_instructions(result, offsets)
 
 
@@ -215,6 +222,7 @@ _KNOWN_BUILTINS = {
     "frozenset": _builtins.frozenset,
     "max": _builtins.max,
     "min": _builtins.min,
+    "abs": _builtins.abs,
 }
 
 _UNRESOLVABLE = object()  # sentinel
@@ -228,11 +236,12 @@ class _Bindings:
     the same code (see _analyze_lambda).
     """
 
-    __slots__ = ("deps", "func")
+    __slots__ = ("deps", "func", "memo")
 
     def __init__(self, func):
         self.func = func
         self.deps = []
+        self.memo = {}  # expression analyses by instructions (see _analyze_expr)
 
 
 def _resolve_value(instr, ctx):
@@ -348,6 +357,14 @@ def _analyze_simple(instrs, func):
     if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "UNARY_NOT":
         return ("not",)
 
+    # lambda x: -x, ~x, +x
+    # LOAD_FAST, UNARY_NEGATIVE / UNARY_INVERT / CALL_INTRINSIC_1 (positive)
+    if n == 2 and instrs[0][0] == "LOAD_FAST":
+        if instrs[1][0] in _UNARY_OPCODES:
+            return ("unary", _UNARY_OPCODES[instrs[1][0]])
+        if instrs[1] == ("CALL_INTRINSIC_1", _INTRINSIC_UNARY_POSITIVE):
+            return ("unary", "+")
+
     # lambda x: not not x (compiled to a bare TO_BOOL)
     if n == 2 and instrs[0][0] == "LOAD_FAST" and instrs[1][0] == "TO_BOOL":
         return ("bool",)
@@ -376,6 +393,8 @@ def _analyze_simple(instrs, func):
             return ("set",)
         if resolved is _builtins.frozenset:
             return ("frozenset",)
+        if resolved is _builtins.abs:
+            return ("unary", "abs")
         # Arbitrary callable: lambda x: MyClass(x) → unwrap
         if resolved is not _UNRESOLVABLE and callable(resolved):
             return ("unwrap", resolved)
@@ -601,15 +620,27 @@ def _analyze_compound(instrs, func):
 
 def _analyze_expr(instrs, func):
     """Analyze an expression — tries compound first, then simple, then a
-    longer chain of single steps."""
-    # Try compound (and/or) first
-    compound = _analyze_compound(instrs, func)
-    if compound is not None:
-        return compound
-    simple = _analyze_simple(instrs, func)
-    if simple is not None:
-        return simple
-    return _analyze_postfix(instrs, func)
+    longer chain of single steps, then operators on other expressions.
+
+    Results are remembered for the analysis (`func` is its _Bindings): the
+    operator patterns analyse parts of the instructions, and the same parts
+    again for each way they might split."""
+    try:
+        key = tuple(instrs)
+        return func.memo[key]
+    except KeyError:
+        pass
+    except TypeError:  # an unhashable constant: not remembered
+        key = None
+    result = (
+        _analyze_compound(instrs, func)
+        or _analyze_simple(instrs, func)
+        or _analyze_postfix(instrs, func)
+        or _analyze_operators(instrs, func)
+    )
+    if key is not None:
+        func.memo[key] = result
+    return result
 
 
 _ITEM = ("LOAD_FAST", None)  # stands for the previous step's result
@@ -673,6 +704,129 @@ def _postfix_steps(instrs, func):
         else:
             return None
     return steps
+
+
+# How many values each instruction of an analysable expression leaves on the
+# stack, counting a call's callable as one value (its NULL or self slot is
+# left out): an expression leaves one. CALL and BUILD_* depend on their count.
+_STACK_EFFECT = {
+    **dict.fromkeys(("LOAD_FAST", "LOAD_CONST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_DEFAULT", "COPY"), 1),
+    **dict.fromkeys(("LOAD_ATTR", "UNARY_NEGATIVE", "UNARY_INVERT", "UNARY_NOT", "TO_BOOL", "CALL_INTRINSIC_1"), 0),
+    **dict.fromkeys(("BINARY_OP", "BINARY_SUBSCR", "COMPARE_OP", "CONTAINS_OP", "IS_OP", "POP_TOP"), -1),
+    **dict.fromkeys(("POP_JUMP_IF_FALSE", "POP_JUMP_IF_TRUE"), -1),
+    "BINARY_SLICE": -2,
+}
+_UNARY_OPCODES = {"UNARY_NEGATIVE": "-", "UNARY_INVERT": "~"}
+_INTRINSIC_UNARY_POSITIVE = 5  # CALL_INTRINSIC_1's argument for `+x`
+# Builtins taking the item alone that have native forms (see _analyze_simple).
+_ONE_ARG_BUILTINS = frozenset(
+    ("len", "str", "int", "float", "bool", "type", "tuple", "list", "set", "frozenset", "abs")
+)
+
+
+def _depths(instrs):
+    """The stack depth after each instruction (falling through any jump),
+    or None for an instruction no pattern handles."""
+    depth, depths = 0, []
+    for op, arg in instrs:
+        if op == "CALL":
+            effect = -arg
+        elif op in ("BUILD_TUPLE", "BUILD_LIST"):
+            effect = 1 - arg
+        else:
+            effect = _STACK_EFFECT.get(op)
+            if effect is None:
+                return None
+        depth += effect
+        depths.append(depth)
+    return depths
+
+
+def _operand(instrs, func):
+    """One operand of an operator: ("item",) for the item itself, ("const",
+    value) for a value that doesn't depend on it, an expression of it (its
+    analysis), or None."""
+    if len(instrs) == 1:
+        op = instrs[0][0]
+        if op == "LOAD_FAST":
+            return ("item",)
+        if op in ("LOAD_CONST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_DEFAULT"):
+            value = _resolve_value(instrs[0], func)
+            return None if value is _UNRESOLVABLE else ("const", value)
+        return None
+    return _analyze_expr(instrs, func)
+
+
+def _analyze_operators(instrs, func):
+    """Operators on expressions of the item, beyond the item and a constant:
+    `2 * x`, `0 < x`, `x * x`, `x.a + x.b`, `TABLE[x]`, `TABLE[x.key]`,
+    `-(x + 1)`, `abs(x - 1)`, `not 2 * x`, and steps after any of these
+    (`TABLE[x]["a"]`, `(2 * x).bit_length()`).
+
+    An operator's operands are found by the stack depth: the left one ends
+    where one value is on the stack. That point is unique for a valid
+    split (an expression never empties the stack it started on), but and/or
+    inside an operand can bring the depth back to one, so each such point is
+    tried; only the right one analyses on both sides."""
+    depths = _depths(instrs)
+    if depths is None or len(instrs) < 2 or depths[-1] != 1:
+        return None
+    op, arg = instrs[-1]
+    unary = _UNARY_OPCODES.get(op) or ("+" if (op, arg) == ("CALL_INTRINSIC_1", _INTRINSIC_UNARY_POSITIVE) else None)
+    if unary is not None:
+        inner = _analyze_expr(instrs[:-1], func)
+        return None if inner is None else ("chain", inner, ("unary", unary))
+    if op == "UNARY_NOT":
+        inner = _analyze_expr(instrs[:-1], func)
+        return None if inner is None else ("negate", inner)
+    if op == "CALL" and arg == 1 and instrs[0][0] == "LOAD_GLOBAL" and instrs[0][1] in _ONE_ARG_BUILTINS:
+        inner = _analyze_expr(instrs[1:-1], func)
+        call = _analyze_simple([instrs[0], _ITEM, instrs[-1]], func)
+        if inner is not None and call is not None and call[0] != "unwrap":
+            return ("chain", inner, call)
+    if (
+        (op == "BINARY_OP" and arg in _BINARY_OPS)
+        or (op == "COMPARE_OP" and arg in _COMPARE_OPS)
+        or op == "BINARY_SUBSCR"
+    ):
+        for k in (i + 1 for i, depth in enumerate(depths[:-2]) if depth == 1):
+            left = _operand(instrs[:k], func)
+            right = _operand(instrs[k:-1], func) if left is not None else None
+            if right is not None:
+                return _operator(op, arg, left, right)
+    # Steps after an operator: `TABLE[x]["a"]` is TABLE[x], then ["a"].
+    for k in (i + 1 for i, depth in enumerate(depths[:-1]) if depth == 1):
+        if instrs[k - 1][0] in ("LOAD_FAST", "LOAD_CONST", "LOAD_GLOBAL", "LOAD_DEREF", "LOAD_DEFAULT"):
+            continue  # the item or a value: the postfix patterns' heads
+        head = _analyze_expr(instrs[:k], func)
+        steps = _postfix_steps(instrs[k:], func) if head is not None else None
+        if steps:
+            for step in steps:
+                head = ("chain", head, step)
+            return head
+    return None
+
+
+def _operator(op, arg, left, right):
+    """The analysis of `left <op> right` (operands from _operand), or None."""
+    left_const, right_const = left[0] == "const", right[0] == "const"
+    if left_const and right_const:
+        return None  # nothing depends on the item
+    if right_const or left_const:
+        # An expression of the item, then the operator with the constant on
+        # its side (the constant's load has no effect to keep in order).
+        c = right[1] if right_const else left[1]
+        expr = left if right_const else right
+        if op == "BINARY_SUBSCR":
+            step = ("itemgetter", c) if right_const else ("getitem_from", c)
+        elif op == "COMPARE_OP":
+            step = ("compare" if right_const else "rcompare", arg, c)
+        else:
+            step = ("binop" if right_const else "rbinop", arg, c)
+        return step if expr == ("item",) else ("chain", expr, step)
+    if op == "BINARY_SUBSCR":
+        return None  # x[x.key]: rare enough to leave as Python
+    return ("binop2" if op == "BINARY_OP" else "compare2", arg, left, right)
 
 
 # Flags for bail-out checks

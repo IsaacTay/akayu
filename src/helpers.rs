@@ -38,6 +38,7 @@ define_py_helper!(BUILTIN_TUPLE, get_builtin_tuple);
 define_py_helper!(BUILTIN_LIST, get_builtin_list);
 define_py_helper!(BUILTIN_SET, get_builtin_set);
 define_py_helper!(BUILTIN_FROZENSET, get_builtin_frozenset);
+define_py_helper!(BUILTIN_ABS, get_builtin_abs);
 define_py_helper!(OPERATOR_NOT, get_operator_not);
 define_py_helper!(OPERATOR_IS, get_operator_is);
 define_py_helper!(OPERATOR_IS_NOT, get_operator_is_not);
@@ -462,6 +463,7 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
     let _ = BUILTIN_LIST.set(builtins.getattr("list")?.unbind());
     let _ = BUILTIN_SET.set(builtins.getattr("set")?.unbind());
     let _ = BUILTIN_FROZENSET.set(builtins.getattr("frozenset")?.unbind());
+    let _ = BUILTIN_ABS.set(builtins.getattr("abs")?.unbind());
 
     // Cache operator module references for fast-path detection
     let operator = py.import("operator")?;

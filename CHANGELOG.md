@@ -8,13 +8,21 @@
   its function is called (`Python`) or run natively (`native`, `native, unboxed` for arithmetic on
   machine numbers), and after `compile()` the chain it was merged into. A map or filter that runs
   as Python says why, when it can tell: `until compile()`, or the part of its function no native
-  form covers (`Python: calls lookup()`, `Python: x * x`, `Python: 2 statements`). The profile
+  form covers (`Python: calls lookup()`, `Python: an f-string`, `Python: 2 statements`). The profile
   report's tree shows the same tags, and `to_dict()` has them as `how` and `chain`.
 - `CallbackError.item`: what the failing function was given (the item, or for `batch_map()` its
   list). It is an attribute, not part of the message, so private data doesn't end up in logs.
+- More functions run natively instead of as Python calls: a constant on the left (`2 * x`,
+  `1 - x`, `0 < x`), the item on both sides (`x * x`, `x.a + x.b`, `x["lo"] < x["hi"]`), `-x`,
+  `+x`, `~x`, `abs(x)` and `map(abs)`, the bit operators `<< >> & | ^`, lookups by the item
+  (`table[x]`, `table[x.key]`), and builtins of an expression (`len(x.split())`,
+  `abs(x - 3)`). The arithmetic among them also runs unboxed on ints and floats.
 
 ### Fixed
 
+- `lambda x: not not (x > 3)` returned the comparison's own result, not a bool, after `compile()`
+  (3.13 compiles it to one comparison that converts its result to bool, and the conversion was
+  left out): a type whose `>` returns something else gave that.
 - `ProfileReport.print()` writes to `sys.stdout`, as `print()` does. It wrote to the process's stdout
   directly, so the report never appeared in a Jupyter cell, pytest's captured output or
   `contextlib.redirect_stdout()`.

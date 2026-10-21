@@ -158,7 +158,7 @@ def scaled_and_shown(k):
 WHY = {
     "calls a function": (lambda x: lookup(x) + 1, "calls lookup()"),
     "calls a method of a global": (lambda x: TABLE.get(x), "calls TABLE.get()"),
-    "the part shown": (lambda x: x["a"] + x["b"], "x['a'] + x['b']"),
+    "the part shown": (lambda x: x["a"] @ x["b"], "x['a'] @ x['b']"),
     "an f-string": (lambda x: f"{x}!", "an f-string"),
     # For its if/else, whatever its parts are.
     "if/else": (lambda x: x if x > 0 else -x, "if/else"),
@@ -203,13 +203,13 @@ def test_until_compile():
 
 def test_nothing_to_add():
     # A class, a C function, a lambda whose source can't be read.
-    for func in (Point, abs, eval("lambda x: x * x")):
+    for func in (Point, repr, eval("lambda x: x @ x")):
         assert how(func) == "Python"
 
 
 def test_long_parts_are_shortened():
     # Short in bytecode (on 3.14 too, whose method calls are longer), long as text.
-    why = how(lambda x: x["a_long_key"] * x["another_long_key"]).removeprefix("Python: ")
+    why = how(lambda x: x["a_long_key"] @ x["another_long_key"]).removeprefix("Python: ")
     assert len(why) == 28 and why.endswith("…")
 
 

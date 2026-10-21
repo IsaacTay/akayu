@@ -232,6 +232,21 @@ pub enum BuiltinOp {
     BinOp(BinaryOp, Py<PyAny>),
     /// x <cmpop> rhs — uses PyObject_RichCompareBool
     Compare(CompareOp, Py<PyAny>),
+    /// lhs <binop> x, the constant on the left (`2 * x`)
+    RBinOp(BinaryOp, Py<PyAny>),
+    /// lhs <cmpop> x, the constant on the left (`0 < x`)
+    RCompare(CompareOp, Py<PyAny>),
+    /// op1(x) <binop> op2(x): an operator on two expressions of the item
+    /// (`x * x`, `x.a + x.b`), the left one evaluated first
+    BinOpOf(BinaryOp, Box<BuiltinOp>, Box<BuiltinOp>),
+    /// op1(x) <cmpop> op2(x) (`x.lo < x.hi`)
+    CompareOf(CompareOp, Box<BuiltinOp>, Box<BuiltinOp>),
+    /// The item itself: an operand of `BinOpOf` or `CompareOf`
+    Item,
+    /// -x, +x, ~x, abs(x) — uses PyNumber_Negative, ...
+    Unary(UnaryOp),
+    /// container[x] — uses PyObject_GetItem
+    GetItemFrom(Py<PyAny>),
     /// x in collection — uses PySequence_Contains
     Contains(Py<PyAny>),
     /// x not in collection — uses PySequence_Contains + invert
@@ -283,6 +298,24 @@ pub enum BinaryOp {
     FloorDiv,
     Mod,
     Pow,
+    LShift,
+    RShift,
+    And,
+    Or,
+    Xor,
+}
+
+/// Operations on the item alone for `BuiltinOp::Unary`.
+#[derive(Clone, Copy)]
+pub enum UnaryOp {
+    /// -x
+    Neg,
+    /// +x
+    Pos,
+    /// ~x
+    Invert,
+    /// abs(x)
+    Abs,
 }
 
 /// Comparison operations for `BuiltinOp::Compare`.

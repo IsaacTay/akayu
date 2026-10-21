@@ -9,13 +9,13 @@ use std::sync::Arc;
 
 use crate::Stream;
 use crate::helpers::{
-    InternTable, get_analyze_for_compile, get_builtin_bool, get_builtin_float,
+    InternTable, get_analyze_for_compile, get_builtin_abs, get_builtin_bool, get_builtin_float,
     get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
     get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
     get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
     get_operator_itemgetter, get_operator_not, get_operator_truth, get_why_python,
 };
-use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic};
+use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic, UnaryOp};
 
 /// Parse a comparison op string from the Python analyzer into a `CompareOp`.
 fn parse_compare_op(s: &str) -> Option<CompareOp> {
@@ -40,6 +40,22 @@ fn parse_binary_op(s: &str) -> Option<BinaryOp> {
         "//" => Some(BinaryOp::FloorDiv),
         "%" => Some(BinaryOp::Mod),
         "**" => Some(BinaryOp::Pow),
+        "<<" => Some(BinaryOp::LShift),
+        ">>" => Some(BinaryOp::RShift),
+        "&" => Some(BinaryOp::And),
+        "|" => Some(BinaryOp::Or),
+        "^" => Some(BinaryOp::Xor),
+        _ => None,
+    }
+}
+
+/// Parse a unary op from the Python analyzer into a `UnaryOp`.
+fn parse_unary_op(s: &str) -> Option<UnaryOp> {
+    match s {
+        "-" => Some(UnaryOp::Neg),
+        "+" => Some(UnaryOp::Pos),
+        "~" => Some(UnaryOp::Invert),
+        "abs" => Some(UnaryOp::Abs),
         _ => None,
     }
 }
@@ -183,6 +199,41 @@ fn parse_analysis_tuple(py: Python, obj: &Bound<'_, PyAny>) -> Option<BuiltinOp>
             let bin_op = parse_binary_op(&op_str)?;
             let rhs = tuple.get_item(2).ok()?.unbind();
             Some(BuiltinOp::BinOp(bin_op, rhs))
+        }
+        "rcompare" => {
+            let op_str: String = tuple.get_item(1).ok()?.extract().ok()?;
+            let cmp_op = parse_compare_op(&op_str)?;
+            let lhs = tuple.get_item(2).ok()?.unbind();
+            Some(BuiltinOp::RCompare(cmp_op, lhs))
+        }
+        "rbinop" => {
+            let op_str: String = tuple.get_item(1).ok()?.extract().ok()?;
+            let bin_op = parse_binary_op(&op_str)?;
+            let lhs = tuple.get_item(2).ok()?.unbind();
+            Some(BuiltinOp::RBinOp(bin_op, lhs))
+        }
+        "binop2" | "compare2" => {
+            let op_str: String = tuple.get_item(1).ok()?.extract().ok()?;
+            let left = Box::new(parse_analysis_tuple(py, &tuple.get_item(2).ok()?)?);
+            let right = Box::new(parse_analysis_tuple(py, &tuple.get_item(3).ok()?)?);
+            if tag == "binop2" {
+                Some(BuiltinOp::BinOpOf(parse_binary_op(&op_str)?, left, right))
+            } else {
+                Some(BuiltinOp::CompareOf(
+                    parse_compare_op(&op_str)?,
+                    left,
+                    right,
+                ))
+            }
+        }
+        "item" => Some(BuiltinOp::Item),
+        "unary" => {
+            let op_str: String = tuple.get_item(1).ok()?.extract().ok()?;
+            Some(BuiltinOp::Unary(parse_unary_op(&op_str)?))
+        }
+        "getitem_from" => {
+            let container = tuple.get_item(1).ok()?.unbind();
+            Some(BuiltinOp::GetItemFrom(container))
         }
         "contains" => {
             let coll = tuple.get_item(1).ok()?.unbind();
@@ -502,6 +553,7 @@ fn detect_map_builtin_identity(py: Python, func: &Py<PyAny>) -> Option<Arc<Built
     check_identity!(get_builtin_list, BuiltinOp::List);
     check_identity!(get_builtin_set, BuiltinOp::Set);
     check_identity!(get_builtin_frozenset, BuiltinOp::FrozenSet);
+    check_identity!(get_builtin_abs, BuiltinOp::Unary(UnaryOp::Abs));
 
     // Detect operator.itemgetter instances (e.g., operator.itemgetter("name"))
     if get_operator_itemgetter()

@@ -125,6 +125,8 @@ ATTRS = [
     *("bit_length()", "is_integer()", "real", "imag"),
 ]
 CONTAINERS = ['(1, 2, "a")', '"abc"', '{"a": 1}', "[0, 0.0, None]", "range(5)"]
+# Indexed by an expression of the item: TABLE[x].
+TABLES = ['{"a": 1, 0: "z", 1: 2.5, None: 0}', '"abcdef"', "(10, 20, 30)", "range(5)", "[0, -1]", "Odd()"]
 
 
 def const(rng):
@@ -136,7 +138,7 @@ def const(rng):
 
 def wrap(rng, e):
     """`e` with one more step applied to it."""
-    k = rng.randrange(14)
+    k = rng.randrange(15)
     if k < 4:
         op = rng.choice(ARITH)
         if op in ("**", "<<", "*"):
@@ -144,7 +146,8 @@ def wrap(rng, e):
         c = const(rng)
         return f"({e} {op} {c})" if rng.random() < 0.8 else f"({c} {op} {e})"
     if k < 6:
-        return f"({e} {rng.choice(CMP)} {const(rng)})"
+        op, c = rng.choice(CMP), const(rng)
+        return f"({e} {op} {c})" if rng.random() < 0.8 else f"({c} {op} {e})"
     if k == 6:
         return rng.choice([f"(not {e})", f"(-{e})", f"(+{e})", f"(~{e})"])
     if k == 7:
@@ -159,6 +162,8 @@ def wrap(rng, e):
         return f"({e} {rng.choice(['is', 'is not'])} {rng.choice(['None', 'True', 'False'])})"
     if k == 12:
         return f"({e} {rng.choice(['and', 'or'])} {const(rng)})"
+    if k == 13:
+        return f"{rng.choice(TABLES)}[{e}]"
     return f"({const(rng)} {rng.choice(['and', 'or'])} {e})"
 
 
@@ -171,9 +176,19 @@ def chain(rng, steps):
 
 def expression(rng):
     e = chain(rng, 4)
-    if rng.random() < 0.12:
+    r = rng.random()
+    if r < 0.12:
         e2 = chain(rng, 2)
         e = rng.choice([f"({e}, {e2})", f"[{e}, {e2}]", f"({e} and {e2})", f"({e} or {e2})"])
+    elif r < 0.3:
+        # The item on both sides of an operator: x * x, x.real + abs(x). No
+        # * or << between different expressions: str(x) * x with x = 2**31 is
+        # a 20 GB string, in Python too.
+        if rng.random() < 0.2:
+            return rng.choice(["(x * x)", f"({e} * {e})"])
+        e2 = rng.choice(["x", chain(rng, 2)])
+        op = rng.choice(["+", "-", "/", "//", "%", "&", "|", "^", *CMP])
+        e = f"({e} {op} {e2})" if rng.random() < 0.5 else f"({e2} {op} {e})"
     return e
 
 
@@ -265,7 +280,7 @@ ACC_STARTS = ["0", "1", "0.0", "-1", "''", "[]", "2**63-1", "-2**63", "None", "1
 
 def accumulate_mismatches(seed, seqs=ACC_SEQS):
     rng = random.Random(seed)
-    op = rng.choice(ARITH[:6])  # no **: 10**20 ** 2**62 never ends
+    op = rng.choice([*ARITH[:6], "&", "|", "^"])  # no ** or <<: 10**20 ** 2**62 never ends
     src = rng.choice([f"acc {op} x", f"x {op} acc", "max(acc, x)", "min(acc, x)", f"acc {op} {const(rng)}"])
     start = rng.choice(ACC_STARTS)
     found = []

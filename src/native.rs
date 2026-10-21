@@ -5,7 +5,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyList, PyTuple};
 
 use crate::helpers::vectorcall1;
-use crate::node::{BinaryOp, BuiltinOp, MethodCall};
+use crate::node::{BinaryOp, BuiltinOp, MethodCall, UnaryOp};
 
 /// The truth of a predicate's result. Released as a `Bound`: dropping a
 /// `Py` looks up pyo3's thread-local GIL count.
@@ -113,6 +113,29 @@ pub(crate) fn binary_op(
             BinaryOp::FloorDiv => ffi::PyNumber_FloorDivide(a, b),
             BinaryOp::Mod => ffi::PyNumber_Remainder(a, b),
             BinaryOp::Pow => ffi::PyNumber_Power(a, b, ffi::Py_None()),
+            BinaryOp::LShift => ffi::PyNumber_Lshift(a, b),
+            BinaryOp::RShift => ffi::PyNumber_Rshift(a, b),
+            BinaryOp::And => ffi::PyNumber_And(a, b),
+            BinaryOp::Or => ffi::PyNumber_Or(a, b),
+            BinaryOp::Xor => ffi::PyNumber_Xor(a, b),
+        }
+    };
+    // SAFETY: as above.
+    unsafe { Bound::from_owned_ptr_or_err(py, result) }.map(Bound::unbind)
+}
+
+/// `-x`, `+x`, `~x` or `abs(x)` through the number protocol, as the bytecode
+/// and builtin do.
+pub(crate) fn unary_op(py: Python, op: UnaryOp, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    use pyo3::ffi;
+    let x = x.as_ptr();
+    // SAFETY: GIL held; `x` is live; each returns a new reference or NULL.
+    let result = unsafe {
+        match op {
+            UnaryOp::Neg => ffi::PyNumber_Negative(x),
+            UnaryOp::Pos => ffi::PyNumber_Positive(x),
+            UnaryOp::Invert => ffi::PyNumber_Invert(x),
+            UnaryOp::Abs => ffi::PyNumber_Absolute(x),
         }
     };
     // SAFETY: as above.
@@ -246,6 +269,21 @@ pub(crate) fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResu
 
         // --- Phase 2 variants ---
         BuiltinOp::BinOp(bin_op, rhs) => binary_op(py, bin_op, x, rhs),
+        BuiltinOp::RBinOp(bin_op, lhs) => binary_op(py, bin_op, lhs, x),
+        BuiltinOp::BinOpOf(bin_op, left, right) => {
+            let a = apply_builtin(py, left, x)?;
+            let b = apply_builtin(py, right, x)?;
+            binary_op(py, bin_op, &a, &b)
+        }
+        BuiltinOp::Item => Ok(x.clone_ref(py)),
+        BuiltinOp::Unary(op) => unary_op(py, *op, x),
+        BuiltinOp::GetItemFrom(container) => unsafe {
+            Bound::from_owned_ptr_or_err(
+                py,
+                pyo3::ffi::PyObject_GetItem(container.as_ptr(), x.as_ptr()),
+            )
+            .map(Bound::unbind)
+        },
         BuiltinOp::Numeric(program, generic) => match program.run(py, x) {
             Some(v) => Ok(v),
             None => apply_builtin(py, generic, x),
@@ -260,6 +298,24 @@ pub(crate) fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResu
             )
             .map(Bound::unbind)
         },
+        BuiltinOp::RCompare(cmp_op, lhs) => unsafe {
+            Bound::from_owned_ptr_or_err(
+                py,
+                pyo3::ffi::PyObject_RichCompare(lhs.as_ptr(), x.as_ptr(), cmp_op.to_ffi()),
+            )
+            .map(Bound::unbind)
+        },
+        BuiltinOp::CompareOf(cmp_op, left, right) => {
+            let a = apply_builtin(py, left, x)?;
+            let b = apply_builtin(py, right, x)?;
+            unsafe {
+                Bound::from_owned_ptr_or_err(
+                    py,
+                    pyo3::ffi::PyObject_RichCompare(a.as_ptr(), b.as_ptr(), cmp_op.to_ffi()),
+                )
+                .map(Bound::unbind)
+            }
+        }
         BuiltinOp::Contains(coll) => {
             let r = unsafe { pyo3::ffi::PySequence_Contains(coll.as_ptr(), x.as_ptr()) };
             if r == -1 {

@@ -3,22 +3,31 @@
 //! A native op chain like `x * 2 + 1` or `x % 3 == 0` normally runs one
 //! number-protocol call per step, allocating a Python int or float for every
 //! intermediate result. When compile() finds a chain made only of arithmetic
-//! and comparisons with numeric constants, it also builds a `NumProgram`: per
-//! item, an exact int (fitting 64 bits) or float is unboxed once, every step
-//! runs on machine numbers, and the result is boxed once.
+//! and comparisons with numeric constants (on either side), `x * x`, `-x`,
+//! `+x`, `~x` and `abs(x)`, it also builds a `NumProgram`: per item, an exact
+//! int (fitting 64 bits) or float is unboxed once, every step runs on machine
+//! numbers, and the result is boxed once.
+//!
+//! Every step is `v <op> c` or `v <op> c` compared: a constant on the left is
+//! an op of its own (`c - v` is `RSub`) or, where the result is the same, the
+//! op itself (`c + v`, `0 < v` as `v > 0`), `~v` is `v ^ -1`, and `v * v`,
+//! `-v` and `abs(v)` are ops that leave the constant unused. Adding kinds of
+//! step instead cost a long arithmetic chain 9-29% more instructions per
+//! item: the loop's match on the step became a jump table before arith's own.
 //!
 //! Results must equal Python's exactly, so the program only handles what it
 //! can do identically, and returns None otherwise. The caller then runs the
 //! ordinary ops on the original item, which is safe because these steps have
 //! no side effects on ints and floats. None is returned for: anything but an
 //! exact int or float (bool included), int overflow, division by zero, `**`,
-//! float `//` and `%`, `int / int` or int-float comparisons beyond 2**53.
+//! float `//` and `%`, bit operations on floats, negative shifts, `int / int`
+//! or int-float comparisons beyond 2**53.
 
 use pyo3::ffi;
 use pyo3::prelude::*;
 use std::sync::Arc;
 
-use crate::node::{BinaryOp, BuiltinOp, CompareOp};
+use crate::node::{BinaryOp, BuiltinOp, CompareOp, UnaryOp};
 
 #[derive(Clone, Copy)]
 enum Num {
@@ -34,7 +43,26 @@ enum Arith {
     TrueDiv,
     FloorDiv,
     Mod,
+    LShift,
+    RShift,
+    And,
+    Or,
+    Xor,
+    // The constant on the left: v = c <op> v. (`c // v`, `c % v` and the
+    // shifts are rare, and each op here costs every step a little.)
+    RSub,
+    RTrueDiv,
+    // On v alone, the constant unused (~v is v ^ -1).
+    /// v * v
+    Square,
+    /// -v
+    Neg,
+    /// abs(v)
+    Abs,
 }
+
+/// The constant of a step on v alone.
+const UNUSED: Num = Num::Int(0);
 
 #[derive(Clone, Copy)]
 enum Cmp {
@@ -314,32 +342,93 @@ fn collect(py: Python, op: &BuiltinOp, steps: &mut Vec<Step>) -> Option<()> {
             collect(py, b, steps)
         }
         BuiltinOp::BinOp(op, c) => {
-            let op = match op {
-                BinaryOp::Add => Arith::Add,
-                BinaryOp::Sub => Arith::Sub,
-                BinaryOp::Mul => Arith::Mul,
-                BinaryOp::TrueDiv => Arith::TrueDiv,
-                BinaryOp::FloorDiv => Arith::FloorDiv,
-                BinaryOp::Mod => Arith::Mod,
-                BinaryOp::Pow => return None,
+            steps.push(Step::Arith(arith_op(op)?, unbox(c)?));
+            Some(())
+        }
+        BuiltinOp::RBinOp(op, c) => {
+            let c = unbox(c)?;
+            let op = match arith_op(op)? {
+                // The same result, but for which NaN comes back when both
+                // are NaN: only v can be.
+                op @ (Arith::Add | Arith::Mul | Arith::And | Arith::Or | Arith::Xor) => {
+                    if matches!(c, Num::Float(f) if f.is_nan()) {
+                        return None;
+                    }
+                    op
+                }
+                Arith::Sub => Arith::RSub,
+                Arith::TrueDiv => Arith::RTrueDiv,
+                _ => return None,
             };
-            steps.push(Step::Arith(op, unbox(c)?));
+            steps.push(Step::Arith(op, c));
+            Some(())
+        }
+        BuiltinOp::BinOpOf(BinaryOp::Mul, a, b)
+            if matches!((&**a, &**b), (BuiltinOp::Item, BuiltinOp::Item)) =>
+        {
+            steps.push(Step::Arith(Arith::Square, UNUSED));
+            Some(())
+        }
+        BuiltinOp::Unary(op) => {
+            steps.push(match op {
+                // The same number, but a comparison's bool becomes an int.
+                UnaryOp::Pos if steps.last().is_some_and(|s| matches!(s, Step::Cmp(..))) => {
+                    return None;
+                }
+                UnaryOp::Pos => return Some(()),
+                UnaryOp::Neg => Step::Arith(Arith::Neg, UNUSED),
+                // The same on ints, and floats raise TypeError either way.
+                UnaryOp::Invert => Step::Arith(Arith::Xor, Num::Int(-1)),
+                UnaryOp::Abs => Step::Arith(Arith::Abs, UNUSED),
+            });
             Some(())
         }
         BuiltinOp::Compare(op, c) => {
-            let op = match op {
-                CompareOp::Eq => Cmp::Eq,
-                CompareOp::Ne => Cmp::Ne,
-                CompareOp::Lt => Cmp::Lt,
-                CompareOp::Gt => Cmp::Gt,
-                CompareOp::Le => Cmp::Le,
-                CompareOp::Ge => Cmp::Ge,
-            };
-            steps.push(Step::Cmp(op, unbox(c)?));
+            steps.push(Step::Cmp(cmp_op(op), unbox(c)?));
             let _ = py;
             Some(())
         }
+        // c < v is v > c, NaN included.
+        BuiltinOp::RCompare(op, c) => {
+            let op = match cmp_op(op) {
+                Cmp::Lt => Cmp::Gt,
+                Cmp::Gt => Cmp::Lt,
+                Cmp::Le => Cmp::Ge,
+                Cmp::Ge => Cmp::Le,
+                op @ (Cmp::Eq | Cmp::Ne) => op,
+            };
+            steps.push(Step::Cmp(op, unbox(c)?));
+            Some(())
+        }
         _ => None,
+    }
+}
+
+fn arith_op(op: &BinaryOp) -> Option<Arith> {
+    Some(match op {
+        BinaryOp::Add => Arith::Add,
+        BinaryOp::Sub => Arith::Sub,
+        BinaryOp::Mul => Arith::Mul,
+        BinaryOp::TrueDiv => Arith::TrueDiv,
+        BinaryOp::FloorDiv => Arith::FloorDiv,
+        BinaryOp::Mod => Arith::Mod,
+        BinaryOp::LShift => Arith::LShift,
+        BinaryOp::RShift => Arith::RShift,
+        BinaryOp::And => Arith::And,
+        BinaryOp::Or => Arith::Or,
+        BinaryOp::Xor => Arith::Xor,
+        BinaryOp::Pow => return None,
+    })
+}
+
+fn cmp_op(op: &CompareOp) -> Cmp {
+    match op {
+        CompareOp::Eq => Cmp::Eq,
+        CompareOp::Ne => Cmp::Ne,
+        CompareOp::Lt => Cmp::Lt,
+        CompareOp::Gt => Cmp::Gt,
+        CompareOp::Le => Cmp::Le,
+        CompareOp::Ge => Cmp::Ge,
     }
 }
 
@@ -370,48 +459,104 @@ fn float(v: Num) -> f64 {
     }
 }
 
+/// `a <op> b` (`b <op> a` for the R ops) on unboxed numbers, as Python
+/// computes it, or None.
 #[inline(always)]
 fn arith(a: Num, op: Arith, b: Num) -> Option<Num> {
     if let (Num::Int(a), Num::Int(b)) = (a, b) {
-        return Some(match op {
-            Arith::Add => Num::Int(a.checked_add(b)?),
-            Arith::Sub => Num::Int(a.checked_sub(b)?),
-            Arith::Mul => Num::Int(a.checked_mul(b)?),
-            Arith::FloorDiv => {
-                let q = a.checked_div(b)?;
-                let r = a.checked_rem(b)?;
-                Num::Int(if r != 0 && (r < 0) != (b < 0) {
-                    q - 1
-                } else {
-                    q
-                })
-            }
-            Arith::Mod => {
-                let r = a.checked_rem(b)?;
-                Num::Int(if r != 0 && (r < 0) != (b < 0) {
-                    r + b
-                } else {
-                    r
-                })
-            }
-            Arith::TrueDiv => {
-                if b == 0 || a.unsigned_abs() > EXACT as u64 || b.unsigned_abs() > EXACT as u64 {
-                    return None;
-                }
-                #[allow(clippy::cast_precision_loss)]
-                Num::Float(a as f64 / b as f64)
-            }
-        });
+        return Some(Num::Int(match op {
+            Arith::Add => a.checked_add(b)?,
+            Arith::Sub => a.checked_sub(b)?,
+            Arith::RSub => b.checked_sub(a)?,
+            Arith::Mul => a.checked_mul(b)?,
+            Arith::Square => a.checked_mul(a)?,
+            Arith::FloorDiv => floor_div(a, b)?,
+            Arith::Mod => modulo(a, b)?,
+            Arith::TrueDiv => return true_div(a, b),
+            Arith::RTrueDiv => return true_div(b, a),
+            Arith::LShift => shl(a, b)?,
+            Arith::RShift => shr(a, b)?,
+            Arith::And => a & b,
+            Arith::Or => a | b,
+            Arith::Xor => a ^ b,
+            Arith::Neg => a.checked_neg()?,
+            Arith::Abs => a.checked_abs()?,
+        }));
     }
     let (a, b) = (float(a), float(b));
     Some(Num::Float(match op {
         Arith::Add => a + b,
         Arith::Sub => a - b,
+        Arith::RSub => b - a,
         Arith::Mul => a * b,
+        Arith::Square => a * a,
         Arith::TrueDiv if b != 0.0 => a / b,
-        // Division by zero raises; float // and % have their own rules.
-        Arith::TrueDiv | Arith::FloorDiv | Arith::Mod => return None,
+        Arith::RTrueDiv if a != 0.0 => b / a,
+        Arith::Neg => -a,
+        Arith::Abs => a.abs(),
+        // Division by zero raises; float // and % have their own rules; bit
+        // operations raise TypeError.
+        Arith::TrueDiv
+        | Arith::RTrueDiv
+        | Arith::FloorDiv
+        | Arith::Mod
+        | Arith::LShift
+        | Arith::RShift
+        | Arith::And
+        | Arith::Or
+        | Arith::Xor => return None,
     }))
+}
+
+/// Python's `a // b` on ints (rounding down), or None for b == 0 and overflow.
+#[inline(always)]
+fn floor_div(a: i64, b: i64) -> Option<i64> {
+    let q = a.checked_div(b)?;
+    let r = a.checked_rem(b)?;
+    Some(if r != 0 && (r < 0) != (b < 0) {
+        q - 1
+    } else {
+        q
+    })
+}
+
+/// Python's `a % b` on ints (the sign of b), or None for b == 0.
+#[inline(always)]
+fn modulo(a: i64, b: i64) -> Option<i64> {
+    let r = a.checked_rem(b)?;
+    Some(if r != 0 && (r < 0) != (b < 0) {
+        r + b
+    } else {
+        r
+    })
+}
+
+/// Python's `a / b` on ints, while both convert to f64 exactly.
+#[inline(always)]
+fn true_div(a: i64, b: i64) -> Option<Num> {
+    if b == 0 || a.unsigned_abs() > EXACT as u64 || b.unsigned_abs() > EXACT as u64 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Some(Num::Float(a as f64 / b as f64))
+}
+
+/// `a << b`, or None for a negative count (ValueError) and a result beyond
+/// 64 bits (a bigger int).
+#[inline(always)]
+fn shl(a: i64, b: i64) -> Option<i64> {
+    let b = u32::try_from(b).ok()?;
+    if a == 0 {
+        return Some(0);
+    }
+    let r = a.checked_shl(b)?;
+    (r >> b == a).then_some(r)
+}
+
+/// `a >> b`, or None for a negative count (ValueError).
+#[inline(always)]
+fn shr(a: i64, b: i64) -> Option<i64> {
+    (b >= 0).then(|| a >> b.min(63))
 }
 
 #[inline(always)]

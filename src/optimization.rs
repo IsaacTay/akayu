@@ -1079,6 +1079,11 @@ fn pure_item_op(op: &BuiltinOp) -> bool {
         | BuiltinOp::FrozenSet
         | BuiltinOp::BinOp(..)
         | BuiltinOp::Compare(..)
+        | BuiltinOp::RBinOp(..)
+        | BuiltinOp::RCompare(..)
+        | BuiltinOp::GetItemFrom(_)
+        | BuiltinOp::Unary(_)
+        | BuiltinOp::Item
         | BuiltinOp::Contains(_)
         | BuiltinOp::NotContains(_)
         | BuiltinOp::Slice(..) => true,
@@ -1086,9 +1091,11 @@ fn pure_item_op(op: &BuiltinOp) -> bool {
         BuiltinOp::TupleConstruct(ops) | BuiltinOp::ListConstruct(ops) => {
             ops.iter().all(pure_item_op)
         }
-        BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
-            pure_item_op(a) && pure_item_op(b)
-        }
+        BuiltinOp::Chain(a, b)
+        | BuiltinOp::And(a, b)
+        | BuiltinOp::Or(a, b)
+        | BuiltinOp::BinOpOf(_, a, b)
+        | BuiltinOp::CompareOf(_, a, b) => pure_item_op(a) && pure_item_op(b),
         BuiltinOp::Negate(inner) | BuiltinOp::Numeric(_, inner) => pure_item_op(inner),
         // compile() replaces an eager op with its op; one still here calls
         // the function once its code is replaced.

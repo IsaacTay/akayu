@@ -145,24 +145,30 @@ A `seq()` directly below `par()` is kept: it is what keeps the nodes after it se
 `compile()` reads the bytecode of each function and replaces simple ones with native operations,
 so no Python function call happens per item. Recognized shapes include:
 
-- One step on the item: `x + 1`, `x % 2`, `x > 3`, `x["key"]`, `x.attr`, `x.strip()`,
-  `x.get("k", 0)`, `len(x)`, `str(x)`, `x in allowed`, `x is None`, `not x`, `x[1:]`
-- Chains of such steps: `x % 2 == 0`, `x * 2 + 1`, `x["a"]["b"]`, `str(x).upper()`
+- One step on the item: `x + 1`, `2 * x`, `x % 2`, `x & 0xFF`, `x > 3`, `0 < x`, `-x`, `~x`,
+  `abs(x)`, `x["key"]`, `table[x]`, `x.attr`, `x.strip()`, `x.get("k", 0)`, `len(x)`, `str(x)`,
+  `x in allowed`, `x is None`, `not x`, `x[1:]`
+- Chains of such steps: `x % 2 == 0`, `x * 2 + 1`, `x["a"]["b"]`, `str(x).upper()`,
+  `-(x + 1)`, `table[x.key]`, `len(x.split())`, `abs(x - 3)`
+- Operators with the item on both sides: `x * x`, `x.a + x.b`, `x["lo"] < x["hi"]`,
+  `(x + 1) * (x - 1)`
 - `and` / `or` of them, and tuples/lists of them: `(x["a"], x["b"])`
 - Extra parameters with defaults, the loop-variable idiom: `lambda x, k=k: x + k`
 - Accumulators, with `returns_state=False`: `acc <op> x` and `acc <op> constant` for
-  `+ - * / // % **` (the accumulator first: `x + acc` is still called), `max(acc, x)`,
-  `min(acc, x)`
+  `+ - * / // % ** << >> & | ^` (the accumulator first: `x + acc` is still called),
+  `max(acc, x)`, `min(acc, x)`
 - Sinks: `sink(results.append)` on a list, `sink(print)`
 
 Builtin callables passed directly also run natively after `compile()`: `map(len)`, `map(str)`,
-`map(int)`, `map(float)`, `map(bool)`, `map(type)`, `map(tuple)`, `map(list)`, `map(set)`,
-`map(frozenset)`, `map(operator.not_)`, `map(operator.truth)`, `map(operator.itemgetter(k))`
+`map(int)`, `map(float)`, `map(bool)`, `map(abs)`, `map(type)`, `map(tuple)`, `map(list)`,
+`map(set)`, `map(frozenset)`, `map(operator.not_)`, `map(operator.truth)`, `map(operator.itemgetter(k))`
 with one key, `map(operator.attrgetter("a.b"))` with one name (dotted paths are followed),
 `filter(isinstance, T)`, `filter(operator.is_, v)` and `filter(operator.is_not, None)`.
 
-Values from closures, defaults and globals are read once, at `compile()`. Functions that use the
-item twice (`x * x`), branch (`0 < x < 10`) or do anything else still run as Python calls.
+Values from closures, defaults and globals are read once, at `compile()`, `table` in `table[x]`
+included (the same dict, so changes to its contents still show). Functions that branch
+(`0 < x < 10`, `a if x else b`), call a Python function or do anything else still run as Python
+calls; [`explain()`](#seeing-what-compile-did) says which part of each one is to blame.
 
 `map()` and `filter()` lambdas whose native form depends on nothing but their own code
 (`lambda x: x + 1`, `lambda x: x["k"]`, `lambda x: x.strip()`) run natively even before
@@ -178,13 +184,14 @@ A method call on an item of a builtin type (`x.strip()` on a `str`, `x.get("k", 
 calls that type's C method directly: builtin types can't be changed, so `compile()` looks the
 method up once. Other items, including subclasses that may override it, look it up per call.
 
-Arithmetic and comparisons with numeric constants (`+ - * / // %` and `== != < > <= >=`) also
-run unboxed on ints and floats: an item is converted to a machine integer or float once, every
-such step in a row (`.map(lambda x: x * 2 + 1).filter(lambda x: x % 3 == 0)`) works on it
-without allocating a Python number, and the result is converted back once. Results are exactly
-Python's; whatever the machine version can't do identically (bools, integers beyond 64 bits or
-overflowing them, division by zero, `**`, float `//` and `%`, int/float mixes beyond 2\*\*53)
-takes the ordinary path for that item.
+Arithmetic and comparisons with numeric constants on either side (`+ - * / // % << >> & | ^`
+and `== != < > <= >=`), the same with the item on both sides (`x * x`), and `-x`, `+x`, `~x` and
+`abs(x)` also run unboxed on ints and floats: an item is converted to a machine integer or float
+once, every such step in a row (`.map(lambda x: x * 2 + 1).filter(lambda x: x % 3 == 0)`) works
+on it without allocating a Python number, and the result is converted back once. Results are
+exactly Python's; whatever the machine version can't do identically (bools, integers beyond 64
+bits or overflowing them, division by zero, `**`, float `//` and `%`, bit operations on floats,
+negative shift counts, int/float mixes beyond 2\*\*53) takes the ordinary path for that item.
 
 ## Proven Fast Paths
 

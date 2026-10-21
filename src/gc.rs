@@ -39,6 +39,9 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         | BuiltinOp::ItemGetter(obj)
         | BuiltinOp::BinOp(_, obj)
         | BuiltinOp::Compare(_, obj)
+        | BuiltinOp::RBinOp(_, obj)
+        | BuiltinOp::RCompare(_, obj)
+        | BuiltinOp::GetItemFrom(obj)
         | BuiltinOp::Contains(obj)
         | BuiltinOp::NotContains(obj) => visit.call(obj),
         BuiltinOp::AttrGetter(name) | BuiltinOp::HasAttr(name) => visit.call(name),
@@ -71,12 +74,18 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
             visit.call(code)?;
             visit_builtin(op, visit)
         }
-        BuiltinOp::Chain(a, b) | BuiltinOp::And(a, b) | BuiltinOp::Or(a, b) => {
+        BuiltinOp::Chain(a, b)
+        | BuiltinOp::And(a, b)
+        | BuiltinOp::Or(a, b)
+        | BuiltinOp::BinOpOf(_, a, b)
+        | BuiltinOp::CompareOf(_, a, b) => {
             visit_builtin(a, visit)?;
             visit_builtin(b, visit)
         }
         BuiltinOp::Negate(inner) => visit_builtin(inner, visit),
         BuiltinOp::Len
+        | BuiltinOp::Item
+        | BuiltinOp::Unary(_)
         | BuiltinOp::Str
         | BuiltinOp::Int
         | BuiltinOp::Float

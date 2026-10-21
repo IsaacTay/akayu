@@ -633,7 +633,7 @@ class Stream:
 
         A map or filter that runs as Python says why, when it can tell: "until
         compile()", or the part of its function no native form covers, such
-        as `Python: lookup(x)`, `Python: x * x` or `Python: 2 statements`.
+        as `Python: calls lookup()`, `Python: an f-string` or `Python: 2 statements`.
 
         Returns:
             The description, to print.

@@ -13,6 +13,8 @@ import pytest
 from akayu._helpers import _analyze_lambda
 from support import calls_during, run_python
 
+from akayu import Stream
+
 threshold = 10
 allowed = {"a", "b"}
 old, new = "x", "y"
@@ -66,7 +68,7 @@ def test_unrecognized_lambda_is_left_alone():
         (lambda x, key="a": x[key], ("itemgetter", "a")),
         (lambda x, y: x + y, None),  # no default: not a constant
         (lambda x, *, k=1: x + k, None),  # keyword-only
-        (lambda x, k=3: k - x, None),  # the item must come first
+        (lambda x, k=3: k - x, ("rbinop", "-", 3)),  # the constant on the left
     ],
     ids=["binop", "compare", "itemgetter", "no-default", "kw-only", "reversed"],
 )
@@ -84,12 +86,60 @@ def test_defaulted_parameters_are_constants(func, expected):
         (lambda x: str(x).upper(), ("chain", ("str",), ("method0", "upper"))),
         (lambda x: x.strip().lower(), ("chain", ("method0", "strip"), ("method0", "lower"))),
         (lambda x: 0 < x < 10, None),  # comparison chains branch
-        (lambda x: x * x, None),  # the item twice
     ],
-    ids=["mod-eq", "mul-add", "item-item", "attr-attr", "str-method", "method-method", "cmp-chain", "x-twice"],
+    ids=["mod-eq", "mul-add", "item-item", "attr-attr", "str-method", "method-method", "cmp-chain"],
 )
 def test_step_chains_recognized(func, expected):
     assert _analyze_lambda(func) == expected
+
+
+TABLE = {"a": 1}
+
+
+@pytest.mark.parametrize(
+    ("func", "expected"),
+    [
+        (lambda x: 2 * x, ("rbinop", "*", 2)),
+        (lambda x: 0 < x, ("rcompare", "<", 0)),
+        (lambda x: x * x, ("binop2", "*", ("item",), ("item",))),
+        (lambda x: x.lo < x.hi, ("compare2", "<", ("attrgetter", "lo"), ("attrgetter", "hi"))),
+        (lambda x: -x, ("unary", "-")),
+        (lambda x: ~x, ("unary", "~")),
+        (lambda x: abs(x - 3), ("chain", ("binop", "-", 3), ("unary", "abs"))),
+        (lambda x: x & 0xFF, ("binop", "&", 255)),
+        (lambda x: TABLE[x], ("getitem_from", TABLE)),
+        (lambda x: TABLE[x.key], ("chain", ("attrgetter", "key"), ("getitem_from", TABLE))),
+        (lambda x: TABLE[x]["a"], ("chain", ("getitem_from", TABLE), ("itemgetter", "a"))),
+        (lambda x: 2 * x + 1, ("chain", ("rbinop", "*", 2), ("binop", "+", 1))),
+        (lambda x: -(x + 1), ("chain", ("binop", "+", 1), ("unary", "-"))),
+        (lambda x: len(x.split()), ("chain", ("method0", "split"), ("len",))),
+        (lambda x: x[x.key], None),  # the item indexed by itself
+        (lambda x: x @ x, None),  # no native @
+    ],
+    ids=[
+        *("const-left", "const-left-compare", "item-twice", "two-attrs", "neg", "invert", "abs", "bitand"),
+        *("table", "table-of-attr", "table-then-key", "const-left-then", "neg-of", "len-of", "self-index", "matmul"),
+    ],
+)
+def test_operators_on_expressions_of_the_item(func, expected):
+    assert _analyze_lambda(func) == expected
+
+
+class Gt(int):
+    def __gt__(self, other):
+        return "not a bool"
+
+
+def test_a_comparison_converted_to_bool_stays_converted():
+    # 3.13 compiles `not not (x > 3)` to one comparison that converts its
+    # result to bool; read as the bare comparison, it gave "not a bool".
+    assert _analyze_lambda(lambda x: not not (x > 3)) == ("chain", ("compare", ">", 3), ("bool",))
+    out = []
+    s = Stream()
+    s.map(lambda x: not not (x > 3)).sink(out.append)
+    s.compile()
+    s.emit(Gt(5))
+    assert out == [True]
 
 
 def run_ok(code, **env):
@@ -203,3 +253,15 @@ def test_recognised_forms_run_natively_with_python_results(op, func, items, eage
     calls = calls_during(lambda: [s.emit(x) for x in items], func)
     assert calls == (0 if compiled or eager else len(items))
     assert out == ([func(x) for x in items] if op == "map" else [x for x in items if func(x)])
+
+
+def test_plus_turns_a_comparison_into_an_int():
+    # +x is the same number for ints and floats, so the unboxed program
+    # leaves it out; after a comparison it makes the bool an int.
+    out = []
+    s = Stream()
+    s.map(lambda x: +(x > 0)).sink(out.append)
+    s.compile()
+    s.emit_batch([5, -5])
+    s.emit(7)
+    assert out == [1, 0, 1] and all(type(v) is int for v in out)
