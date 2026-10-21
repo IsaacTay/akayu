@@ -93,6 +93,10 @@ jobs:
   test-aarch64:
     name: linux-aarch64 py${{ matrix.python }} (test)
     needs: wheel
+    # It needs only the aarch64 wheel, but can't wait for just that one matrix
+    # job: run even when another platform's failed (a missing wheel fails the
+    # download). The release still needs every job to succeed.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     strategy:
