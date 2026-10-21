@@ -84,9 +84,12 @@ def index(tmp_path):
 
 
 def uv(*args, cwd):
-    # Only this test's settings: no user config, its own cache, no downloads.
+    # Only this test's settings: no user config, its own cache, no downloads,
+    # and the interpreter running the tests (one that isn't on PATH, as in
+    # `just test-py314`, would otherwise not be found).
     env = {k: v for k, v in os.environ.items() if not k.startswith("UV_") and k not in ("VIRTUAL_ENV", "PYTHONPATH")}
     env |= {"UV_CACHE_DIR": str(Path(cwd).parent / "uv-cache"), "UV_NO_CONFIG": "1", "UV_PYTHON_DOWNLOADS": "never"}
+    env["UV_PYTHON"] = sys.executable
     return subprocess.run(["uv", *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=120, check=False)
 
 
