@@ -155,6 +155,30 @@ pub fn record_node(node_id: usize, func_time: Duration, items_in: u64, items_out
     });
 }
 
+/// Count `items` emitted into `source` (by emit(), emit_batch() or a sink's
+/// `target.emit` shortcut): a source passes on what it is given.
+#[inline]
+pub fn record_emitted(source: &Stream, items: usize) {
+    if is_profiling() {
+        let n = items as u64;
+        record_node(std::ptr::from_ref(source) as usize, Duration::ZERO, n, n);
+    }
+}
+
+/// Count `items` a node sent on when flushed: a collect's buffer, a
+/// chunk_by's last chunk, a prefetch's results still in flight.
+#[inline]
+pub fn record_flushed(node: &Stream, items: usize) {
+    if is_profiling() {
+        record_node(
+            std::ptr::from_ref(node) as usize,
+            Duration::ZERO,
+            0,
+            items as u64,
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Report data structures
 // ---------------------------------------------------------------------------

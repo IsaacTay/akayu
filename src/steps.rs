@@ -240,6 +240,7 @@ fn emit_into_target(
     // that is mid-emit is rejected, not run as unbounded recursion.
     let _entered = t.enter_source(py, false)?;
     for x in items {
+        crate::profiling::record_emitted(&t, 1);
         t.propagate(py, x)?;
     }
     Ok(())

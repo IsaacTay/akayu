@@ -187,12 +187,14 @@ impl Stream {
             NodeLogic::Collect { buffer } => {
                 let items = std::mem::take(buffer);
                 let tuple = PyTuple::new(py, items)?;
+                crate::profiling::record_flushed(self, 1);
                 self.propagate(py, tuple.into())?;
             }
             NodeLogic::ChunkBy(boxed) => {
                 let ChunkByState { buffer, order, .. } = &mut **boxed;
                 let emit_empty = matches!(order, ChunkOrder::Fused { .. });
                 if let Some(chunk) = crate::steps::chunk_take(py, buffer, emit_empty)? {
+                    crate::profiling::record_flushed(self, 1);
                     self.propagate(py, chunk)?;
                 }
             }
@@ -205,6 +207,7 @@ impl Stream {
             NodeLogic::Prefetched { prefetcher } => {
                 // The results before a failed item still go on, then its error.
                 let (results, error) = prefetcher.flush(py);
+                crate::profiling::record_flushed(self, results.len());
                 for result in results {
                     self.propagate(py, result)?;
                 }
@@ -917,6 +920,7 @@ impl Stream {
         let profiling = crate::profiling::is_profiling();
         if profiling {
             crate::profiling::begin_emit();
+            crate::profiling::record_emitted(self, 1);
         }
 
         let result = self.propagate(py, x);
@@ -951,6 +955,7 @@ impl Stream {
         let profiling = crate::profiling::is_profiling();
         if profiling {
             crate::profiling::begin_emit();
+            crate::profiling::record_emitted(self, items.len());
         }
 
         let result = self.propagate_batch(py, items);
@@ -1100,6 +1105,7 @@ impl Stream {
         let _entered = self.enter_source(py, false)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
+        crate::profiling::record_emitted(self, 1);
         let result = self.propagate(py, x);
         crate::profiling::end_emit();
         let (data, wall_time, emit_count) = crate::profiling::stop_session();
@@ -1123,6 +1129,7 @@ impl Stream {
         let _entered = self.enter_source(py, false)?;
         crate::profiling::start_session()?;
         crate::profiling::begin_emit();
+        crate::profiling::record_emitted(self, items.len());
         let result = self.propagate_batch(py, items);
         crate::profiling::end_emit();
         let (data, wall_time, emit_count) = crate::profiling::stop_session();

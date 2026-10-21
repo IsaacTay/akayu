@@ -7,6 +7,9 @@
 - `ProfileReport.print()` writes to `sys.stdout`, as `print()` does. It wrote to the process's stdout
   directly, so the report never appeared in a Jupyter cell, pytest's captured output or
   `contextlib.redirect_stdout()`.
+- Profile reports count every item: what `flush()` sends on (a `collect()`'s buffer, a
+  `chunk_by()`'s last chunk, `prefetch()` results still in flight) was missing, and a source
+  showed 0 items. A node's items in now always equal the items its parents sent out.
 
 ## 2.0.1
 

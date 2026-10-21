@@ -84,8 +84,8 @@ class TestEmitProfiled:
 
         report = s.emit_profiled(5)
         d = report.to_dict()
-        _source = next(n for n in d["nodes"] if n["name"] == "source")
-        # Source doesn't go through update, so items_in/out may be 0
+        source = next(n for n in d["nodes"] if n["name"] == "source")
+        assert (source["items_in"], source["items_out"]) == (1, 1)
         map_node = next(n for n in d["nodes"] if "map" in n["name"])
         assert map_node["items_in"] == 1
         assert map_node["items_out"] == 1
@@ -443,3 +443,66 @@ class TestEmptyPipeline:
         report = s.stop_profiling()
         assert report.emit_count == 0
         assert report.total_time_ms == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Item counts add up
+# ---------------------------------------------------------------------------
+
+
+class TestItemCountsAddUp:
+    """Every item a node sends on reaches the nodes below it: a node's
+    items_in is the sum of its parents' items_out, and a source's are the
+    items emitted into it. flush() counts too: collect(), chunk_by() and
+    prefetch() send what they held then (prefetch showed 10 in, 7 out)."""
+
+    @staticmethod
+    def build():
+        s, got = Stream(), {"chunks": [], "flat": []}
+        branches = s.map(double).par()
+        ahead = branches.prefetch(3).map(lambda x: x + 1)
+        thirds = branches.filter(lambda x: x % 3 == 0)
+        merged = ahead.union(thirds)
+        merged.chunk_by(lambda x: x // 10).sink(got["chunks"].append)
+        merged.collect().flatten().sink(got["flat"].append)
+        return s, got
+
+    @pytest.mark.parametrize("emit", ["emit", "emit_batch"])
+    def test_every_node(self, compiled, emit):
+        s, got = self.build()
+        if compiled:
+            s.compile()
+        items = list(range(20))
+        with s.profile() as p:
+            if emit == "emit":
+                for x in items:
+                    s.emit(x)
+            else:
+                s.emit_batch(items)
+            s.flush()
+        d = p.report.to_dict()
+        nodes = {n["id"]: n for n in d["nodes"]}
+        parents = {}
+        for edge in d["edges"]:
+            parents.setdefault(edge["to"], []).append(edge["from"])
+
+        assert nodes[0]["items_in"] == nodes[0]["items_out"] == len(items)
+        for i, node in nodes.items():
+            if i in parents:
+                sent = sum(nodes[parent]["items_out"] for parent in parents[i])
+                assert node["items_in"] == sent, (node["name"], [nodes[p]["name"] for p in parents[i]])
+        # And what the sinks counted is what they got.
+        sinks = [n for n in nodes.values() if n["name"].startswith("sink")]
+        assert sorted(n["items_in"] for n in sinks) == sorted([len(got["chunks"]), len(got["flat"])])
+
+    def test_a_sink_into_another_source(self):
+        """`a.sink(b.emit)` sends into b without b.emit()'s own call."""
+        b, out = Stream(), []
+        b.map(double).sink(out.append)
+        a = Stream()
+        a.sink(b.emit)
+        with b.profile() as p:
+            for x in range(4):
+                a.emit(x)
+        d = p.report.to_dict()
+        assert (d["nodes"][0]["items_in"], d["nodes"][0]["items_out"]) == (4, 4)
