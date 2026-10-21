@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Added
+
+- `CallbackError.item`: what the failing function was given (the item, or for `batch_map()` its
+  list). It is an attribute, not part of the message, so private data doesn't end up in logs.
+
 ### Fixed
 
 - `ProfileReport.print()` writes to `sys.stdout`, as `print()` does. It wrote to the process's stdout

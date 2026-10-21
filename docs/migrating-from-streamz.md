@@ -78,7 +78,7 @@ mapped.emit(x)  # ❌ akayu.NotASourceError: Emit called on non-source node
 
 **streamz** raises a callback's exception as it is: a failing `map(lambda x: 1 / x)` raises `ZeroDivisionError`.
 
-**akayu** raises `akayu.CallbackError` naming the node (`.node`) and the line that created it (`.location`), with the original exception as its `__cause__`. `CallbackError` is a `RuntimeError`, like every error akayu raises about the graph (see [Errors](api.md#errors)). `KeyboardInterrupt`, `SystemExit` and other exceptions that aren't `Exception` subclasses pass through unchanged.
+**akayu** raises `akayu.CallbackError` naming the node (`.node`) and the line that created it (`.location`), with the original exception as its `__cause__` and the item the function was given as `.item` (kept out of the message, which often ends up in logs). `CallbackError` is a `RuntimeError`, like every error akayu raises about the graph (see [Errors](api.md#errors)). `KeyboardInterrupt`, `SystemExit` and other exceptions that aren't `Exception` subclasses pass through unchanged.
 
 ```python
 import akayu
@@ -90,6 +90,7 @@ try:
     source.emit(0)
 except akayu.CallbackError as e:
     assert isinstance(e.__cause__, ZeroDivisionError)
+    assert e.item == 0
 ```
 
 ### 5. Performance Characteristics

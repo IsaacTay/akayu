@@ -22,8 +22,10 @@ pub(crate) mod exc {
         CallbackError,
         StreamError,
         "A function given to a node (map, filter, sink, ...) raised.\n\n\
-         The function's exception is `__cause__`. `node` is the node's name\n\
-         and `location` the file and line that built it."
+         The function's exception is `__cause__`. `node` is the node's name,\n\
+         `location` the file and line that built it, and `item` what the\n\
+         function was given: the item, or for batch_map() its list. `item` is\n\
+         not in the message, which often ends up in logs."
     );
     pyo3::create_exception!(
         akayu,

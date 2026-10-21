@@ -233,20 +233,28 @@ pub(crate) fn cached_vectorcall1(
 }
 
 /// A callback's error as a `CallbackError` naming the node it ran in, with
-/// the original as its `__cause__`. One already wrapped (by a node further
-/// down, or a nested pipeline) goes on as it is.
+/// the original as its `__cause__` and the item it was given as `item`. One
+/// already wrapped (by a node further down, or a nested pipeline) goes on as
+/// it is.
 pub(crate) fn wrap_error<T>(
     py: Python,
     res: PyResult<T>,
     node_name: &str,
     source_location: &str,
+    item: Option<&Py<PyAny>>,
 ) -> PyResult<T> {
-    res.map_err(|e| wrap_callback_error(py, e, node_name, source_location))
+    res.map_err(|e| wrap_callback_error(py, e, node_name, source_location, item))
 }
 
 #[cold]
 #[inline(never)]
-fn wrap_callback_error(py: Python, e: PyErr, node_name: &str, source_location: &str) -> PyErr {
+fn wrap_callback_error(
+    py: Python,
+    e: PyErr,
+    node_name: &str,
+    source_location: &str,
+    item: Option<&Py<PyAny>>,
+) -> PyErr {
     // KeyboardInterrupt, SystemExit, GeneratorExit: not a failed step but
     // a request to stop, which `except KeyboardInterrupt` and sys.exit()
     // codes must still see.
@@ -266,6 +274,8 @@ fn wrap_callback_error(py: Python, e: PyErr, node_name: &str, source_location: &
     // Plain attributes on the instance: a failure to set one only loses it.
     let _ = value.setattr(pyo3::intern!(py, "node"), node_name);
     let _ = value.setattr(pyo3::intern!(py, "location"), source_location);
+    // Not in the message: items can be private, and messages end up in logs.
+    let _ = value.setattr(pyo3::intern!(py, "item"), item.map(|x| x.clone_ref(py)));
     new_err.set_cause(py, Some(e));
     new_err
 }

@@ -94,7 +94,7 @@ fn map_one(py: Python, func: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -> PyResu
         Some(op) => apply_builtin(py, op, x),
         None => vcall1(py, func, x, ctx.cached_vc),
     };
-    wrap_error(py, res, ctx.name, ctx.source_location)
+    wrap_error(py, res, ctx.name, ctx.source_location, Some(x))
 }
 
 /// A filter step on one item: whether it passes.
@@ -104,7 +104,7 @@ fn filter_one(py: Python, predicate: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -
         Some(op) => apply_builtin_as_filter(py, op, x),
         None => vcall1(py, predicate, x, ctx.cached_vc).and_then(|r| truth(py, r)),
     };
-    wrap_error(py, res, ctx.name, ctx.source_location)
+    wrap_error(py, res, ctx.name, ctx.source_location, Some(x))
 }
 
 /// A sink step on one item, for a sink without a flush or emit target.
@@ -115,7 +115,7 @@ fn sink_one(py: Python, func: &Py<PyAny>, ctx: &NodeCtx, x: &Py<PyAny>) -> PyRes
         Some(BuiltinOp::Print) => print_one(py, x),
         _ => vcall1(py, func, x, ctx.cached_vc).map(drop),
     };
-    wrap_error(py, res, ctx.name, ctx.source_location)
+    wrap_error(py, res, ctx.name, ctx.source_location, Some(x))
 }
 
 /// `print(x)`, through the cached builtin.
@@ -171,7 +171,7 @@ pub(crate) fn extract_between_step(
         (open, open_vc)
     };
     let res = vcall1(py, pred, x, vc).and_then(|r| truth(py, r));
-    if !wrap_error(py, res, name, source_location)? {
+    if !wrap_error(py, res, name, source_location, Some(x))? {
         if *inside {
             buffer.push(x.clone_ref(py));
         }
@@ -370,7 +370,13 @@ fn apply_logic_general(
 
         NodeLogic::StarMap { func } => {
             let t = prof_start(profiling);
-            let result = wrap_error(py, star_call(py, func, &x), ctx.name, ctx.source_location)?;
+            let result = wrap_error(
+                py,
+                star_call(py, func, &x),
+                ctx.name,
+                ctx.source_location,
+                Some(&x),
+            )?;
             if let Some(t) = t {
                 profiling::record_node(ctx.node_id, t.elapsed(), 1, 1);
             }
@@ -431,10 +437,15 @@ fn apply_logic_general(
             } else {
                 Duration::ZERO
             };
-            let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
+            let result = wrap_error(py, result, ctx.name, ctx.source_location, Some(&x))?;
             let output = if *returns_state {
-                let (new_state, output) =
-                    wrap_error(py, split_state(py, result), ctx.name, ctx.source_location)?;
+                let (new_state, output) = wrap_error(
+                    py,
+                    split_state(py, result),
+                    ctx.name,
+                    ctx.source_location,
+                    Some(&x),
+                )?;
                 *state = new_state;
                 output
             } else {
@@ -448,7 +459,13 @@ fn apply_logic_general(
         }
 
         NodeLogic::Flatten => {
-            let batch = wrap_error(py, iter_all(x.bind(py)), ctx.name, ctx.source_location)?;
+            let batch = wrap_error(
+                py,
+                iter_all(x.bind(py)),
+                ctx.name,
+                ctx.source_location,
+                Some(&x),
+            )?;
             if profiling {
                 profiling::record_node(ctx.node_id, Duration::ZERO, 1, batch.len() as u64);
             }
@@ -458,17 +475,28 @@ fn apply_logic_general(
         NodeLogic::BatchMap { func } => {
             let py_list = PyList::new(py, &[x])?;
             let t = prof_start(profiling);
-            let result = func.call1(py, (py_list,));
+            let result = func.call1(py, (&py_list,));
             let ft = if let Some(t) = t {
                 t.elapsed()
             } else {
                 Duration::ZERO
             };
-            let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
+            let result = wrap_error(
+                py,
+                result,
+                ctx.name,
+                ctx.source_location,
+                Some(py_list.as_any().as_unbound()),
+            )?;
             // Every result goes on, however many the function returned for
             // the one item (it used to keep only the first).
-            let mut results =
-                wrap_error(py, iter_all(result.bind(py)), ctx.name, ctx.source_location)?;
+            let mut results = wrap_error(
+                py,
+                iter_all(result.bind(py)),
+                ctx.name,
+                ctx.source_location,
+                Some(py_list.as_any().as_unbound()),
+            )?;
             if profiling {
                 profiling::record_node(ctx.node_id, ft, 1, results.len() as u64);
             }
@@ -523,13 +551,13 @@ pub(crate) fn apply_logic_batch(
                             check_signals(py)?;
                         }
                         let res = apply_builtin(py, op, x);
-                        *x = wrap_error(py, res, ctx.name, ctx.source_location)?;
+                        *x = wrap_error(py, res, ctx.name, ctx.source_location, Some(&*x))?;
                     }
                 }
                 None => {
                     for x in &mut output {
                         let res = vcall1(py, func, x, ctx.cached_vc);
-                        *x = wrap_error(py, res, ctx.name, ctx.source_location)?;
+                        *x = wrap_error(py, res, ctx.name, ctx.source_location, Some(&*x))?;
                     }
                 }
             }
@@ -543,7 +571,13 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = items;
             for x in &mut output {
-                *x = wrap_error(py, star_call(py, func, x), ctx.name, ctx.source_location)?;
+                *x = wrap_error(
+                    py,
+                    star_call(py, func, x),
+                    ctx.name,
+                    ctx.source_location,
+                    Some(&*x),
+                )?;
             }
             if let Some(t) = t {
                 profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);
@@ -563,7 +597,7 @@ pub(crate) fn apply_logic_batch(
                             check_signals(py)?;
                         }
                         let res = apply_builtin_as_filter(py, op, &output[i]);
-                        if wrap_error(py, res, ctx.name, ctx.source_location)? {
+                        if wrap_error(py, res, ctx.name, ctx.source_location, Some(&output[i]))? {
                             output.swap(kept, i);
                             kept += 1;
                         }
@@ -577,6 +611,7 @@ pub(crate) fn apply_logic_batch(
                             res.and_then(|r| truth(py, r)),
                             ctx.name,
                             ctx.source_location,
+                            Some(&output[i]),
                         )? {
                             output.swap(kept, i);
                             kept += 1;
@@ -599,6 +634,7 @@ pub(crate) fn apply_logic_batch(
                     iter_into(x.bind(py), &mut output),
                     ctx.name,
                     ctx.source_location,
+                    Some(&x),
                 )?;
             }
             if profiling {
@@ -610,14 +646,26 @@ pub(crate) fn apply_logic_batch(
         NodeLogic::BatchMap { func } => {
             let py_list = PyList::new(py, &items)?;
             let t = prof_start(profiling);
-            let result = func.call1(py, (py_list,));
+            let result = func.call1(py, (&py_list,));
             let ft = if let Some(t) = t {
                 t.elapsed()
             } else {
                 Duration::ZERO
             };
-            let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
-            let output = wrap_error(py, iter_all(result.bind(py)), ctx.name, ctx.source_location)?;
+            let result = wrap_error(
+                py,
+                result,
+                ctx.name,
+                ctx.source_location,
+                Some(py_list.as_any().as_unbound()),
+            )?;
+            let output = wrap_error(
+                py,
+                iter_all(result.bind(py)),
+                ctx.name,
+                ctx.source_location,
+                Some(py_list.as_any().as_unbound()),
+            )?;
             if profiling {
                 profiling::record_node(ctx.node_id, ft, items_in, output.len() as u64);
             }
@@ -637,10 +685,15 @@ pub(crate) fn apply_logic_batch(
                     .as_deref()
                     .and_then(|op| apply_accumulate(py, op, state, x))
                     .unwrap_or_else(|| vectorcall2(py, func, state, x));
-                let result = wrap_error(py, result, ctx.name, ctx.source_location)?;
+                let result = wrap_error(py, result, ctx.name, ctx.source_location, Some(&*x))?;
                 if *returns_state {
-                    let (new_state, output) =
-                        wrap_error(py, split_state(py, result), ctx.name, ctx.source_location)?;
+                    let (new_state, output) = wrap_error(
+                        py,
+                        split_state(py, result),
+                        ctx.name,
+                        ctx.source_location,
+                        Some(&*x),
+                    )?;
                     *state = new_state;
                     *x = output;
                 } else {
@@ -677,7 +730,13 @@ pub(crate) fn apply_logic_batch(
             // The common list sink keeps its own loop.
             if let Some(BuiltinOp::ListAppend(list)) = ctx.builtin_op.as_deref() {
                 for x in &items {
-                    wrap_error(py, list_append(py, list, x), ctx.name, ctx.source_location)?;
+                    wrap_error(
+                        py,
+                        list_append(py, list, x),
+                        ctx.name,
+                        ctx.source_location,
+                        Some(x),
+                    )?;
                 }
             } else {
                 // By value: each item is freed as soon as the sink is done
@@ -765,7 +824,7 @@ pub(crate) fn chunk_by_item(
             Some(op) => apply_builtin_as_filter(py, op, x),
             None => vcall1(py, &state.predicate, x, cached_vc).and_then(|r| truth(py, r)),
         };
-        wrap_error(py, res, name, source_location)
+        wrap_error(py, res, name, source_location, Some(x))
     }
     let is_delimiter = |state: &ChunkByState, x: &Py<PyAny>| {
         test(py, state, op, cached_vc, name, source_location, x)

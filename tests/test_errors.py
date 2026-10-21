@@ -557,6 +557,62 @@ def test_narrowing_with_extra_args():
     assert "map(add_n)" in msg
 
 
+# An item that must not end up in an error message.
+SECRET = "card 4111 1111 1111 1111"
+
+
+def check(x):
+    if x == SECRET:
+        raise ValueError("refused")
+    return x
+
+
+def the_secret(emit, items):
+    return SECRET
+
+
+# Each kind of node whose function can fail: (build the graph below the
+# source, the item the CallbackError should carry).
+FAILING_NODES = {
+    "map": (lambda s: s.map(check).sink(noop), the_secret),
+    "filter": (lambda s: s.filter(check).sink(noop), the_secret),
+    "sink": (lambda s: s.sink(check), the_secret),
+    "starmap": (
+        lambda s: s.map(lambda x: (x, x)).starmap(lambda a, b: check(a)).sink(noop),
+        lambda e, i: (SECRET, SECRET),
+    ),
+    "accumulate": (lambda s: s.accumulate(lambda acc, x: check(x), "").sink(noop), the_secret),
+    "returns_state": (
+        lambda s: s.accumulate(lambda acc, x: None if x == SECRET else (acc, x), "", returns_state=True).sink(noop),
+        the_secret,
+    ),
+    "flatten": (lambda s: s.map(lambda x: 0 if x == SECRET else [x]).flatten().sink(noop), lambda e, i: 0),
+    # A batch function gets one item's list from emit(), the whole batch from emit_batch().
+    "batch_map": (
+        lambda s: s.batch_map(lambda xs: [check(x) for x in xs]).sink(noop),
+        lambda e, i: [SECRET] if e == "emit" else i,
+    ),
+    "chunk_by": (lambda s: s.chunk_by(check).sink(noop), the_secret),
+    "chunks_between": (lambda s: s.chunks_between(check, check).sink(noop), the_secret),
+    "par": (lambda s: _two_branches(s.par()), the_secret),
+    "prefetch map": (lambda s: s.prefetch(2).map(check).sink(noop), the_secret),
+    "prefetch filter": (lambda s: s.prefetch(2).filter(check).sink(noop), the_secret),
+    "prefetch batch_map": (
+        lambda s: s.prefetch(2).batch_map(lambda xs: [check(x) for x in xs]).sink(noop),
+        lambda e, i: [SECRET] if e == "emit" else i,
+    ),
+}
+
+
+def noop(x):
+    pass
+
+
+def _two_branches(branches):
+    branches.map(check).sink(noop)
+    branches.map(str).sink(noop)
+
+
 class TestErrorTypes:
     """Every error about a graph's state is an akayu.StreamError, itself a
     RuntimeError, so `except RuntimeError` keeps working."""
@@ -587,6 +643,36 @@ class TestErrorTypes:
         file, line = info.value.location.rsplit(":", 1)
         assert pathlib.PurePath(file).name == pathlib.PurePath(__file__).name and line.isdigit()
         assert isinstance(info.value.__cause__, ZeroDivisionError)
+
+    @pytest.mark.parametrize("emit", ["emit", "emit_batch"])
+    @pytest.mark.parametrize("kind", sorted(FAILING_NODES))
+    def test_callback_error_carries_the_item(self, kind, emit, compiled):
+        """`item` is what the function was given, kept out of the message, which
+        often ends up in logs."""
+        build, expected = FAILING_NODES[kind]
+        s = akayu.Stream()
+        build(s)
+        if compiled:
+            s.compile()
+        items = ["a", "b", SECRET, "d"]
+        with pytest.raises(akayu.CallbackError) as info:
+            if emit == "emit":
+                for x in items:
+                    s.emit(x)
+            else:
+                s.emit_batch(items)
+            s.flush()
+        assert info.value.item == expected(emit, items)
+        assert "4111" not in str(info.value)
+
+    def test_a_native_lambdas_error_carries_the_item(self, compiled):
+        s = akayu.Stream()
+        s.map(lambda x: 10 // x).sink([].append)
+        if compiled:
+            s.compile()
+        with pytest.raises(akayu.CallbackError) as info:
+            s.emit_batch([5, 2, 0, 1])
+        assert info.value.item == 0
 
     def test_a_wrapped_error_is_not_wrapped_again(self):
         s = akayu.Stream()

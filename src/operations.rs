@@ -207,12 +207,19 @@ impl Stream {
             NodeLogic::Prefetched { prefetcher } => {
                 // The results before a failed item still go on, then its error.
                 let (results, error) = prefetcher.flush(py);
+                let failed = prefetcher.take_failed();
                 crate::profiling::record_flushed(self, results.len());
                 for result in results {
                     self.propagate(py, result)?;
                 }
                 if let Some(e) = error {
-                    return wrap_error(py, Err(e), &self.name, &self.source_location);
+                    return wrap_error(
+                        py,
+                        Err(e),
+                        &self.name,
+                        &self.source_location,
+                        failed.as_ref(),
+                    );
                 }
             }
             _ => {}

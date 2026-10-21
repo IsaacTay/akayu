@@ -256,10 +256,17 @@ impl Stream {
             NodeLogic::Prefetched { prefetcher } => {
                 let t = prof_start(profiling_active);
                 let (results, error) = prefetcher.update_batch(py, items);
+                let failed = prefetcher.take_failed();
                 let ft = t.map_or(Duration::ZERO, |t| t.elapsed());
                 self.dispatch_state_results(py, results, profiling_active, node_id, ft, items_in)?;
                 return match error {
-                    Some(e) => wrap_error(py, Err(e), &self.name, &self.source_location),
+                    Some(e) => wrap_error(
+                        py,
+                        Err(e),
+                        &self.name,
+                        &self.source_location,
+                        failed.as_ref(),
+                    ),
                     None => Ok(()),
                 };
             }
@@ -391,10 +398,17 @@ impl Stream {
             NodeLogic::Prefetched { prefetcher } => {
                 let t = prof_start(profiling_active);
                 let results = prefetcher.update(py, x);
+                let failed = prefetcher.take_failed();
                 if let Some(t) = t {
                     ft = t.elapsed();
                 }
-                let results = wrap_error(py, results, &self.name, &self.source_location)?;
+                let results = wrap_error(
+                    py,
+                    results,
+                    &self.name,
+                    &self.source_location,
+                    failed.as_ref(),
+                )?;
                 self.dispatch_state_results(py, results, profiling_active, node_id, ft, 1)?;
                 return Ok(());
             }

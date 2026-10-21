@@ -30,12 +30,15 @@ class StreamError(RuntimeError):
 class CallbackError(StreamError):
     """A function given to a node (map, filter, sink, ...) raised.
 
-    The function's exception is `__cause__`. `node` is the node's name
-    and `location` the file and line that built it.
+    The function's exception is `__cause__`. `node` is the node's name,
+    `location` the file and line that built it, and `item` what the
+    function was given: the item, or for batch_map() its list. `item` is
+    not in the message, which often ends up in logs.
     """
 
     node: str
     location: str
+    item: Any
 
 class FrozenGraphError(StreamError):
     """The graph was changed after compile() froze it, or compiled twice."""

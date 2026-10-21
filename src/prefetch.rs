@@ -27,13 +27,16 @@ pub(crate) enum PrefetchKind {
 /// What one item turned into: nothing (filtered out), one result, or (for a
 /// batch function) any number.
 type Results = smallvec::SmallVec<[Py<PyAny>; 1]>;
-type Pending = (Arc<Slot<Results>>, Arc<Task>);
+/// A task in flight, and what it was given (for the error if it fails).
+type Pending = (Arc<Slot<Results>>, Arc<Task>, Py<PyAny>);
 
 pub struct Prefetcher {
     pub(crate) func: Py<PyAny>,
     kind: PrefetchKind,
     size: usize,
     pending: VecDeque<Pending>,
+    /// What the function was given when it last failed (see `take_failed`).
+    failed: Option<Py<PyAny>>,
 }
 
 impl Prefetcher {
@@ -43,6 +46,7 @@ impl Prefetcher {
             kind,
             size,
             pending: VecDeque::new(),
+            failed: None,
         }
     }
 
@@ -54,6 +58,7 @@ impl Prefetcher {
             kind: _,
             size: _,
             pending: _,
+            failed: _,
         } = self;
         visit.call(func)
     }
@@ -116,6 +121,7 @@ impl Prefetcher {
     /// Start the function on `arg` (an item, or a list for a batch function).
     fn submit(&mut self, py: Python, arg: Py<PyAny>, out: &mut Vec<Py<PyAny>>) -> PyResult<()> {
         let slot = Slot::new();
+        let given = arg.clone_ref(py);
         let (job_slot, func, kind) = (Arc::clone(&slot), self.func.clone_ref(py), self.kind);
         let ctx = pool::copy_context(py)?;
         let task = pool::submit(Box::new(move |py| {
@@ -124,19 +130,29 @@ impl Prefetcher {
             });
             job_slot.set(result);
         }));
-        self.pending.push_back((slot, task));
+        self.pending.push_back((slot, task, given));
         if self.pending.len() >= self.size {
             out.extend(self.finish_oldest(py)?);
         }
         Ok(())
     }
 
+    /// What the function was given when it raised the error the last call
+    /// returned: the item, or a batch function's list.
+    pub(crate) fn take_failed(&mut self) -> Option<Py<PyAny>> {
+        self.failed.take()
+    }
+
     fn finish_oldest(&mut self, py: Python) -> PyResult<Results> {
-        let (slot, task) = self.pending.front().expect("nothing in flight");
+        let (slot, task, _) = self.pending.front().expect("nothing in flight");
         // If interrupted (Ctrl+C), the item stays in flight for the next call.
         pool::wait_for(py, slot.as_ref(), std::slice::from_ref(task))?;
-        let (slot, _) = self.pending.pop_front().expect("nothing in flight");
-        slot.take()
+        let (slot, _, given) = self.pending.pop_front().expect("nothing in flight");
+        let result = slot.take();
+        if result.is_err() {
+            self.failed = Some(given);
+        }
+        result
     }
 }
 
