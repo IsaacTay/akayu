@@ -997,20 +997,18 @@ def test_sustained_par_emits_dont_pile_up_in_the_pool():
     # Tasks a submitter ran itself stayed queued until a worker took the GIL
     # to drop each one: memory grew by ~45 B per item while emits continued.
     code, last = run_script("""
-        import akayu
-        def rss_kb():
-            with open("/proc/self/statm") as f:
-                return int(f.read().split()[1]) * 4
+        import akayu, psutil
+        proc = psutil.Process()
         s = akayu.Stream()
         branches = s.par()
         branches.map(lambda x: x).sink(lambda x: None)
         branches.map(lambda x: x).sink(lambda x: None)
         for i in range(100_000):
             s.emit(i)
-        before = rss_kb()
+        before = proc.memory_info().rss
         for i in range(300_000):
             s.emit(i)
-        print((rss_kb() - before) // 1024)
+        print((proc.memory_info().rss - before) // 2**20)
     """)
     assert code == 0
     assert int(last) < 6  # MB; it was ~13
