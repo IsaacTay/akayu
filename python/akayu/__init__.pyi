@@ -73,7 +73,7 @@ class ProfileReport:
     """
 
     def print(self, sort_by: str | None = None) -> None:
-        """Print the profiling report.
+        """Print the profiling report to `sys.stdout`, as `print()` does.
 
         Args:
             sort_by: If "time", print a flat list sorted by func_time descending.

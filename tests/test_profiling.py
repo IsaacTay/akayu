@@ -1,5 +1,7 @@
 """Tests for pipeline profiling feature."""
 
+import contextlib
+import io
 import time
 
 import pytest
@@ -339,13 +341,19 @@ class TestReportFormatting:
         assert "Function:" in output
         assert "Overhead:" in output
 
-    def test_sorted_view(self):
+    @pytest.mark.parametrize("sort_by", [None, "time"])
+    def test_print_writes_to_sys_stdout(self, sort_by):
+        """As print() does: written to the terminal directly, the report never
+        reached a Jupyter cell, pytest's capture or redirect_stdout."""
         s = Stream()
         s.map(double).filter(is_even).sink(noop)
 
         report = s.emit_profiled(5)
-        # Just verify it doesn't crash
-        report.print(sort_by="time")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            report.print(sort_by=sort_by)
+        assert "Pipeline Profile" in out.getvalue()
+        assert "map(double)" in out.getvalue()
 
     def test_to_dict_structure(self):
         s = Stream()

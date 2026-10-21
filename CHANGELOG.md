@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `ProfileReport.print()` writes to `sys.stdout`, as `print()` does. It wrote to the process's stdout
+  directly, so the report never appeared in a Jupyter cell, pytest's captured output or
+  `contextlib.redirect_stdout()`.
+
 ## 2.0.1
 
 The 2.0.0 release was withdrawn; 2.0.1 replaces it with no changes to akayu itself.

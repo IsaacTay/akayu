@@ -328,18 +328,21 @@ pub fn build_report(
 
 #[pymethods]
 impl ProfileReport {
-    /// Print the profiling report.
+    /// Print the profiling report to `sys.stdout`, as `print()` does.
     ///
     /// Args:
     ///     sort_by: If "time", print a flat list sorted by func_time descending.
     ///              If None (default), print a tree view showing graph structure.
     #[pyo3(signature = (sort_by=None))]
-    pub fn print(&self, sort_by: Option<&str>) {
+    pub fn print(&self, py: Python, sort_by: Option<&str>) -> PyResult<()> {
         let output = match sort_by {
             Some("time") => self.format_sorted(),
             _ => self.format_tree(),
         };
-        println!("{output}");
+        // Python's print(), not println!: that writes to the process's
+        // stdout, which a Jupyter cell, pytest or redirect_stdout never sees.
+        py.import("builtins")?.getattr("print")?.call1((output,))?;
+        Ok(())
     }
 
     /// Return profiling data as a dictionary.
