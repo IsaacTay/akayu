@@ -2,16 +2,18 @@
 
 A node used to cost ~565 bytes: a Python RLock each, a heap allocation per
 parent and per downstream edge, and a 64-byte inline NodeLogic sized by its
-rarest variants. Today: ~335 bytes uncompiled (a lambda node keeps its native
-op), ~170 compiled (fused members are freed; op trees and numeric runs are
-shared between graphs). The bounds leave a little headroom: a per-graph copy
-of a numeric run, for one, cost ~110 bytes per compiled node.
+rarest variants. Today: ~310 bytes uncompiled (~345 in a dev build; a lambda
+node keeps its native op), ~300 compiled (fused members are freed; op trees
+and numeric runs are shared between graphs). The bounds leave a little
+headroom: a per-graph copy of a numeric run, for one, cost ~110 bytes per
+compiled node.
 """
 
 import gc
 import sys
 
-import psutil
+import pytest
+from support import run_script
 
 import akayu
 
@@ -22,27 +24,42 @@ def test_inline_node_size():
 
 
 def _rss_per_node(compile_graphs):
-    proc = psutil.Process()
-    f = lambda x: x * 2 + 1  # noqa: E731 - compile() runs this natively
-    keep = []
-    gc.collect()
-    before = proc.memory_info().rss
-    for _ in range(20_000):
-        s = akayu.Stream()
-        s.map(f).filter(f).sink(f)
-        if compile_graphs:
-            s.compile()
-        keep.append(s)
-    gc.collect()
-    return (proc.memory_info().rss - before) / (len(keep) * 4)
+    """In a fresh interpreter: this one reuses what earlier tests freed, which
+    made compiled nodes look like ~170 bytes after the uncompiled test ran."""
+    code, last = run_script(f"""
+        import gc
+        import akayu, psutil
+        proc = psutil.Process()
+        f = lambda x: x * 2 + 1  # compile() runs this natively
+        keep = []
+        gc.collect()
+        before = proc.memory_info().rss
+        for _ in range(20_000):
+            s = akayu.Stream()
+            s.map(f).filter(f).sink(f)
+            if {compile_graphs}:
+                s.compile()
+            keep.append(s)
+        gc.collect()
+        print((proc.memory_info().rss - before) / (len(keep) * 4))
+    """)
+    assert code == 0, last
+    return float(last)
 
 
+# Other platforms' allocators pad and reuse memory differently; these bounds
+# were measured with glibc's.
+GLIBC = pytest.mark.skipif(sys.platform != "linux", reason="bounds measured with glibc's malloc")
+
+
+@GLIBC
 def test_memory_per_node():
-    assert _rss_per_node(compile_graphs=False) < 355
+    assert _rss_per_node(compile_graphs=False) < 380
 
 
+@GLIBC
 def test_memory_per_compiled_node():
-    assert _rss_per_node(compile_graphs=True) < 220
+    assert _rss_per_node(compile_graphs=True) < 330
 
 
 def test_compile_frees_fused_chain_members():
