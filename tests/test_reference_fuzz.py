@@ -27,6 +27,7 @@ of 30 to 60 nodes), and AKAYU_FUZZ_SEED to replay one.
 import collections
 import os
 import random
+import re
 import traceback
 
 import pytest
@@ -540,6 +541,15 @@ def cause(e):
     return type(e).__name__
 
 
+def explained(node):
+    """explain() lists every node below `node` once, a line each, however the
+    graph merges, branches and was compiled."""
+    header, blank, *rows = node.explain().splitlines()
+    nodes = int(re.search(r": (\d+) nodes", header)[1])
+    assert blank == ""
+    assert len([row for row in rows if not row.endswith("(shown above)")]) == nodes
+
+
 def snapshot(outs):
     snap = {}
     for k, vs in outs.items():
@@ -612,6 +622,9 @@ def run_akayu(spec, events, compile_at, compile_all, late):
                 raise
             log.append((type(e).__name__, snapshot(outs)))
             break
+    for s in sources:
+        if s < len(nodes):
+            explained(nodes[s])
     return log
 
 
@@ -686,7 +699,7 @@ def test_big_graphs_match_reference(seeds):
 # Stream must be fuzzed, or listed here with a reason.
 FUZZED = {
     "accumulate", "batch_map", "chunk_by", "chunks_between", "collect", "combine_latest", "compile",
-    "drain", "emit", "emit_batch", "filter", "flatten", "flush", "map", "par", "prefetch", "seq",
+    "drain", "emit", "emit_batch", "explain", "filter", "flatten", "flush", "map", "par", "prefetch", "seq",
     "sink", "starmap", "to_list", "to_set", "union", "zip",
 }  # fmt: skip
 NOT_FUZZED = {

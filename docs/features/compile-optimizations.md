@@ -276,6 +276,34 @@ print(source.compiled)  # True
 print(child.compiled)   # True (all reachable nodes are compiled)
 ```
 
+## Seeing What `compile()` Did
+
+`explain()` shows how each node runs, a line per node: which chain it was merged into, and whether
+its function is called (`Python`), run [natively](#native-operations) (`native`), or run with the
+arithmetic around it on machine numbers (`native, unboxed`):
+
+```python
+import akayu
+
+source = akayu.Stream(name="numbers")
+source.map(int).map(lambda x: x + 1).map(lambda x: x * 2).sink(print)
+source.compile()
+print(source.explain())
+```
+
+```text
+Graph below 'numbers' (app.py:3), compiled: 5 nodes, 1 chain, 4 native
+
+numbers        app.py:3
+map(int)       app.py:4  native           chain 1
+map(<lambda>)  app.py:4  native, unboxed  chain 1
+map(<lambda>)  app.py:4  native, unboxed  chain 1
+sink(print)    app.py:4  native           chain 1
+```
+
+A node whose function is tagged `Python` is the one to look at when a compiled pipeline is slower
+than expected. The profile report (`profile()`) shows the same tags next to each node's time.
+
 ## Limitations
 
 Fusion stops at **split points** where a node has multiple downstreams:

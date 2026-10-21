@@ -192,6 +192,41 @@ struct ReportNode {
     items_out: u64,
     is_terminal: bool,
     children: Vec<usize>, // indices into ProfileReport.nodes
+    /// How its work runs (see `how`).
+    how: &'static str,
+    /// The compiled chain it was merged into, numbered from 1 in report order.
+    chain: Option<usize>,
+}
+
+/// How a node's work runs, as the reports tag it: "Python" (its function is
+/// called), "native" (a Rust operation: an analyzed lambda or builtin, or a
+/// sink's emit/flush shortcut), "native, unboxed" (one of a run of numeric
+/// steps that compile() runs together on machine numbers), "threads"
+/// (par(), and prefetch()'s "Python, threads"), or nothing (no function:
+/// union, collect, ...).
+fn how(logic: &NodeLogic, native: bool, unboxed: bool) -> &'static str {
+    match logic {
+        NodeLogic::Map { .. }
+        | NodeLogic::Filter { .. }
+        | NodeLogic::StarMap { .. }
+        | NodeLogic::Sink { .. }
+        | NodeLogic::Accumulate { .. }
+        | NodeLogic::BatchMap { .. }
+        | NodeLogic::ChunkBy(_)
+        | NodeLogic::ExtractBetween(_) => match (native, unboxed) {
+            (_, true) => "native, unboxed",
+            (true, false) => "native",
+            (false, false) => "Python",
+        },
+        NodeLogic::Prefetched { .. } => "Python, threads",
+        NodeLogic::Parallel => "threads",
+        _ => "",
+    }
+}
+
+/// Whether an uncompiled node's work is a Rust operation (see `how`).
+fn native(node: &Stream) -> bool {
+    node.builtin_op.is_some() || node.flush_target.is_some() || node.emit_target.is_some()
 }
 
 /// Profiling report for a pipeline execution.
@@ -205,6 +240,8 @@ pub struct ProfileReport {
     edges: Vec<(usize, usize)>, // (parent_idx, child_idx)
     wall_time_ns: u64,
     emit_count: u64,
+    /// The graph was compiled (for explain()'s header).
+    compiled: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +264,8 @@ pub fn build_report(
     let mut edges: Vec<(usize, usize)> = Vec::new();
     // Map from Rust struct pointer → index in `nodes` vec (for dedup in DAGs)
     let mut ptr_to_idx: HashMap<usize, usize> = HashMap::new();
+    // Compiled chains seen so far: they are numbered in report order.
+    let mut chains = 0;
 
     // Add source node
     let source_ptr = std::ptr::from_ref(source) as usize;
@@ -239,6 +278,8 @@ pub fn build_report(
         items_out: source_profile.map_or(0, |p| p.items_out),
         is_terminal: source.downstreams.is_empty(),
         children: Vec::new(),
+        how: how(&source.logic, native(source), false),
+        chain: None,
     };
     nodes.push(source_node);
     ptr_to_idx.insert(source_ptr, 0);
@@ -278,9 +319,20 @@ pub fn build_report(
             // Mark the chain head as visited (use first step's index)
             let first_step_idx = nodes.len();
             ptr_to_idx.insert(child_ptr, first_step_idx);
+            chains += 1;
+            // Steps left in the numeric run the last step with one started.
+            let mut unboxed_left = 0;
 
             let mut prev_idx = parent_idx;
             for step in steps {
+                if let Some(run) = &step.numeric_run {
+                    unboxed_left = run.steps();
+                }
+                let unboxed = unboxed_left > 0;
+                unboxed_left = unboxed_left.saturating_sub(1);
+                let native = step.builtin_op.is_some()
+                    || step.flush_target.is_some()
+                    || step.emit_target.is_some();
                 let step_profile = data.get(&step.node_id);
                 let step_node = ReportNode {
                     name: step.name.to_string(),
@@ -290,6 +342,8 @@ pub fn build_report(
                     items_out: step_profile.map_or(0, |p| p.items_out),
                     is_terminal: false,
                     children: Vec::new(),
+                    how: how(&step.logic, native, unboxed),
+                    chain: Some(chains),
                 };
                 let step_idx = nodes.len();
                 nodes.push(step_node);
@@ -321,6 +375,8 @@ pub fn build_report(
             items_out: child_profile.map_or(0, |p| p.items_out),
             is_terminal: child.downstreams.is_empty(),
             children: Vec::new(),
+            how: how(&child.logic, native(&child), false),
+            chain: None,
         };
         let child_idx = nodes.len();
         nodes.push(child_node);
@@ -342,6 +398,7 @@ pub fn build_report(
         edges,
         wall_time_ns: wall_time.as_nanos() as u64,
         emit_count,
+        compiled: source.compiled,
     };
     Py::new(py, report)
 }
@@ -393,6 +450,8 @@ impl ProfileReport {
             node_dict.set_item("func_time_ms", node.func_time_ns as f64 / 1_000_000.0)?;
             node_dict.set_item("items_in", node.items_in)?;
             node_dict.set_item("items_out", node.items_out)?;
+            node_dict.set_item("how", node.how)?;
+            node_dict.set_item("chain", node.chain)?;
             nodes_list.append(node_dict)?;
         }
         dict.set_item("nodes", nodes_list)?;
@@ -424,6 +483,8 @@ impl ProfileReport {
             node_dict.set_item("func_time_ms", node.func_time_ns as f64 / 1_000_000.0)?;
             node_dict.set_item("items_in", node.items_in)?;
             node_dict.set_item("items_out", node.items_out)?;
+            node_dict.set_item("how", node.how)?;
+            node_dict.set_item("chain", node.chain)?;
             nodes_list.append(node_dict)?;
         }
         Ok(nodes_list)
@@ -493,8 +554,25 @@ impl ProfileReport {
             self.emit_count, emit_label, wall_ms
         );
 
-        // DFS tree print starting from root (index 0)
-        self.format_node(&mut out, 0);
+        self.format_node(&mut out, |node| {
+            let items = if node.is_terminal {
+                format!("{}", node.items_in)
+            } else {
+                format!("{}\u{2192}{}", node.items_in, node.items_out) // →
+            };
+            let ms = format!("{:.2}ms", node.func_time_ns as f64 / 1_000_000.0);
+            let pct = if self.wall_time_ns > 0 {
+                node.func_time_ns as f64 / self.wall_time_ns as f64 * 100.0
+            } else {
+                0.0
+            };
+            let pct = if pct >= 0.05 {
+                format!("{pct:.1}%")
+            } else {
+                String::new()
+            };
+            format!("{items:>10}  {ms:>10}  {pct:>6}  {}", tag(node))
+        });
 
         // Summary line
         let _ = write!(out, "\nFunction: {:.2}ms", func_ms);
@@ -514,106 +592,116 @@ impl ProfileReport {
             );
         }
         let _ = writeln!(out);
+        if self.nodes.iter().any(|n| n.how == "native, unboxed") {
+            let _ = writeln!(
+                out,
+                "The native, unboxed steps run together on machine numbers, except while profiled:\n\
+                 one at a time, so their times here are higher than in a run without profiling."
+            );
+        }
 
         out
     }
 
-    /// The tree below `root`, one line per node, depth first. Iterative (a
-    /// graph tens of thousands of nodes deep would overflow the native stack
-    /// in recursion); indentation stops growing after MAX_INDENT levels (the
-    /// text would grow with the square of the depth); and a node below a
-    /// merge, reached along several paths, has its subtree printed once.
-    fn format_node(&self, out: &mut String, root: usize) {
+    /// How the graph runs, a line per node (see `Stream.explain()`).
+    pub(crate) fn format_explain(&self) -> String {
+        let root = &self.nodes[0];
+        let chains = self.nodes.iter().filter_map(|n| n.chain).max().unwrap_or(0);
+        let native = self
+            .nodes
+            .iter()
+            .filter(|n| n.how.starts_with("native"))
+            .count();
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "Graph below '{}' ({}), {}: {} nodes",
+            root.name,
+            file_and_line(&root.source_location),
+            if self.compiled {
+                "compiled"
+            } else {
+                "not compiled"
+            },
+            self.nodes.len()
+        );
+        if self.compiled {
+            let plural = if chains == 1 { "" } else { "s" };
+            let _ = write!(out, ", {chains} chain{plural}");
+        }
+        let _ = writeln!(out, ", {native} native\n");
+        let location = |node: &ReportNode| keep_end(file_and_line(&node.source_location), 24);
+        let width = self
+            .nodes
+            .iter()
+            .map(|n| location(n).chars().count())
+            .max()
+            .unwrap_or(0);
+        self.format_node(&mut out, |node| {
+            format!("{:<width$}  {}", location(node), tag(node))
+        });
+        out
+    }
+
+    /// The tree below `root`, a row per node, depth first: (its branch lines
+    /// and name, its index, whether it was listed above). Only branches
+    /// indent: a node's only child goes in the same column, so a pipeline of
+    /// a hundred steps is a hundred lines, not a staircase. Iterative (a graph
+    /// tens of thousands of nodes deep would overflow the native stack in
+    /// recursion); indentation stops growing after MAX_INDENT levels of
+    /// branches (the text would grow with the square of the depth); and a
+    /// node below a merge, reached along several paths, has its subtree
+    /// listed once.
+    fn tree_rows(&self, root: usize) -> Vec<(String, usize, bool)> {
         const MAX_INDENT: usize = 32;
+        let mut rows = Vec::new();
         let mut shown = vec![false; self.nodes.len()];
-        // (node, prefix parts: true = continuing branch, false = last; depth)
-        let mut stack: Vec<(usize, Vec<bool>, usize)> = vec![(root, Vec::new(), 0)];
-        while let Some((node_idx, prefix_parts, depth)) = stack.pop() {
+        // (node, prefix parts: true = continuing branch, false = last; depth,
+        // whether it continues its parent's column)
+        let mut stack: Vec<(usize, Vec<bool>, usize, bool)> = vec![(root, Vec::new(), 0, false)];
+        while let Some((node_idx, prefix_parts, depth, same_column)) = stack.pop() {
             let again = std::mem::replace(&mut shown[node_idx], true);
-            self.format_line(out, node_idx, &prefix_parts, depth > MAX_INDENT, again);
+            let prefix = tree_prefix(&prefix_parts, depth > MAX_INDENT, same_column);
+            rows.push((prefix + &self.nodes[node_idx].name, node_idx, again));
             if again {
                 continue;
             }
             let children = &self.nodes[node_idx].children;
+            if let [only] = children[..] {
+                stack.push((only, prefix_parts, depth, true));
+                continue;
+            }
             for (i, &child_idx) in children.iter().enumerate().rev() {
                 let mut child_prefix = prefix_parts.clone();
                 child_prefix.push(i + 1 != children.len());
                 if child_prefix.len() > MAX_INDENT {
                     child_prefix.remove(0);
                 }
-                stack.push((child_idx, child_prefix, depth + 1));
+                stack.push((child_idx, child_prefix, depth + 1, false));
             }
         }
+        rows
     }
 
-    fn format_line(
-        &self,
-        out: &mut String,
-        node_idx: usize,
-        prefix_parts: &[bool],
-        deeper: bool,
-        again: bool,
-    ) {
-        let node = &self.nodes[node_idx];
-
-        // Build prefix
-        let mut prefix = String::new();
-        if deeper {
-            prefix.push('\u{2026}'); // …: more levels than shown
-        }
-        for &continues in prefix_parts
+    /// The tree, a line per node: the name column as wide as the widest name
+    /// (up to 60 characters: a longer one pushes only its own line), then
+    /// `columns` of the node.
+    fn format_node(&self, out: &mut String, columns: impl Fn(&ReportNode) -> String) {
+        let rows = self.tree_rows(0);
+        let width = rows
             .iter()
-            .take(prefix_parts.len().saturating_sub(1))
-        {
-            if continues {
-                prefix.push_str("\u{2502}   "); // │
-            } else {
-                prefix.push_str("    ");
+            .map(|(left, ..)| left.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(60);
+        for (left, node_idx, again) in rows {
+            if again {
+                let _ = writeln!(out, "{left} (shown above)");
+                continue;
             }
-        }
-        if let Some(&continues) = prefix_parts.last() {
-            if continues {
-                prefix.push_str("\u{251c}\u{2500}\u{2500} "); // ├──
-            } else {
-                prefix.push_str("\u{2514}\u{2500}\u{2500} "); // └──
-            }
-        }
-        if again {
-            let _ = writeln!(out, "{prefix}{} (shown above)", node.name);
-            return;
-        }
-
-        // Build items display
-        let items_str = if node.is_terminal {
-            format!("{}", node.items_in)
-        } else {
-            format!("{}\u{2192}{}", node.items_in, node.items_out) // →
-        };
-
-        // Build time display
-        let func_ms = node.func_time_ns as f64 / 1_000_000.0;
-        let pct = if self.wall_time_ns > 0 {
-            node.func_time_ns as f64 / self.wall_time_ns as f64 * 100.0
-        } else {
-            0.0
-        };
-
-        // Calculate name padding — we want alignment
-        let name_with_prefix = format!("{prefix}{}", node.name);
-        let pad = 40_usize.saturating_sub(name_with_prefix.len());
-
-        if pct >= 0.05 {
-            let _ = writeln!(
-                out,
-                "{name_with_prefix}{:pad$} {:>10}    {:.2}ms  {:.1}%",
-                "", items_str, func_ms, pct
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "{name_with_prefix}{:pad$} {:>10}    {:.2}ms",
-                "", items_str, func_ms
-            );
+            let pad = width.saturating_sub(left.chars().count());
+            let line = format!("{left}{:pad$}  {}", "", columns(&self.nodes[node_idx]));
+            let _ = writeln!(out, "{}", line.trim_end());
         }
     }
 
@@ -728,4 +816,34 @@ fn keep_end(s: &str, width: usize) -> String {
     }
     let kept: String = s.chars().skip(n - (width - 1)).collect();
     "\u{2026}".to_string() + &kept
+}
+
+/// A tree row's branch lines: `│   ` for each ancestor with siblings still
+/// to come, then `├── ` or `└── `, or for a node in its parent's column
+/// (`same_column`) the line below those; "…" first if levels were left out.
+fn tree_prefix(parts: &[bool], deeper: bool, same_column: bool) -> String {
+    let mut prefix = String::new();
+    if deeper {
+        prefix.push('\u{2026}'); // …: more levels than shown
+    }
+    for &continues in parts.iter().take(parts.len().saturating_sub(1)) {
+        prefix.push_str(if continues { "\u{2502}   " } else { "    " }); // │
+    }
+    if let Some(&continues) = parts.last() {
+        prefix.push_str(match (continues, same_column) {
+            (true, false) => "\u{251c}\u{2500}\u{2500} ",  // ├──
+            (false, false) => "\u{2514}\u{2500}\u{2500} ", // └──
+            (true, true) => "\u{2502}   ",                 // │
+            (false, true) => "    ",
+        });
+    }
+    prefix
+}
+
+/// A node's tag in the reports: how it runs, then its chain.
+fn tag(node: &ReportNode) -> String {
+    match node.chain {
+        Some(chain) => format!("{:<15}  chain {chain}", node.how),
+        None => node.how.to_string(),
+    }
 }

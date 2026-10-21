@@ -4,6 +4,10 @@
 
 ### Added
 
+- `Stream.explain()`: how each node of a graph runs, a line per node: where it was built, whether
+  its function is called (`Python`) or run natively (`native`, `native, unboxed` for arithmetic on
+  machine numbers), and after `compile()` the chain it was merged into. The profile report's tree
+  shows the same tags, and `to_dict()` has them as `how` and `chain`.
 - `CallbackError.item`: what the failing function was given (the item, or for `batch_map()` its
   list). It is an attribute, not part of the message, so private data doesn't end up in logs.
 
@@ -18,6 +22,8 @@
 - `ProfileReport.print(sort_by="time")` shows where each node was built as `app.py:22`, where it
   showed the start of the path (`/home/me/pro...`), and a long node name with accented letters
   no longer raises `PanicException`.
+- The profile report's tree keeps a straight run of nodes in one column and indents only at
+  branches, with every column aligned: a long pipeline was a staircase of ever-wider lines.
 
 ## 2.0.1
 

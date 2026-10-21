@@ -620,6 +620,22 @@ class Stream:
         """
         ...
 
+    def explain(self) -> str:
+        """How the graph below this stream runs: a line per node, with where it
+        was built and a tag for how its work runs.
+
+        The tags: "Python" (its function is called), "native" (a lambda or
+        builtin akayu runs as a Rust operation instead), "native, unboxed"
+        (one of a run of arithmetic steps compile() runs together on machine
+        numbers), "threads" (par() and prefetch()), and, once compiled,
+        "chain N" for the nodes merged into one loop. The profile report's tree
+        shows the same tags.
+
+        Returns:
+            The description, to print.
+        """
+        ...
+
     def compile(self) -> Stream:
         """Freeze and optimize the graph below this stream.
 

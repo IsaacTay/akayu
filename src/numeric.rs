@@ -182,6 +182,11 @@ static RUNS: crate::helpers::InternTable<RunKey, RunOps, Option<Arc<NumRun>>> =
     crate::helpers::InternTable::new(256, 1024);
 
 impl NumRun {
+    /// How many chain steps the run covers, from the one it is set on.
+    pub(crate) fn steps(&self) -> usize {
+        self.steps
+    }
+
     /// The shared run starting at the first of `steps`, (is_filter, op) for
     /// consecutive chain steps (see `from_steps`).
     pub(crate) fn shared<'a>(

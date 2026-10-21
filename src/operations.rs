@@ -1144,6 +1144,29 @@ impl Stream {
         crate::profiling::build_report(py, self, data, wall_time, emit_count)
     }
 
+    /// How the graph below this stream runs: a line per node, with where it
+    /// was built and a tag for how its work runs.
+    ///
+    /// The tags: "Python" (its function is called), "native" (a lambda or
+    /// builtin akayu runs as a Rust operation instead), "native, unboxed"
+    /// (one of a run of arithmetic steps compile() runs together on machine
+    /// numbers), "threads" (par() and prefetch()), and, once compiled,
+    /// "chain N" for the nodes merged into one loop. The profile report's tree
+    /// shows the same tags.
+    ///
+    /// Returns:
+    ///     The description, to print.
+    pub fn explain(&self, py: Python) -> PyResult<String> {
+        let report = crate::profiling::build_report(
+            py,
+            self,
+            std::collections::HashMap::new(),
+            std::time::Duration::ZERO,
+            0,
+        )?;
+        Ok(report.borrow(py).format_explain())
+    }
+
     /// Returns a string representation of the stream for debugging.
     ///
     /// # Returns

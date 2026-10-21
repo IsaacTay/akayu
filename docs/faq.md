@@ -60,17 +60,22 @@ source = akayu.Stream(name="input")
 processed = source.map(lambda x: x * 2, stream_name="double")
 ```
 
-### 2. Skip compile() while debugging
+### 2. See how each node runs
 
-Compiled graphs are harder to inspect. Debug with an uncompiled graph first:
+`explain()` lists the graph, a line per node, with where it was built and how its work runs:
+`Python` (your function is called), `native` (akayu runs the lambda or builtin itself),
+`native, unboxed` (arithmetic run on machine numbers) or `threads` (`par()`, `prefetch()`). After
+`compile()` it also shows which nodes were merged into one loop (`chain 1`, ...):
 
 ```python
 import akayu
 
-source = akayu.Stream()
-# ... build pipeline ...
-# source.compile()  # Comment out for debugging
+source = akayu.Stream(name="input")
+source.map(lambda x: x * 2, stream_name="double").map(str).sink([].append)
+print(source.explain())
 ```
+
+A compiled graph is frozen: add the print sinks below before calling `compile()`.
 
 ### 3. Add print sinks temporarily
 
@@ -82,11 +87,16 @@ source.map(lambda x: x + 1).sink(print)  # Inspect values at any stage
 
 ### 4. Profile hot paths
 
-<!--pytest.mark.skip-->
+`profile()` times each node's function and counts the items in and out of it, with the same tags
+as `explain()`:
+
+<!-- pytest-codeblocks:cont -->
 
 ```python
-import cProfile
-cProfile.run('source.emit_batch(data)', 'profile.stats')
+with source.profile() as p:
+    for x in range(3):
+        source.emit(x)
+print(p.report)  # or p.report.print(sort_by="time"), slowest first
 ```
 
 ## How does akayu handle concurrency?
@@ -158,10 +168,13 @@ assert sorted(results) == [x * x for x in range(100)]
 
 ```python
 # 1. Profile to find the bottleneck
-cProfile.run('source.emit_batch(data)')
+with source.profile() as p:
+    source.emit_batch(data)
+print(p.report)
 
-# 2. Try compile()
+# 2. Try compile(), then see which nodes still call Python
 source.compile()
+print(source.explain())
 
 # 3. Use batch operations
 source.emit_batch(large_chunk)  # instead of loop + emit()
