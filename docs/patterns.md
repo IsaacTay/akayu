@@ -216,6 +216,8 @@ assert decisions == ["approve", "review"]
 ## Batch Processing Integration
 
 When working with data science libraries like NumPy or Pandas, processing item-by-item kills performance.
+(For small arrays, `compile()` runs numpy expressions in a map natively, without most of numpy's
+cost per call: see [numpy Expressions](features/compile-optimizations.md#numpy-expressions).)
 
 **The Pattern**: Always pair `emit_batch()` at the source with `batch_map()` in the pipeline. This ensures the data stays in efficient vector formats (like Lists or Arrays) throughout the pipeline.
 

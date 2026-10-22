@@ -200,13 +200,16 @@ pub(crate) enum RunOutcome {
     Fallback(Py<PyAny>),
 }
 
-/// Runs (or None: no run) by the ops of the chain steps they were made
+/// Runs by the ops of the chain steps they were made
 /// from, so graphs with the same steps share one: a run is a few allocations,
 /// a third of a small compiled graph's memory. Entries hold their ops, so a
-/// key's addresses can't be reused by other ops while it lives.
+/// key's addresses can't be reused by other ops while it lives. Steps with
+/// no run aren't kept: finding none again costs little, and their ops may
+/// hold the user's data (a lookup table, an array), which a kept entry would
+/// keep alive after the graph is gone. A run's ops hold only numbers.
 type RunKey = Box<[(bool, usize)]>;
 type RunOps = Box<[Arc<BuiltinOp>]>;
-static RUNS: crate::helpers::InternTable<RunKey, RunOps, Option<Arc<NumRun>>> =
+static RUNS: crate::helpers::InternTable<RunKey, RunOps, Arc<NumRun>> =
     crate::helpers::InternTable::new(256, 1024);
 
 impl NumRun {
@@ -227,13 +230,16 @@ impl NumRun {
             .map(|(f, op)| (*f, Arc::as_ptr(op) as usize))
             .collect();
         if let Some(run) = RUNS.get(&key, |_| true) {
-            return run;
+            return Some(run);
         }
-        let run = Self::from_steps(py, steps.iter().map(|(f, op)| (*f, &***op))).map(Arc::new);
+        let run = Arc::new(Self::from_steps(
+            py,
+            steps.iter().map(|(f, op)| (*f, &***op)),
+        )?);
         let ops = steps.iter().map(|(_, op)| Arc::clone(op)).collect();
         // In use: some graph still holds every op the run was made from.
         let in_use = |ops: &RunOps| ops.iter().all(|op| Arc::strong_count(op) > 1);
-        RUNS.insert(key, ops, run, in_use)
+        Some(RUNS.insert(key, ops, run, in_use))
     }
 
     /// `steps` are (is_filter, op) for consecutive chain steps; the run is the
@@ -246,6 +252,14 @@ impl NumRun {
         for (is_filter, op) in steps {
             let op = match op {
                 BuiltinOp::Numeric(_, generic) => generic,
+                op => op,
+            };
+            // A numpy program runs only for arrays, which a run hands back.
+            let op = match op {
+                BuiltinOp::Arrays(arrays) => match &arrays.fallback {
+                    crate::arrays::Fallback::Op(inner) => inner,
+                    _ => op,
+                },
                 op => op,
             };
             let Some(program) = NumProgram::from_op(py, op) else {

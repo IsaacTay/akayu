@@ -9,9 +9,13 @@ effects, cycles are too noisy under load: count L2 misses
 
 Not built. The estimates are rough, from profiles of the current code.
 
-- **Wider lambda analysis**: `x * x`, chained comparisons (`0 < x < 10`) and `r["a"] * r["b"]` are
-  still called as Python functions. They need an expression-tree op that can refer to the item
-  more than once; today's native steps form a chain that each consume the previous result.
+- **Wider lambda analysis**: chained comparisons (`0 < x < 10`) and `a if x else b` are still
+  called as Python functions; they need a native form that branches.
+- **More numpy**: comparisons, so filters can be native (`np.linalg.norm(v) > 1`); float32 and
+  int arrays; broadcasting a row against a matrix; ndarray subclasses (numpy picks their result's
+  type by `__array_priority__`); `np.dot`, `np.cross`, `.sum()`. Beyond that, items one at a time
+  are the limit: whole arrays at once is another 2.5× (re-stacking per-item arrays) to 20× (kept
+  stacked from the source), which needs batches to survive branch points (next idea).
 - **Batch fan-out with Python steps**: `emit_batch()` hands each branch the whole batch only when
   every branch below the branch point is native steps ending in its own list. Otherwise the
   branches take one item at a time, because running each branch over the whole batch changes the
@@ -28,6 +32,14 @@ Not built. The estimates are rough, from profiles of the current code.
 ## Tried and rejected
 
 Each was built or profiled and measured; the numbers are why it isn't in the code.
+
+- **numpy maths written in Rust** (instead of calling numpy's own loops): a few ns less per step,
+  but the results could differ from numpy's: `@` and norms go through BLAS (its own summation
+  order and FMA), and on AVX-512 machines numpy computes `arccos`, `arctan2` and others with its
+  own SIMD code. Calling numpy's loops gives its bits on every machine.
+- **A flag on uncompiled native ops** (whether the analysis also had a numpy program): one `bool`
+  on `EagerOp` made uncompiled int pipelines 1.5-4.7% slower, numpy or not. `compile()` looks for
+  numpy in `sys.modules` instead.
 
 - **Pre-computed dispatch tables** (flattening a compiled graph into an array of function
   pointers instead of matching on each node's logic): after the 2.0.0 performance work akayu's

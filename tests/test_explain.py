@@ -203,7 +203,7 @@ def test_until_compile():
 
 def test_nothing_to_add():
     # A class, a C function, a lambda whose source can't be read.
-    for func in (Point, repr, eval("lambda x: x @ x")):
+    for func in (Point, repr, eval("lambda x: x.real @ x")):
         assert how(func) == "Python"
 
 

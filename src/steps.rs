@@ -370,13 +370,11 @@ fn apply_logic_general(
 
         NodeLogic::StarMap { func } => {
             let t = prof_start(profiling);
-            let result = wrap_error(
-                py,
-                star_call(py, func, &x),
-                ctx.name,
-                ctx.source_location,
-                Some(&x),
-            )?;
+            let result = match ctx.builtin_op.as_deref() {
+                Some(BuiltinOp::Arrays(op)) if op.star_fits(&x) => op.apply(py, &x),
+                _ => star_call(py, func, &x),
+            };
+            let result = wrap_error(py, result, ctx.name, ctx.source_location, Some(&x))?;
             if let Some(t) = t {
                 profiling::record_node(ctx.node_id, t.elapsed(), 1, 1);
             }
@@ -571,13 +569,11 @@ pub(crate) fn apply_logic_batch(
             let t = prof_start(profiling);
             let mut output = items;
             for x in &mut output {
-                *x = wrap_error(
-                    py,
-                    star_call(py, func, x),
-                    ctx.name,
-                    ctx.source_location,
-                    Some(&*x),
-                )?;
+                let result = match ctx.builtin_op.as_deref() {
+                    Some(BuiltinOp::Arrays(op)) if op.star_fits(x) => op.apply(py, x),
+                    _ => star_call(py, func, x),
+                };
+                *x = wrap_error(py, result, ctx.name, ctx.source_location, Some(&*x))?;
             }
             if let Some(t) = t {
                 profiling::record_node(ctx.node_id, t.elapsed(), items_in, output.len() as u64);

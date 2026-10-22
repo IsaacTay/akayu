@@ -284,6 +284,10 @@ pub enum BuiltinOp {
     /// and floats; the boxed op is the fallback (see `numeric`).
     Numeric(Box<crate::numeric::NumProgram>, Box<BuiltinOp>),
 
+    /// A numpy expression run with numpy's own loops on small float64
+    /// arrays, and what runs for an item it doesn't fit (see `arrays`).
+    Arrays(Box<crate::arrays::ArrayOp>),
+
     // --- sink(func) patterns ---
     /// sink(lst.append) on an exact list: PyList_Append, no method call
     ListAppend(Py<PyAny>),

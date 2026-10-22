@@ -537,6 +537,7 @@ impl Stream {
         // (source isn't in all_nodes since collect_all_nodes starts from downstreams)
         self.cached_vectorcall = extract_vectorcall_for_logic(py, &self.logic);
 
+        let numpy = crate::arrays::numpy_imported(py);
         for node_py in all_nodes {
             let mut node = node_py.borrow_mut(py);
 
@@ -544,7 +545,11 @@ impl Stream {
             // A current eager op is what the analysis would find again: it
             // depends only on the code.
             node.builtin_op = match node.builtin_op.take().as_deref() {
-                Some(BuiltinOp::Eager(eager)) if eager.current() => Some(Arc::clone(&eager.op)),
+                // (An eager op has no numpy program: with numpy imported,
+                // the analysis may have one, so it is looked up again.)
+                Some(BuiltinOp::Eager(eager)) if eager.current() && !numpy => {
+                    Some(Arc::clone(&eager.op))
+                }
                 _ => detect_builtin_for_logic(py, &mut node.logic),
             };
 
@@ -1097,6 +1102,11 @@ fn pure_item_op(op: &BuiltinOp) -> bool {
         | BuiltinOp::BinOpOf(_, a, b)
         | BuiltinOp::CompareOf(_, a, b) => pure_item_op(a) && pure_item_op(b),
         BuiltinOp::Negate(inner) | BuiltinOp::Numeric(_, inner) => pure_item_op(inner),
+        // The program has no effects; the function it falls back to may.
+        BuiltinOp::Arrays(op) => match &op.fallback {
+            crate::arrays::Fallback::Op(inner) => pure_item_op(inner),
+            _ => false,
+        },
         // compile() replaces an eager op with its op; one still here calls
         // the function once its code is replaced.
         BuiltinOp::Eager(_)

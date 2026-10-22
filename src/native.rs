@@ -124,6 +124,17 @@ pub(crate) fn binary_op(
     unsafe { Bound::from_owned_ptr_or_err(py, result) }.map(Bound::unbind)
 }
 
+/// A numpy program is for arrays: anything else goes on to the map's
+/// ordinary op. Out of line, so that apply_builtin stays as it was for the
+/// ops it runs most.
+#[inline(never)]
+fn apply_arrays(py: Python, arrays: &crate::arrays::ArrayOp, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
+    match arrays.op_for(x) {
+        Some(op) => apply_builtin(py, op, x),
+        None => arrays.apply(py, x),
+    }
+}
+
 /// `-x`, `+x`, `~x` or `abs(x)` through the number protocol, as the bytecode
 /// and builtin do.
 pub(crate) fn unary_op(py: Python, op: UnaryOp, x: &Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -288,6 +299,7 @@ pub(crate) fn apply_builtin(py: Python, op: &BuiltinOp, x: &Py<PyAny>) -> PyResu
             Some(v) => Ok(v),
             None => apply_builtin(py, generic, x),
         },
+        BuiltinOp::Arrays(arrays) => apply_arrays(py, arrays, x),
         // The comparison's own result, as `x < c` gives it: not
         // RichCompareBool, which treats identical objects as equal and turns
         // any result (a numpy array, a query expression) into a bool.

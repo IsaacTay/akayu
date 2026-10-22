@@ -193,6 +193,65 @@ exactly Python's; whatever the machine version can't do identically (bools, inte
 bits or overflowing them, division by zero, `**`, float `//` and `%`, bit operations on floats,
 negative shift counts, int/float mixes beyond 2\*\*53) takes the ordinary path for that item.
 
+## numpy Expressions
+
+numpy costs a few hundred nanoseconds to a few microseconds per call whatever the size of the
+arrays: it checks for overrides, resolves dtypes, sets up a loop and allocates the result. On a
+3-vector or a 3×3 matrix that is nearly all of a map's time. After `compile()`, a `map()` or
+`starmap()` function made of numpy operations on its arguments runs them natively on small
+float64 arrays:
+
+- `+ - * /` and `-a` on arrays, numpy float64 and float scalars and numeric constants, and `@`
+- `.T`, indexing by constants (`r[1, 0]`, `r[1]`, `r[:, 2]`, `r[2, :]`), `.reshape(3, 3)`, and
+  `.tobytes()` as the last step
+- `np.linalg.norm(a)`, `np.trace(a)`, `np.clip(a, lo, hi)`, `np.frombuffer(b)`, and numpy's float
+  ufuncs of one or two arguments (`np.sqrt`, `np.degrees`, `np.arccos`, `np.arctan2`, `np.hypot`,
+  `np.maximum`, `np.exp`, `np.log`, ...)
+- `starmap()` functions of a tuple's items: `starmap(lambda a, b: a.T @ b)`
+
+<!--pytest.mark.skip-->
+
+```python
+calibrated = rotations.map(lambda r: C @ r)
+relative = pairs.starmap(lambda a, b: a.T @ b)
+angle = rotations.map(lambda r: np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0)))
+packed = pairs.starmap(
+    lambda a, b: (np.frombuffer(a).reshape(3, 3).T @ np.frombuffer(b).reshape(3, 3)).tobytes()
+)
+```
+
+Each step runs numpy's own inner loop, the one numpy itself picks on the machine (BLAS for `@`
+and norms included), on the arrays where they are. Intermediate results stay in buffers, and only
+the result becomes a Python object. So results are numpy's exactly: the values, the type (a numpy
+float64 where numpy gives one), the shape and memory order, and for a view (`r[:, 2]`, `r.T`) its
+base and flags.
+
+Time per item, one item at a time, compiled (numpy 2.4 on a Ryzen 7 PRO 4750G):
+
+| Function                                                         |  Called | Native |
+| ---------------------------------------------------------------- | ------: | -----: |
+| `lambda r: C @ r`                                                | 1753 ns | 496 ns |
+| `lambda a, b: a.T @ b` (starmap)                                 | 1956 ns | 461 ns |
+| `lambda v: v * dt`                                               | 1058 ns | 234 ns |
+| `lambda v: np.linalg.norm(v)`                                    | 2060 ns |  63 ns |
+| `lambda v: np.clip(v, -1.0, 1.0)`                                | 3645 ns | 258 ns |
+| `lambda r: np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0))` | 8298 ns | 284 ns |
+| `lambda b: np.frombuffer(b).reshape(3, 3)`                       | 1031 ns | 356 ns |
+
+Most of what remains for an array result is making the ndarray.
+
+An item runs the function instead (or, for a function with another native form, like `x * 2` on
+numbers, that form) when it isn't an exact ndarray of float64 with 1 or 2 dimensions and at most
+16 elements (aligned, no negative strides), a numpy float64, a float, or bytes for `np.frombuffer`;
+when shapes would need broadcasting beyond an array and a scalar, or two 2-D operands are in
+different memory orders; and whenever a step raises a floating-point error (overflow, an invalid
+value, division by zero, underflow), so that numpy warns or raises as `np.errstate` says. Graphs
+that aren't compiled call the function. Constants (`C` above) are read like other values from
+globals and closures: once, at `compile()`, the same array, so changes to its contents show.
+
+The loops come from `ufunc._get_strided_loop`, the hook numpy keeps for numba. On a numpy whose C
+API differs from numpy 2's, the functions run as before.
+
 ## Proven Fast Paths
 
 Some checks are only needed when the graph could be used in a way `compile()` can rule out:

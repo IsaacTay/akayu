@@ -250,6 +250,7 @@ together with the quick tests and the documentation checks; run it before submit
     - `native.rs`: the native operations compile() runs instead of calling recognised functions.
     - `optimization.rs`, `builtin.rs`: `compile()`: chain fusion and fast paths for simple lambdas. `optimize_topology_full()` lists the passes in order; debug builds check the graph's links after them (`assert_graph_consistent`), so a rewrite that forgets one panics in the tests.
     - `numeric.rs`: unboxed int/float arithmetic and comparisons for runs of numeric steps.
+    - `arrays.rs`: numpy expressions on small float64 arrays, run with numpy's own inner loops (the analyzer's `_analyze_arrays` translates them). `tests/numpy_native_fuzzer.py` checks them against numpy.
     - `call.rs`: calling functions with extra bound arguments (`map(f, *args, **kwargs)`) natively.
     - `node.rs`: the node and builtin-operation types.
     - `gc.rs`: garbage-collection support, so stream graphs are freed.

@@ -12,6 +12,7 @@
 use pyo3::prelude::*;
 
 // Module declarations
+mod arrays;
 mod builtin;
 mod call;
 mod combinators;

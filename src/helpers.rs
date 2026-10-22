@@ -48,6 +48,7 @@ define_py_helper!(OPERATOR_ATTRGETTER, get_operator_attrgetter);
 define_py_helper!(PROFILER_CLASS, get_profiler_class);
 define_py_helper!(ANALYZE_FOR_COMPILE, get_analyze_for_compile);
 define_py_helper!(WHY_PYTHON, get_why_python);
+define_py_helper!(ANALYZE_STAR, get_analyze_star);
 
 pub(crate) fn resolve_stream_name(
     stream_name: Option<String>,
@@ -448,6 +449,9 @@ pub fn init_helpers(py: Python, helpers_code: &str) -> PyResult<()> {
 
     let why_python = helpers_module.getattr("_why_python")?;
     let _ = WHY_PYTHON.set(why_python.unbind());
+
+    let analyze_star = helpers_module.getattr("_analyze_star_for_compile")?;
+    let _ = ANALYZE_STAR.set(analyze_star.unbind());
 
     // Cache builtin references for fast-path detection
     let builtins = py.import("builtins")?;

@@ -68,6 +68,13 @@ fn visit_builtin(op: &BuiltinOp, visit: &PyVisit<'_>) -> Result<(), PyTraverseEr
         }
         // The program holds only unboxed numbers.
         BuiltinOp::Numeric(_, generic) => visit_builtin(generic, visit),
+        BuiltinOp::Arrays(op) => {
+            op.objects().try_for_each(|obj| visit.call(obj))?;
+            match &op.fallback {
+                crate::arrays::Fallback::Op(op) => visit_builtin(op, visit),
+                _ => Ok(()),
+            }
+        }
         BuiltinOp::Eager(eager) => {
             let EagerOp { func, code, op } = eager;
             visit.call(func)?;

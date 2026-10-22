@@ -10,6 +10,7 @@ import warnings
 import weakref
 from types import BuiltinFunctionType as _BuiltinFunctionType
 from types import FunctionType as _FunctionType
+from types import ModuleType as _ModuleType
 
 _NOISE_OPCODES = frozenset(
     {
@@ -829,6 +830,232 @@ def _operator(op, arg, left, right):
     return ("binop2" if op == "BINARY_OP" else "compare2", arg, left, right)
 
 
+# --- numpy expressions (src/arrays.rs) ---
+# A lambda made of numpy operations on its arguments also translates into a
+# program that src/arrays.rs runs with numpy's own loops on small float64
+# arrays: a tuple of ops, each (name, *parameters, *operands). An operand is
+# ("s",), the value an earlier op left on the stack, ("arg", i), ("num", f)
+# for a float or int constant (a Python scalar), or ("obj", value) for a
+# constant ndarray or numpy float64. The ops: "+", "-", "*", "/" and "@" (a,
+# b), "neg", "T", "norm", "trace", "frombuffer" and "tobytes" (the last op)
+# (a), "clip" (a, lo, hi), ("index", key, a), ("reshape", shape, a) and
+# ("ufunc", name, *operands) for any ufunc src/arrays.rs has a loop for.
+
+_MAX_ARRAY_INSTRUCTIONS = 48
+_ARRAY_OPERATORS = frozenset(("+", "-", "*", "/", "@"))
+# numpy's functions with ops, by their number of arguments.
+_ARRAY_FUNCTION_ARGS = {"norm": 1, "trace": 1, "clip": 3, "frombuffer": 1}
+_array_functions = (None, {})  # (the numpy module, {function: op name})
+
+
+def _numpy_functions(np):
+    """numpy's functions (not ufuncs) that have ops, by object."""
+    global _array_functions  # noqa: PLW0603 - a cache for the numpy module
+    if _array_functions[0] is not np:
+        try:
+            table = {np.linalg.norm: "norm", np.trace: "trace", np.clip: "clip", np.frombuffer: "frombuffer"}
+        except AttributeError:
+            table = {}
+        _array_functions = (np, table)
+    return _array_functions[1]
+
+
+def _array_operand(entry, np):
+    """A stack entry of _analyze_arrays as an operand (see above), or None."""
+    if entry[0] in ("s", "arg"):
+        return entry
+    if entry[0] != "ct":
+        return None
+    value = entry[1]
+    kind = type(value)
+    if kind is float:
+        return ("num", value)
+    if kind is int and abs(value) <= 2**53:
+        return ("num", float(value))
+    if kind is np.float64 or kind is np.ndarray:
+        return ("obj", value)
+    return None
+
+
+def _full_slice(key):
+    return type(key) is slice and key.start is None and key.stop is None and key.step is None
+
+
+def _array_key(key):
+    """An index the ops take: a[i], a[i, j], a[:, j], a[i, :] or a[:]."""
+    if type(key) is int:
+        return ("int", key)
+    if _full_slice(key):
+        return ("all",)
+    if type(key) is tuple and len(key) == 2:
+        i, j = key
+        if type(i) is int and type(j) is int:
+            return ("pair", i, j)
+        if _full_slice(i) and type(j) is int:
+            return ("col", j)
+        if type(i) is int and _full_slice(j):
+            return ("row", i)
+    return None
+
+
+def _array_call(callee, args, np):
+    """The op for a call of `callee` with `args` (stack entries), or None."""
+    if callee[0] == "meth":
+        _, name, receiver = callee
+        if name == "reshape":
+            if len(args) == 1 and args[0][0] == "ct" and type(args[0][1]) is tuple:
+                shape = args[0][1]
+            else:
+                shape = tuple(entry[1] if entry[0] == "ct" else None for entry in args)
+            if 1 <= len(shape) <= 2 and all(type(d) is int for d in shape):
+                return ("reshape", shape, receiver)
+            return None
+        return ("tobytes", receiver) if name == "tobytes" and not args else None
+    if callee[0] != "fn":
+        return None
+    if all(entry[0] == "ct" and type(entry[1]) is int for entry in args):
+        return None  # ints alone: numpy's int loop, not the float64 one
+    operands = [_array_operand(entry, np) for entry in args]
+    if None in operands:
+        return None
+    func = callee[1]
+    if type(func) is np.ufunc:
+        return ("ufunc", func.__name__, *operands) if func.nout == 1 and func.nin == len(args) else None
+    try:
+        name = _numpy_functions(np).get(func)
+    except TypeError:  # unhashable
+        return None
+    if name is None or _ARRAY_FUNCTION_ARGS[name] != len(args):
+        return None
+    return (name, *operands)
+
+
+def _analyze_arrays(func, code, ctx, nargs):
+    """The numpy expression of its first `nargs` arguments `func` returns, as
+    a program for src/arrays.rs (see above), or None.
+
+    The bytecode runs abstractly: each stack entry is a value an op computes
+    ("s",), an argument ("arg", i), a constant ("ct", value), a module or
+    function ("fn", value), or a method of a value ("meth", name, operand),
+    and each instruction becomes an op or is resolved now."""
+    np = sys.modules.get("numpy")
+    if np is None:
+        return None  # nothing can be an ndarray
+    instrs = _clean_instructions(func)
+    if instrs is None or len(instrs) > _MAX_ARRAY_INSTRUCTIONS:
+        return None
+    found = _Bindings(func)
+    program = _translate_arrays(code, instrs, nargs, np, found)
+    if program is not None:
+        # The values it was translated from decide whether a cached result
+        # applies to another function. Without a program they don't: a
+        # cache that keeps them (a user's function) would keep them alive.
+        ctx.deps.extend(found.deps)
+    return program
+
+
+def _translate_arrays(code, instrs, nargs, np, ctx):
+    """_analyze_arrays' translation of `instrs` (values resolved into `ctx`)."""
+    params = code.co_varnames[: code.co_argcount]
+    stack, ops = [], []
+    for op, av in instrs:
+        if op in ("LOAD_FAST", "LOAD_FAST_LOAD_FAST"):
+            names = (av,) if op == "LOAD_FAST" else (code.co_varnames[av >> 4], code.co_varnames[av & 15])
+            for name in names:
+                if name not in params:
+                    return None
+                i = params.index(name)
+                if i < nargs:
+                    stack.append(("arg", i))
+                    continue
+                value = _resolve_value(("LOAD_DEFAULT", name), ctx)  # a defaulted parameter
+                if value is _UNRESOLVABLE:
+                    return None
+                stack.append(("ct", value))
+        elif op == "LOAD_CONST":
+            stack.append(("ct", av))
+        elif op in ("LOAD_GLOBAL", "LOAD_DEREF"):
+            value = _resolve_value((op, av), ctx)
+            if value is _UNRESOLVABLE:
+                return None
+            stack.append(("fn" if isinstance(value, _ModuleType) or callable(value) else "ct", value))
+        elif op == "LOAD_ATTR" and stack:
+            entry = stack.pop()
+            if entry[0] == "fn" and isinstance(entry[1], _ModuleType):
+                # numpy's function or submodule (np.linalg.norm); no other
+                # module's attributes are looked up here.
+                name = getattr(entry[1], "__name__", None)
+                if type(name) is not str or not (name == "numpy" or name.startswith("numpy.")):
+                    return None
+                value = getattr(entry[1], av, _UNRESOLVABLE)
+                if value is _UNRESOLVABLE:
+                    return None
+                stack.append(("fn", value))
+                continue
+            operand = _array_operand(entry, np)
+            if operand is None or operand[0] == "num":
+                return None
+            if av == "T":
+                ops.append(("T", operand))
+                stack.append(("s",))
+            else:
+                stack.append(("meth", av, operand))
+        elif op in ("BINARY_OP", "UNARY_NEGATIVE", "BINARY_SUBSCR"):
+            arity = 1 if op == "UNARY_NEGATIVE" else 2
+            if len(stack) < arity or (op == "BINARY_OP" and av not in _ARRAY_OPERATORS):
+                return None
+            last = stack.pop()
+            a = _array_operand(stack.pop(), np) if arity == 2 else _array_operand(last, np)
+            if op == "BINARY_SUBSCR":
+                key = _array_key(last[1]) if last[0] == "ct" else None
+                if key is None or a is None or a[0] == "num":
+                    return None
+                ops.append(("index", key, a))
+            elif op == "UNARY_NEGATIVE":
+                if a is None or a[0] == "num":
+                    return None
+                ops.append(("neg", a))
+            else:
+                b = _array_operand(last, np)
+                if a is None or b is None or (a[0] == "num" and b[0] == "num"):
+                    return None
+                ops.append((av, a, b))
+            stack.append(("s",))
+        elif op in ("BUILD_SLICE", "BUILD_TUPLE"):
+            parts = stack[len(stack) - av :]
+            if not 1 <= av <= len(stack) or any(entry[0] != "ct" for entry in parts):
+                return None
+            del stack[len(stack) - av :]
+            values = tuple(entry[1] for entry in parts)
+            stack.append(("ct", slice(*values) if op == "BUILD_SLICE" else values))
+        elif op == "CALL" and av < len(stack):
+            args = stack[len(stack) - av :]
+            del stack[len(stack) - av :]
+            new = _array_call(stack.pop(), args, np)
+            if new is None:
+                return None
+            ops.append(new)
+            stack.append(("s",))
+        else:
+            return None
+    if stack != [("s",)] or any(op[0] == "tobytes" for op in ops[:-1]):
+        return None
+    return tuple(ops)
+
+
+def _analyze_star_for_compile(func):
+    """compile()'s analysis of a starmap function: (number of arguments,
+    program) for a numpy expression of them (see _analyze_arrays), or None."""
+    if not _ANALYZER_ON or type(func) is not _FunctionType or "numpy" not in sys.modules:
+        return None
+    code = func.__code__
+    nargs = code.co_argcount
+    if nargs < 1 or not _takes(func, code, nargs):
+        return None
+    program = _analyze_arrays(func, code, _Bindings(func), nargs)
+    return None if program is None else (nargs, program)
+
+
 # Flags for bail-out checks
 _CO_GENERATOR = 0x20
 _CO_COROUTINE = 0x100
@@ -861,7 +1088,7 @@ _MAX_PINNED_ITEMS = 64
 def _pinnable(value):
     """Whether a cached result may keep `value` alive (see above)."""
     kind = type(value)
-    if kind in _PINNABLE_TYPES or isinstance(value, type):
+    if kind in _PINNABLE_TYPES or isinstance(value, (type, _ModuleType)):
         return True
     if kind is _FunctionType:  # a module-level function, not a closure over data
         return value.__closure__ is None
@@ -899,7 +1126,19 @@ def _analyze_lambda(func):
       ("negate", inner_tuple),
       ("and", left_tuple, right_tuple), ("or", left_tuple, right_tuple),
       ("unwrap", resolved_callable)
+
+    compile() also asks for a numpy program (see _analyze_function).
     """
+    result = _analyze_function(func)
+    if type(result) is tuple and result[0] == "arrays":
+        return result[1]
+    return result
+
+
+def _analyze_function(func):
+    """_analyze_lambda's result, or ("arrays", that result, program) for a
+    function that also has a numpy program (see _analyze_arrays): the
+    program runs for ndarrays, the result for anything else."""
     # Only plain Python functions: a bound method's code also has __code__,
     # but its first parameter is `self`, not the item.
     if type(func) is not _FunctionType:
@@ -911,6 +1150,11 @@ def _analyze_lambda(func):
             return result
     ctx = _Bindings(func)
     result = _analyze_code(func, code, ctx)
+    if _takes(func, code, 1):
+        # For ndarrays, a numpy program too (the result stays for anything else).
+        program = _analyze_arrays(func, code, ctx, 1)
+        if program is not None:
+            result = ("arrays", result, program)
     _remember(results, tuple(ctx.deps), result)
     return result
 
@@ -932,7 +1176,7 @@ def _analyze_for_compile(func, accumulate):
     if accumulate:
         result, cache = _analyze_accumulate(func), _accumulate_cache
     else:
-        result, cache = _analyze_lambda(func), _analysis_cache
+        result, cache = _analyze_function(func), _analysis_cache
     kept = [deps for deps, r in _cached_results(code, cache) if r is result]
     code_only = any(not deps for deps in kept)
     return result, code_only, is_lambda, bool(kept)
@@ -974,16 +1218,22 @@ def _bind_defaults(instrs, code):
     return out
 
 
+def _takes(func, code, nargs):
+    """Whether a node calling `func` with `nargs` arguments calls its plain
+    body: further positional parameters are fine if they all have defaults
+    (the `lambda x, k=k:` idiom for capturing a loop variable), as a node
+    calls with `nargs` arguments, so they are constants."""
+    extra = code.co_argcount - nargs
+    if extra < 0 or extra > len(getattr(func, "__defaults__", None) or ()) or code.co_kwonlyargcount:
+        return False
+    flags = code.co_flags
+    return not flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS)
+
+
 def _analyze_code(func, code, ctx):
     """Uncached body of _analyze_lambda."""
-    # One item parameter. Further positional parameters are fine if they all
-    # have defaults (the `lambda x, k=k:` idiom for capturing a loop variable):
-    # a node calls with one argument, so they are constants.
-    extra = code.co_argcount - 1
-    if extra < 0 or extra > len(getattr(func, "__defaults__", None) or ()) or code.co_kwonlyargcount:
-        return None
-    flags = code.co_flags
-    if flags & (_CO_GENERATOR | _CO_COROUTINE | _CO_ASYNC_GENERATOR | _CO_VARARGS | _CO_VARKEYWORDS):
+    # One item parameter (see _takes).
+    if not _takes(func, code, 1):
         return None
 
     # Pre-filter: reject obviously complex bytecodes before expensive disassembly

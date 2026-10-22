@@ -8,12 +8,14 @@ use pyo3::types::{
 use std::sync::Arc;
 
 use crate::Stream;
+use crate::arrays::{ArrayOp, Fallback, Program};
 use crate::helpers::{
-    InternTable, get_analyze_for_compile, get_builtin_abs, get_builtin_bool, get_builtin_float,
-    get_builtin_frozenset, get_builtin_int, get_builtin_isinstance, get_builtin_len,
-    get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str, get_builtin_tuple,
-    get_builtin_type, get_operator_attrgetter, get_operator_is, get_operator_is_not,
-    get_operator_itemgetter, get_operator_not, get_operator_truth, get_why_python,
+    InternTable, get_analyze_for_compile, get_analyze_star, get_builtin_abs, get_builtin_bool,
+    get_builtin_float, get_builtin_frozenset, get_builtin_int, get_builtin_isinstance,
+    get_builtin_len, get_builtin_list, get_builtin_print, get_builtin_set, get_builtin_str,
+    get_builtin_tuple, get_builtin_type, get_operator_attrgetter, get_operator_is,
+    get_operator_is_not, get_operator_itemgetter, get_operator_not, get_operator_truth,
+    get_why_python,
 };
 use crate::node::{BinaryOp, BuiltinOp, CompareOp, EagerOp, MethodCall, NodeLogic, UnaryOp};
 
@@ -358,10 +360,13 @@ pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> 
     else {
         return None;
     };
+    // Without its numpy program: before compile(), arrays run as Python, and
+    // nothing else pays for telling them apart.
+    let (result, _) = split_arrays(result.bind(py));
     Some(Arc::new(BuiltinOp::Eager(EagerOp {
         func: func.clone_ref(py),
         code,
-        op: parse_cached(py, &result, kept)?,
+        op: parse_cached(py, &result.unbind(), kept)?,
     })))
 }
 
@@ -417,7 +422,18 @@ fn find_why_python(py: Python, logic: &NodeLogic, name: &str, compiled: bool) ->
 /// (for `_why_python`).
 #[pyfunction]
 fn has_native_form(func: Bound<'_, PyAny>) -> bool {
-    analyze_to_op(func.py(), &func.unbind()).is_some()
+    let py = func.py();
+    let func = func.unbind();
+    if analyze_to_op(py, &func).is_some() {
+        return true;
+    }
+    // A map that only has a numpy program.
+    let Some(result) = analysis(py, &func, false).and_then(|a| a.result) else {
+        return false;
+    };
+    split_arrays(result.bind(py))
+        .1
+        .is_some_and(|ops| Program::parse(py, 1, &ops).is_some())
 }
 
 /// What `analyze_function` found for a function.
@@ -515,9 +531,24 @@ fn parse_cached(py: Python, result: &Py<PyAny>, kept: bool) -> Option<Arc<Builti
         return Some(op);
     }
     // Parsed without the lock: parsing calls into Python, which could need it.
-    let op = parse_analysis_tuple(py, result.bind(py))?;
-    let op = Arc::new(match crate::numeric::NumProgram::from_op(py, &op) {
-        Some(program) if program.worth_alone() => {
+    let (tree, arrays) = split_arrays(result.bind(py));
+    let op = parse_analysis_tuple(py, &tree)?;
+    let numeric = crate::numeric::NumProgram::from_op(py, &op);
+    // A numpy program runs for arrays, behind the fast path for numbers:
+    // which then runs even for one step, so that numbers don't pay for the
+    // check for arrays.
+    let (op, numbers_first) = match arrays.and_then(|ops| Program::parse(py, 1, &ops)) {
+        Some(program) => (
+            BuiltinOp::Arrays(Box::new(ArrayOp {
+                program,
+                fallback: Fallback::Op(Box::new(op)),
+            })),
+            true,
+        ),
+        None => (op, false),
+    };
+    let op = Arc::new(match numeric {
+        Some(program) if program.worth_alone() || numbers_first => {
             BuiltinOp::Numeric(Box::new(program), Box::new(op))
         }
         _ => op,
@@ -527,6 +558,40 @@ fn parse_cached(py: Python, result: &Py<PyAny>, kept: bool) -> Option<Arc<Builti
     }
     let in_use = |held: &Py<PyAny>| held.get_refcnt(py) > 1;
     Some(PARSED.insert(key, result.clone_ref(py), op, in_use))
+}
+
+/// An analysis result and the numpy program the analyzer translated the
+/// function into, if any: `("arrays", result, program)` (see
+/// `_analyze_function`).
+fn split_arrays<'py>(result: &Bound<'py, PyAny>) -> (Bound<'py, PyAny>, Option<Bound<'py, PyAny>>) {
+    // The tag's bytes, not a Python comparison: this runs for every analysis.
+    let is_arrays = |tag: Bound<'_, PyAny>| {
+        tag.cast::<PyString>()
+            .is_ok_and(|tag| tag.to_str().is_ok_and(|tag| tag == "arrays"))
+    };
+    if let Ok(tuple) = result.cast::<PyTuple>()
+        && tuple.len() == 3
+        && tuple.get_item(0).is_ok_and(is_arrays)
+        && let (Ok(tree), Ok(program)) = (tuple.get_item(1), tuple.get_item(2))
+    {
+        return (tree, Some(program));
+    }
+    (result.clone(), None)
+}
+
+/// A map's numpy program with the function itself as the fallback: when the
+/// function has no other native form (not shared between graphs, as the
+/// function is this node's).
+fn arrays_calling(
+    py: Python,
+    arrays: Option<Bound<'_, PyAny>>,
+    func: &Py<PyAny>,
+) -> Option<Arc<BuiltinOp>> {
+    let program = Program::parse(py, 1, &arrays?)?;
+    Some(Arc::new(BuiltinOp::Arrays(Box::new(ArrayOp {
+        program,
+        fallback: Fallback::Call(func.clone_ref(py)),
+    }))))
 }
 
 /// Detect builtin fast-path for a Map function via identity checks only.
@@ -616,16 +681,22 @@ fn detect_map_builtin_with_unwrap(py: Python, func: &mut Py<PyAny>) -> Option<Ar
     // Fallback: analyze lambda bytecode
     let analysis = analysis(py, func, false)?;
     let result = analysis.result?;
-    let bound = result.bind(py);
-    let tuple = bound.cast::<PyTuple>().ok()?;
+    let (tree, arrays) = split_arrays(result.bind(py));
+    if tree.is_none() {
+        return arrays_calling(py, arrays, func);
+    }
+    let tuple = tree.cast::<PyTuple>().ok()?;
     let tag: String = tuple.get_item(0).ok()?.extract().ok()?;
     if tag == "unwrap" {
-        // Replace func with the resolved callable — no BuiltinOp needed
+        // Replace func with the resolved callable — no BuiltinOp needed,
+        // unless numpy can run it (then the callable is the fallback)
         let resolved = tuple.get_item(1).ok()?.unbind();
         *func = resolved;
-        return None;
+        return arrays_calling(py, arrays, func);
     }
-    parse_cached(py, &result, analysis.kept)
+    // A result with no op of its own (a call on a module, `np.degrees(x)`)
+    // still has its numpy program.
+    parse_cached(py, &result, analysis.kept).or_else(|| arrays_calling(py, arrays, func))
 }
 
 /// Detect builtin fast-path for a Filter predicate.
@@ -683,6 +754,7 @@ pub(crate) fn detect_builtin_for_logic(
 ) -> Option<Arc<BuiltinOp>> {
     match logic {
         NodeLogic::Map { func } => detect_map_builtin_with_unwrap(py, func),
+        NodeLogic::StarMap { func } => detect_starmap_builtin(py, func),
         NodeLogic::Filter { predicate } => detect_filter_builtin(py, predicate),
         NodeLogic::ChunkBy(chunk) => detect_filter_builtin(py, &chunk.predicate),
         NodeLogic::ExtractBetween(_) => None,
@@ -694,6 +766,31 @@ pub(crate) fn detect_builtin_for_logic(
         } => detect_accumulate_builtin(py, func).map(Arc::new),
         _ => None,
     }
+}
+
+/// A starmap function's native form: a numpy program of its arguments (see
+/// `_analyze_star_for_compile`), with the function for the items it doesn't
+/// fit.
+fn detect_starmap_builtin(py: Python, func: &Py<PyAny>) -> Option<Arc<BuiltinOp>> {
+    if INTERRUPTED.with(|i| i.borrow().is_some()) {
+        return None;
+    }
+    let answer = match get_analyze_star().ok()?.call1(py, (func,)) {
+        Ok(answer) => answer,
+        Err(e) => {
+            // As in `analysis`: a Ctrl+C is the user's.
+            if !e.is_instance_of::<pyo3::exceptions::PyException>(py) {
+                INTERRUPTED.with(|i| *i.borrow_mut() = Some(e));
+            }
+            return None;
+        }
+    };
+    let (nargs, ops): (usize, Bound<'_, PyAny>) = answer.bind(py).extract().ok()?;
+    let program = Program::parse(py, nargs, &ops)?;
+    Some(Arc::new(BuiltinOp::Arrays(Box::new(ArrayOp {
+        program,
+        fallback: Fallback::StarCall(func.clone_ref(py)),
+    }))))
 }
 
 /// Native form of an accumulate function: `acc <op> x`, `acc <op> const`,
