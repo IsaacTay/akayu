@@ -175,6 +175,65 @@ def outcome(call, inputs):
     return describe(result, inputs), [(w.category.__name__, str(w.message)) for w in caught]
 
 
+def _at(values, offset):
+    """A copy of 1-D `values` starting `offset` bytes past a 64-byte boundary."""
+    buf = np.empty(values.size + 16)
+    start = ((offset - buf.ctypes.data) % 64) // 8
+    a = buf[start : start + values.size]
+    a[:] = values
+    return a
+
+
+def _blas_varies():
+    """Whether this numpy's BLAS gives different bits for the same product of
+    the same values at different addresses (Apple's Accelerate on Intel Macs
+    does): numpy's own @ and norms then differ from call to call, as its
+    temporaries land wherever the allocator puts them."""
+    rng = np.random.default_rng(0)
+    m = rng.standard_normal((3, 3))
+    for _ in range(300):
+        n = int(rng.integers(3, 17))
+        v = rng.standard_normal(n) * 10.0 ** rng.integers(-8, 9, n)
+        dots = {_at(v, off).dot(_at(v, off)).tobytes() for off in (0, 16, 32, 48)}
+        products = {(m @ _at(v[:3], off)).tobytes() for off in (0, 16, 32, 48)}
+        if len(dots) > 1 or len(products) > 1:
+            return True
+    return False
+
+
+BLAS_VARIES = _blas_varies()
+
+
+def _floats_near(a, b):
+    """float64 bytes equal but for one ulp, or a NaN's sign and payload."""
+    if len(a) != len(b) or len(a) % 8:
+        return False
+    x, y = np.frombuffer(a), np.frombuffer(b)
+    nan = np.isnan(x)
+    if not np.array_equal(nan, np.isnan(y)):
+        return False
+    x, y = x[~nan], y[~nan]
+    ulps = np.abs(x.view(np.int64) - y.view(np.int64))
+    return bool(np.all((np.signbit(x) == np.signbit(y)) & (ulps <= 1)))
+
+
+def near(a, b):
+    """Outcomes the same but for float bits numpy's BLAS itself varies in."""
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, (tuple, list)):
+        return len(a) == len(b) and all(near(x, y) for x, y in zip(a, b, strict=True))
+    if isinstance(a, bytes):
+        return a == b or _floats_near(a, b)
+    return a == b
+
+
+def same_outcome(got, want, src):
+    """Outcomes equal: exactly, but where numpy's own results vary (see
+    `_blas_varies`) for BLAS's ops, @ and norms, within that variation."""
+    return got == want or (BLAS_VARIES and ("@" in src or "norm" in src) and near(got, want))
+
+
 def expr_mismatches(src, items, nargs):
     """Where compiled akayu and Python disagree on the expression `src`."""
     params = "x, y" if nargs == 2 else "x"
@@ -194,7 +253,7 @@ def expr_mismatches(src, items, nargs):
             return out[0]
 
         got = outcome(run, args)
-        if got != want:
+        if not same_outcome(got, want, src):
             found.append(f"lambda {params}: {src} on {args!r}:\n  python {want}\n  akayu  {got}")
     return found
 

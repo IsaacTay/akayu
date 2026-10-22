@@ -12,6 +12,7 @@ a C runtime function Wine lacks.
 """
 
 import gc
+import inspect
 import itertools
 import warnings
 import weakref
@@ -24,7 +25,7 @@ if UNDER_WINE:
 
 import numpy as np
 from akayu._helpers import _analyze_function, _analyze_star_for_compile
-from numpy_native_fuzzer import CHUNK, SEEDS, describe, mismatches, outcome
+from numpy_native_fuzzer import CHUNK, SEEDS, describe, mismatches, outcome, same_outcome
 
 import akayu
 
@@ -94,7 +95,8 @@ def test_each_form_runs_natively_with_numpys_results(f, items, star):
     out = []
     ran = calls_during(lambda: out.extend(results(f, items, star)), f)
     assert ran == 0
-    assert described(out, items, star) == described(expected(f, items, star), items, star)
+    got, want = described(out, items, star), described(expected(f, items, star), items, star)
+    assert same_outcome(got, want, inspect.getsource(f))
 
 
 def test_views_have_numpys_bases():

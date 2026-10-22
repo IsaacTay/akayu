@@ -224,7 +224,9 @@ Each step runs numpy's own inner loop, the one numpy itself picks on the machine
 and norms included), on the arrays where they are. Intermediate results stay in buffers, and only
 the result becomes a Python object. So results are numpy's exactly: the values, the type (a numpy
 float64 where numpy gives one), the shape and memory order, and for a view (`r[:, 2]`, `r.T`) its
-base and flags.
+base and flags. (A BLAS can make `@` and norms depend on where the arrays sit in memory, as Apple's
+Accelerate does on Intel Macs: numpy's own results then vary in the last bit from call to call,
+and akayu's are among them.)
 
 Time per item, one item at a time, compiled (numpy 2.4 on a Ryzen 7 PRO 4750G):
 

@@ -21,8 +21,10 @@
   float64 arrays: `C @ r`, `a.T @ b`, `v * dt`, `np.linalg.norm(v)`,
   `np.arccos(np.clip((np.trace(r) - 1) / 2, -1, 1))`, `np.frombuffer(b).reshape(3, 3)` and the
   like run numpy's own inner loops without numpy's cost per call: 2 to 30 times faster per item
-  on 3×3 matrices and 3-vectors. Results, warnings and errors are numpy's exactly, and anything else runs the
-  function as before (see "numpy Expressions" in the compile optimizations docs).
+  on 3×3 matrices and 3-vectors. Results, warnings and errors are numpy's exactly (where numpy's
+  BLAS varies in the last bit with memory alignment, as on Intel Macs, among those numpy gives),
+  and anything else runs the function as before (see "numpy Expressions" in the compile
+  optimizations docs).
 
 ### Fixed
 
