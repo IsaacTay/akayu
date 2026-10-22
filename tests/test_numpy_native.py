@@ -14,6 +14,7 @@ a C runtime function Wine lacks.
 import gc
 import inspect
 import itertools
+import re
 import warnings
 import weakref
 
@@ -249,13 +250,32 @@ def test_analysis_leaves_other_expressions_to_python():
     assert _analyze_star_for_compile(lambda a, b: a.T @ b) is not None
 
 
-def test_explain_says_native():
+def explain_tags(compile_):
     s = akayu.Stream()
-    s.map(lambda r: np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0))).starmap(lambda a, b: a @ b).sink(print)
+    s.map(lambda r: np.arccos(np.clip((np.trace(r) - 1) / 2, -1.0, 1.0))).map(lambda r: r * DT).map(
+        lambda r: r**2
+    ).starmap(lambda a, b: a @ b).sink(print)
+    if compile_:
+        s.compile()
+    lines = s.explain().splitlines()[3:7]
+    return [re.fullmatch(r".*?test_numpy_native\.py:\d+  (.*?)(?:  +chain \d+)?", line)[1] for line in lines]
+
+
+def test_explain_tags_what_runs_numpys_loops():
+    # numpy calls and @: numpy's loops; arithmetic with a float: numpy's loops
+    # for arrays too, but no more numpy code than int code; ** isn't one.
+    assert explain_tags(True) == ["native, numpy", "native", "native", "native, numpy"]
+    later = "Python until compile()"
+    assert explain_tags(False) == [later, later, "native", later]
+
+
+def test_the_profile_report_tags_them_too():
+    s = akayu.Stream()
+    s.map(lambda r: C @ r).sink(lambda _: None)
     s.compile()
-    lines = str(s.explain()).splitlines()
-    assert any("map(<lambda>)" in line and "native" in line for line in lines)
-    assert any("starmap(<lambda>)" in line and "native" in line for line in lines)
+    with s.profile() as p:
+        s.emit(np.eye(3))
+    assert [n["how"] for n in p.report.to_dict()["nodes"]][1] == "native, numpy"
 
 
 def test_uncompiled_graphs_run_the_function():

@@ -407,12 +407,26 @@ pub struct Program {
     /// from other items quickly.
     ndarray: *mut ffi::PyTypeObject,
     float64: *mut ffi::PyTypeObject,
+    /// More than arithmetic with Python numbers: a numpy call, `@`, `.T`, an
+    /// index, an array constant... (see `has_numpy_program`).
+    numpy: bool,
 }
 
 // SAFETY: `ndarray` is a static type object; the rest is Python objects
 // used with the GIL held.
 unsafe impl Send for Program {}
 unsafe impl Sync for Program {}
+
+/// Whether `op` (a node's) runs a numpy program that does more than
+/// arithmetic with Python numbers, for explain()'s "native, numpy": `x * 2`
+/// has one too, for arrays, but is no more numpy code than it is int code.
+pub(crate) fn has_numpy_program(op: &BuiltinOp) -> bool {
+    match op {
+        BuiltinOp::Arrays(arrays) => arrays.program.numpy,
+        BuiltinOp::Numeric(_, inner) => has_numpy_program(inner),
+        _ => false,
+    }
+}
 
 /// A program, and what runs when an item doesn't fit it.
 pub struct ArrayOp {
@@ -580,12 +594,17 @@ impl Program {
                 nargs: expected as u8,
             });
         }
+        let numpy = !objs.is_empty()
+            || parsed
+                .iter()
+                .any(|op| !matches!(op.kind, Kind::Arith(_) | Kind::Neg));
         (depth == 1).then(|| Program {
             nargs: nargs as u8,
             ops: parsed.into_boxed_slice(),
             objs: objs.into_boxed_slice(),
             ndarray: np.ndarray,
             float64: np.float64,
+            numpy,
         })
     }
 

@@ -372,8 +372,9 @@ pub(crate) fn eager_op(py: Python, logic: &NodeLogic) -> Option<Arc<BuiltinOp>> 
 
 /// Why a map, filter or chunk_by node's function runs as Python, for
 /// explain(): "until compile()" in a graph not compiled yet whose function
-/// compile() would run natively; otherwise `_why_python`'s phrase. "" for
-/// other nodes, and when there's nothing to add.
+/// compile() would run natively; otherwise `_why_python`'s phrase. A starmap
+/// says "until compile()" or nothing; "" for other nodes, and when there's
+/// nothing to add.
 pub(crate) fn why_python(
     py: Python,
     logic: &NodeLogic,
@@ -393,6 +394,15 @@ fn find_why_python(py: Python, logic: &NodeLogic, name: &str, compiled: bool) ->
     let func = match logic {
         NodeLogic::Map { func } | NodeLogic::Filter { predicate: func } => func,
         NodeLogic::ChunkBy(chunk) => &chunk.predicate,
+        // Its only native form is a numpy program, which compile() adds.
+        NodeLogic::StarMap { func } => {
+            let later = !compiled && detect_starmap_builtin(py, func).is_some();
+            return Ok(if later {
+                "until compile()".to_string()
+            } else {
+                String::new()
+            });
+        }
         _ => return Ok(String::new()),
     };
     if !compiled {

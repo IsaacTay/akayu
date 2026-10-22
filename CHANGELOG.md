@@ -24,7 +24,7 @@
   on 3×3 matrices and 3-vectors. Results, warnings and errors are numpy's exactly (where numpy's
   BLAS varies in the last bit with memory alignment, as on Intel Macs, among those numpy gives),
   and anything else runs the function as before (see "numpy Expressions" in the compile
-  optimizations docs).
+  optimizations docs). `explain()` tags these functions `native, numpy`.
 
 ### Fixed
 

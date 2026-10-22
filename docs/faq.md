@@ -64,7 +64,8 @@ processed = source.map(lambda x: x * 2, stream_name="double")
 
 `explain()` lists the graph, a line per node, with where it was built and how its work runs:
 `Python` (your function is called), `native` (akayu runs the lambda or builtin itself),
-`native, unboxed` (arithmetic run on machine numbers) or `threads` (`par()`, `prefetch()`). After
+`native, unboxed` (arithmetic run on machine numbers), `native, numpy` (numpy expressions run with
+numpy's own loops) or `threads` (`par()`, `prefetch()`). After
 `compile()` it also shows which nodes were merged into one loop (`chain 1`, ...). A map or filter
 that runs as Python says why, when it can tell: `Python: calls lookup()`, `Python: 2 statements`,
 `Python until compile()`:

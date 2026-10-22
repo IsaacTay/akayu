@@ -251,6 +251,11 @@ value, division by zero, underflow), so that numpy warns or raises as `np.errsta
 that aren't compiled call the function. Constants (`C` above) are read like other values from
 globals and closures: once, at `compile()`, the same array, so changes to its contents show.
 
+[`explain()`](#seeing-what-compile-did) tags these maps and starmaps `native, numpy`. Arithmetic
+with Python numbers alone (`v * dt`) also runs numpy's loops on arrays, but is tagged `native`, as
+it is numpy code no more than int code. A plain `native` on numpy code (`r ** 2`, `r.sum()`) only
+means the lambda isn't called: numpy's cost per call stays.
+
 The loops come from `ufunc._get_strided_loop`, the hook numpy keeps for numba. On a numpy whose C
 API differs from numpy 2's, the functions run as before.
 
@@ -347,8 +352,9 @@ print(child.compiled)   # True (all reachable nodes are compiled)
 ## Seeing What `compile()` Did
 
 `explain()` shows how each node runs, a line per node: which chain it was merged into, and whether
-its function is called (`Python`), run [natively](#native-operations) (`native`), or run with the
-arithmetic around it on machine numbers (`native, unboxed`):
+its function is called (`Python`), run [natively](#native-operations) (`native`), run with the
+arithmetic around it on machine numbers (`native, unboxed`), or run with numpy's own loops
+([`native, numpy`](#numpy-expressions)):
 
 ```python
 import akayu

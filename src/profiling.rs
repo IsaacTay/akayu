@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 
 use crate::Stream;
-use crate::node::NodeLogic;
+use crate::node::{BuiltinOp, NodeLogic};
 
 // ---------------------------------------------------------------------------
 // Per-node profile data (accumulated in thread-local during execution)
@@ -204,10 +204,11 @@ struct ReportNode {
 /// How a node's work runs, as the reports tag it: "Python" (its function is
 /// called), "native" (a Rust operation: an analyzed lambda or builtin, or a
 /// sink's emit/flush shortcut), "native, unboxed" (one of a run of numeric
-/// steps that compile() runs together on machine numbers), "threads"
-/// (par(), and prefetch()'s "Python, threads"), or nothing (no function:
-/// union, collect, ...).
-fn how(logic: &NodeLogic, native: bool, unboxed: bool) -> &'static str {
+/// steps that compile() runs together on machine numbers), "native, numpy"
+/// (numpy's own loops on small arrays: `arrays`), "threads" (par(), and
+/// prefetch()'s "Python, threads"), or nothing (no function: union,
+/// collect, ...).
+fn how(logic: &NodeLogic, native: Native, unboxed: bool) -> &'static str {
     match logic {
         NodeLogic::Map { .. }
         | NodeLogic::Filter { .. }
@@ -218,8 +219,9 @@ fn how(logic: &NodeLogic, native: bool, unboxed: bool) -> &'static str {
         | NodeLogic::ChunkBy(_)
         | NodeLogic::ExtractBetween(_) => match (native, unboxed) {
             (_, true) => "native, unboxed",
-            (true, false) => "native",
-            (false, false) => "Python",
+            (Native::Numpy, false) => "native, numpy",
+            (Native::Yes, false) => "native",
+            (Native::No, false) => "Python",
         },
         NodeLogic::Prefetched { .. } => "Python, threads",
         NodeLogic::Parallel => "threads",
@@ -227,9 +229,30 @@ fn how(logic: &NodeLogic, native: bool, unboxed: bool) -> &'static str {
     }
 }
 
-/// Whether an uncompiled node's work is a Rust operation (see `how`).
-fn native(node: &Stream) -> bool {
-    node.builtin_op.is_some() || node.flush_target.is_some() || node.emit_target.is_some()
+/// Whether a node's or step's work is a Rust operation (see `how`).
+#[derive(Clone, Copy)]
+enum Native {
+    No,
+    Yes,
+    Numpy,
+}
+
+impl Native {
+    fn of(op: Option<&BuiltinOp>, shortcut: bool) -> Self {
+        match op {
+            Some(op) if crate::arrays::has_numpy_program(op) => Self::Numpy,
+            Some(_) => Self::Yes,
+            None if shortcut => Self::Yes,
+            None => Self::No,
+        }
+    }
+}
+
+fn native(node: &Stream) -> Native {
+    Native::of(
+        node.builtin_op.as_deref(),
+        node.flush_target.is_some() || node.emit_target.is_some(),
+    )
 }
 
 /// Profiling report for a pipeline execution.
@@ -343,9 +366,10 @@ pub fn build_report(
                 }
                 let unboxed = unboxed_left > 0;
                 unboxed_left = unboxed_left.saturating_sub(1);
-                let native = step.builtin_op.is_some()
-                    || step.flush_target.is_some()
-                    || step.emit_target.is_some();
+                let native = Native::of(
+                    step.builtin_op.as_deref(),
+                    step.flush_target.is_some() || step.emit_target.is_some(),
+                );
                 let step_profile = data.get(&step.node_id);
                 let step_how = how(&step.logic, native, unboxed);
                 let step_node = ReportNode {
